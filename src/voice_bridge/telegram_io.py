@@ -25,6 +25,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -268,7 +269,11 @@ class TelegramIO:
                 return
 
         new_markup = build_panel_markup(self.controls.snapshot())
-        await query.edit_message_reply_markup(reply_markup=new_markup)
+        try:
+            await query.edit_message_reply_markup(reply_markup=new_markup)
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
 
     # --- text slash commands --------------------------------------------
     async def _cmd_projects(

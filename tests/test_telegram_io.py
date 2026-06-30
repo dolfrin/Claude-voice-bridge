@@ -5,6 +5,7 @@ and run()/stop() lifecycle. All telegram network I/O is mocked."""
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telegram.error import BadRequest
 
 from voice_bridge.config import Config
 from voice_bridge.telegram_io import (
@@ -290,6 +291,26 @@ async def test_callback_toggle_off_project_calls_controls():
     assert ("toggle", "qwing", False) in controls.calls
     query.answer.assert_awaited()
     query.edit_message_reply_markup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_callback_ignores_not_modified_markup_error():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "tog:0"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock(
+        side_effect=BadRequest("Message is not modified")
+    )
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("toggle", "qwing", False) in controls.calls
+    query.answer.assert_awaited_once()
 
 
 @pytest.mark.asyncio
