@@ -7,6 +7,7 @@ from voice_bridge.config import Config
 from voice_bridge.tts import TTSBackend, available_voices, get_tts
 from voice_bridge.tts.openai_tts import OpenAITTS
 from voice_bridge.tts.piper_tts import PiperTTS
+from voice_bridge.tts.together_tts import TogetherTTS
 
 
 def _cfg(**overrides) -> Config:
@@ -15,6 +16,9 @@ def _cfg(**overrides) -> Config:
         telegram_allowed_user_id=1,
         anthropic_api_key="a",
         openai_api_key="sk-test",
+        together_api_key="tk-test",
+        together_tts_model="cartesia/sonic",
+        together_tts_language="lt",
         tts_backend="openai",
         tts_voice="alloy",
         piper_voice_path="/opt/piper/lt_LT.onnx",
@@ -40,6 +44,12 @@ def test_available_voices_piper_returns_default_list():
     assert voices == ["default"]
 
 
+def test_available_voices_together_lists_known_voices():
+    voices = available_voices("together")
+    assert "friendly sidekick" in voices
+    assert "af_bella" in voices
+
+
 def test_available_voices_unknown_backend_returns_empty():
     assert available_voices("bogus") == []
 
@@ -47,6 +57,7 @@ def test_available_voices_unknown_backend_returns_empty():
 def test_ttsbackend_is_runtime_checkable_protocol():
     assert isinstance(OpenAITTS("sk-test"), TTSBackend)
     assert isinstance(PiperTTS("/opt/piper/lt_LT.onnx"), TTSBackend)
+    assert isinstance(TogetherTTS("tk-test"), TTSBackend)
     assert not isinstance(object(), TTSBackend)
 
 
@@ -61,6 +72,19 @@ def test_get_tts_piper_builds_piper_backend():
     backend = get_tts(_cfg(tts_backend="piper", piper_voice_path="/v/lt.onnx"))
     assert isinstance(backend, PiperTTS)
     assert backend._voice_path == "/v/lt.onnx"
+
+
+def test_get_tts_together_builds_together_backend():
+    backend = get_tts(_cfg(
+        tts_backend="together",
+        together_api_key="tk-xyz",
+        together_tts_model="cartesia/sonic",
+        together_tts_language="lt",
+    ))
+    assert isinstance(backend, TogetherTTS)
+    assert backend._api_key == "tk-xyz"
+    assert backend._model == "cartesia/sonic"
+    assert backend._language == "lt"
 
 
 def test_get_tts_unknown_backend_raises():
@@ -116,6 +140,52 @@ async def test_openai_synthesize_runs_off_the_event_loop():
             await backend.synthesize("labas", "echo")
 
     assert calls.get("used_executor") is True
+
+
+@pytest.mark.asyncio
+async def test_together_synthesize_requests_mp3_and_converts_to_opus(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"MP3"
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = request.data
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("voice_bridge.tts.together_tts.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "voice_bridge.tts.together_tts._mp3_to_ogg_opus",
+        AsyncMock(return_value=b"OggS-together-opus"),
+    )
+
+    backend = TogetherTTS("tk-abc", model="cartesia/sonic", language="lt")
+    out = await backend.synthesize("Labas, patikrinam balsą.", "friendly sidekick")
+
+    assert out == b"OggS-together-opus"
+    assert captured["url"] == "https://api.together.ai/v1/audio/speech"
+    assert captured["headers"]["Authorization"] == "Bearer tk-abc"
+    assert captured["timeout"] == 60
+    assert b'"model": "cartesia/sonic"' in captured["body"]
+    assert b'"voice": "friendly sidekick"' in captured["body"]
+    assert b'"language": "lt"' in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_together_synthesize_requires_api_key():
+    backend = TogetherTTS("")
+    with pytest.raises(RuntimeError, match="TOGETHER_API_KEY"):
+        await backend.synthesize("x", "friendly sidekick")
 
 
 def _fake_proc(stdout: bytes, stderr: bytes = b"", returncode: int = 0):

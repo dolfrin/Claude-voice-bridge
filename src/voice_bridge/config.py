@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import yaml
 
-_VALID_TTS_BACKENDS = {"openai", "piper"}
+_VALID_TTS_BACKENDS = {"openai", "piper", "together"}
 _VALID_AUTONOMY_MODES = {"full", "safe", "ask"}
 
 
@@ -18,6 +18,9 @@ class Config:
     telegram_allowed_user_id: int
     anthropic_api_key: str
     openai_api_key: str
+    together_api_key: str
+    together_tts_model: str
+    together_tts_language: str
     tts_backend: str
     tts_voice: str
     piper_voice_path: str
@@ -99,7 +102,13 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         telegram_bot_token=_require(env, "TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_id=_require_int(env, "TELEGRAM_ALLOWED_USER_ID"),
         anthropic_api_key=env.get("ANTHROPIC_API_KEY") or "",
-        openai_api_key=_require(env, "OPENAI_API_KEY"),
+        openai_api_key=(
+            _require(env, "OPENAI_API_KEY") if tts_backend == "openai"
+            else env.get("OPENAI_API_KEY") or ""
+        ),
+        together_api_key=env.get("TOGETHER_API_KEY") or "",
+        together_tts_model=env.get("TOGETHER_TTS_MODEL") or "cartesia/sonic",
+        together_tts_language=env.get("TOGETHER_TTS_LANGUAGE") or "lt",
         tts_backend=tts_backend,
         tts_voice=env.get("TTS_VOICE") or "alloy",
         piper_voice_path=env.get("PIPER_VOICE_PATH") or "",

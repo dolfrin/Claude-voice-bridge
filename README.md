@@ -30,7 +30,7 @@ Modules in `src/voice_bridge/`:
 | `sessions.py` | `SessionManager`: per-project Agent SDK session lifecycle |
 | `telegram_io.py` | Telegram bot: polling, `/panel` inline buttons, slash commands |
 | `stt.py` | `Transcriber`: faster-whisper speech-to-text |
-| `tts/` | Pluggable TTS: `openai_tts.py`, `piper_tts.py` |
+| `tts/` | Pluggable TTS: `openai_tts.py`, `piper_tts.py`, `together_tts.py` |
 | `sanitizer.py` | Strip code/paths/units from spoken text |
 | `approvals.py` | Approval flow for safe/ask autonomy modes |
 | `notify_tool.py` | In-process MCP tool called by agents to push updates |
@@ -64,9 +64,10 @@ These are declared in `pyproject.toml` and installed automatically by `pip insta
 
 ### API keys
 
-- An **Anthropic API key** (`sk-ant-...`) — the Agent SDK requires a real API key,
-  not a claude.ai login.
+- A local **Claude Code login**. `ANTHROPIC_API_KEY` is optional and only needed
+  if you intentionally want pay-per-token API billing.
 - An **OpenAI API key** (`sk-...`) — only if `TTS_BACKEND=openai`.
+- A **Together AI API key** — only if `TTS_BACKEND=together`.
 
 ### For Piper TTS (optional)
 
@@ -146,10 +147,13 @@ $EDITOR .env
 TELEGRAM_BOT_TOKEN=123456789:AA...
 TELEGRAM_ALLOWED_USER_ID=11223344
 
-# TTS: choose openai or piper
+# TTS: choose openai, piper, or together
 TTS_BACKEND=openai
 TTS_VOICE=alloy
 OPENAI_API_KEY=sk-...         # only needed if TTS_BACKEND=openai
+TOGETHER_API_KEY=             # only needed if TTS_BACKEND=together
+TOGETHER_TTS_MODEL=cartesia/sonic
+TOGETHER_TTS_LANGUAGE=lt
 
 # Optional: set only if you want Claude pay-per-token API billing.
 # Leave unset to use your local Claude Code subscription login.
@@ -177,7 +181,10 @@ All keys and their meaning:
 | `TELEGRAM_ALLOWED_USER_ID` | (required) | Your numeric Telegram user id (whitelist) |
 | `ANTHROPIC_API_KEY` | — | Optional; set only for pay-per-token API billing. Leave unset to use local Claude Code subscription login |
 | `OPENAI_API_KEY` | — | OpenAI key; required only for `TTS_BACKEND=openai` |
-| `TTS_BACKEND` | `openai` | `openai` or `piper` |
+| `TOGETHER_API_KEY` | — | Together AI key; required only for `TTS_BACKEND=together` |
+| `TOGETHER_TTS_MODEL` | `cartesia/sonic` | Together TTS model |
+| `TOGETHER_TTS_LANGUAGE` | `lt` | Together TTS language hint |
+| `TTS_BACKEND` | `openai` | `openai`, `piper`, or `together` |
 | `TTS_VOICE` | `alloy` | Voice name; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |
 | `PIPER_VOICE_PATH` | — | Absolute path to `.onnx` model; required for `piper` backend |
 | `WHISPER_MODEL` | `large-v3` | faster-whisper model name |
@@ -272,7 +279,7 @@ journalctl --user -u voice-bridge -f
 | `/status [project]` | Ask a project for a quick status update |
 | `/mode <full\|safe\|ask> [project]` | Set autonomy globally or per project |
 | `/voice list` / `/voice <name> [for <project>]` | List available voices / set TTS voice |
-| `/engine <openai\|piper>` | Switch TTS backend live (no restart needed) |
+| `/engine <openai\|piper\|together>` | Switch TTS backend live (no restart needed) |
 
 ### Reply routing
 
@@ -365,7 +372,7 @@ deployment good.
 - [ ] **Live mode/voice/engine switches (§14.4).** Send `/mode full qwing`, then
   `/mode safe qwing` — confirm behaviour changes. Send `/voice list`, then
   `/voice echo for qwing` — confirm the next voice message uses the new voice. Send
-  `/engine piper` then `/engine openai` — confirm the engine switches without a restart.
+  `/engine piper`, `/engine together`, then `/engine openai` — confirm the engine switches without a restart.
 - [ ] **Panel toggles + persistence (§14.5).** Send `/panel`. Tap a project's
   **ON/OFF** button — confirm an off project goes silent (no outbound, inbound replies
   to it are rejected with a short note). Tap **ALL OFF** then **ALL ON**. **Restart the

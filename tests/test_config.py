@@ -19,6 +19,9 @@ def _full_env() -> dict[str, str]:
         "TELEGRAM_ALLOWED_USER_ID": "42",
         "ANTHROPIC_API_KEY": "sk-ant-test",
         "OPENAI_API_KEY": "sk-openai-test",
+        "TOGETHER_API_KEY": "tk-test",
+        "TOGETHER_TTS_MODEL": "cartesia/sonic",
+        "TOGETHER_TTS_LANGUAGE": "lt",
         "TTS_BACKEND": "openai",
         "TTS_VOICE": "alloy",
         "PIPER_VOICE_PATH": "/opt/piper/lt.onnx",
@@ -39,6 +42,9 @@ def test_load_config_parses_all_fields_with_correct_types():
     assert isinstance(cfg.telegram_allowed_user_id, int)
     assert cfg.anthropic_api_key == "sk-ant-test"
     assert cfg.openai_api_key == "sk-openai-test"
+    assert cfg.together_api_key == "tk-test"
+    assert cfg.together_tts_model == "cartesia/sonic"
+    assert cfg.together_tts_language == "lt"
     assert cfg.tts_backend == "openai"
     assert cfg.tts_voice == "alloy"
     assert cfg.piper_voice_path == "/opt/piper/lt.onnx"
@@ -59,6 +65,9 @@ def test_load_config_applies_defaults_for_optional_keys():
     }
     cfg = load_config(env)
     assert cfg.anthropic_api_key == ""
+    assert cfg.together_api_key == ""
+    assert cfg.together_tts_model == "cartesia/sonic"
+    assert cfg.together_tts_language == "lt"
     assert cfg.tts_backend == "openai"
     assert cfg.tts_voice == "alloy"
     assert cfg.piper_voice_path == ""
@@ -100,6 +109,15 @@ def test_load_config_invalid_backend_raises_clear_error():
     with pytest.raises(ValueError) as exc:
         load_config(env)
     assert "TTS_BACKEND" in str(exc.value)
+
+
+def test_load_config_accepts_together_backend():
+    env = _full_env()
+    env["TTS_BACKEND"] = "together"
+    del env["OPENAI_API_KEY"]
+    cfg = load_config(env)
+    assert cfg.tts_backend == "together"
+    assert cfg.openai_api_key == ""
 
 
 def test_load_config_invalid_autonomy_raises_clear_error():

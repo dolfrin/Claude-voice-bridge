@@ -17,6 +17,21 @@ _OPENAI_VOICES = [
     "shimmer",
     "verse",
 ]
+_TOGETHER_VOICES = [
+    "friendly sidekick",
+    "laidback woman",
+    "tara",
+    "leah",
+    "jess",
+    "leo",
+    "dan",
+    "mia",
+    "zac",
+    "zoe",
+    "af_bella",
+    "af_heart",
+    "af_nova",
+]
 
 
 @runtime_checkable
@@ -39,6 +54,14 @@ def get_tts(cfg: Config) -> TTSBackend:
         from voice_bridge.tts.piper_tts import PiperTTS
 
         return PiperTTS(cfg.piper_voice_path)
+    if backend == "together":
+        from voice_bridge.tts.together_tts import TogetherTTS
+
+        return TogetherTTS(
+            cfg.together_api_key,
+            model=cfg.together_tts_model,
+            language=cfg.together_tts_language,
+        )
     raise ValueError(f"unknown TTS backend: {backend!r}")
 
 
@@ -48,4 +71,6 @@ def available_voices(backend: str) -> list[str]:
         return list(_OPENAI_VOICES)
     if backend == "piper":
         return ["default"]
+    if backend == "together":
+        return list(_TOGETHER_VOICES)
     return []

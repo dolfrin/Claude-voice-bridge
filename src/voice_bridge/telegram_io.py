@@ -61,7 +61,7 @@ class Controls(Protocol):
 
 
 _MODES = ["safe", "full", "ask"]
-_ENGINES = ["openai", "piper"]
+_ENGINES = ["openai", "piper", "together"]
 _BOT_COMMANDS = [
     BotCommand("panel", "Open project control panel"),
     BotCommand("projects", "List project state"),
@@ -200,9 +200,9 @@ def build_mode_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
 
 
 def build_voice_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
-    """Render explicit OpenAI voice choices for one project."""
+    """Render explicit voice choices for one project."""
     row = snapshot[idx]
-    voices = available_voices("openai")
+    voices = available_voices(row.get("engine", "openai"))
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(f"{row['project']} voice", callback_data=f"noop:{idx}")]
     ]
@@ -393,7 +393,7 @@ class TelegramIO:
                     return
                 await self.controls.set_mode(project, value)
             elif action == "vset":
-                if value not in available_voices("openai"):
+                if value not in available_voices(row.get("engine", "openai")):
                     return
                 await self.controls.set_voice(project, value)
             else:
@@ -477,7 +477,10 @@ class TelegramIO:
             return
         args = context.args
         if not args or args[0] == "list":
-            await msg.reply_text("voices: " + ", ".join(available_voices("openai")))
+            snapshot = self.controls.snapshot()
+            current = snapshot[0]["engine"] if snapshot else "openai"
+            engine = args[1] if len(args) >= 2 else current
+            await msg.reply_text("voices: " + ", ".join(available_voices(engine)))
             return
         voice = args[0]
         project = None
@@ -493,7 +496,7 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args or context.args[0] not in _ENGINES:
-            await msg.reply_text("usage: /engine <openai|piper>")
+            await msg.reply_text("usage: /engine <openai|piper|together>")
             return
         name = context.args[0]
         await self.controls.set_engine(name)
