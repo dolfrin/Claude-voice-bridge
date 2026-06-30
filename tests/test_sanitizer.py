@@ -326,3 +326,37 @@ def test_prepare_outbound_splits_on_first_separator_only():
     assert full == message
     assert spoken == "Antraštė."
     assert "Vidurys" not in spoken
+
+
+# --------------------------------------------------------------------------
+# Fix 1: bare ALL-CAPS SQL/DDL keywords stripped outside fenced blocks
+# --------------------------------------------------------------------------
+
+def test_to_spoken_strips_sql_keywords_outside_fence():
+    # Bare ALL-CAPS words of 4+ letters must be stripped even outside code fences.
+    text = "Paleidau ALTER TABLE users ir viskas veikia."
+    out = to_spoken(text)
+    assert "ALTER" not in out
+    assert "TABLE" not in out
+    assert "Paleidau" in out
+    assert "veikia" in out
+
+
+def test_to_spoken_preserves_three_letter_acronyms():
+    # 3-letter acronyms common in natural prose must survive (floor is 4 chars).
+    text = "API grąžino klaidą"
+    out = to_spoken(text)
+    assert "API" in out
+
+
+# --------------------------------------------------------------------------
+# Fix 2: e.g. / i.e. path-strip must not leave ",." artifact
+# --------------------------------------------------------------------------
+
+def test_to_spoken_no_comma_dot_artifact_from_eg():
+    # "e.g." is matched by _PATH (contains a dot extension); after removal
+    # the adjacent comma must not produce ",." in the output.
+    text = "Yra keletas būdų, e.g. šis metodas veikia."
+    out = to_spoken(text)
+    assert ",." not in out
+    assert ";." not in out

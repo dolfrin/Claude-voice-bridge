@@ -53,6 +53,12 @@ _PATH = re.compile(
 # A single all-caps word (like ALTER, TABLE) does NOT match — requires underscore.
 _CONSTANT = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 
+# Bare ALL-CAPS words of 4+ letters: SQL/DDL keywords, env vars, etc. that
+# appear outside fenced/inline code.  The 4-char floor preserves 3-letter
+# acronyms common in natural prose (API, URL, TTS, SQL, LT) while removing
+# ALTER, TABLE, SELECT, CREATE, INSERT, UPDATE, DELETE, COLUMN, etc.
+_ALLCAPS4 = re.compile(r"\b[A-Z]{4,}\b")
+
 # snake_case: lowercase/digit segments joined by underscores (load_config).
 _SNAKE = re.compile(r"\b[a-z0-9]+(?:_[a-z0-9]+)+\b")
 
@@ -90,6 +96,7 @@ def to_spoken(text: str, max_chars: int = 600) -> str:
     s = _UNIT.sub(" ", s)
     s = _PATH.sub(" ", s)
     s = _CONSTANT.sub(" ", s)
+    s = _ALLCAPS4.sub(" ", s)
     s = _SNAKE.sub(" ", s)
     s = _CAMEL.sub(" ", s)
     s = _LONE_SYMBOL.sub(" ", s)
@@ -99,6 +106,8 @@ def to_spoken(text: str, max_chars: int = 600) -> str:
 
     # Tidy spaces left before sentence punctuation by removed tokens.
     s = re.sub(r"\s+([.,!?;:])", r"\1", s)
+    # Collapse adjacent punctuation artifacts like ",." or ";." left by path/eg strips.
+    s = re.sub(r"[,;:]\s*\.", ".", s)
     s = _WS.sub(" ", s).strip()
 
     if len(s) > max_chars:
