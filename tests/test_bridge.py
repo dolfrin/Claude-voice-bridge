@@ -104,10 +104,11 @@ class FakeTelegram:
 
 
 class FakeProject:
-    def __init__(self, name, voice=None, autonomy=None):
+    def __init__(self, name, voice=None, autonomy=None, cwd=None):
         self.name = name
         self.voice = voice
         self.autonomy = autonomy
+        self.cwd = cwd or f"/tmp/{name}"
 
 
 class FakeSessions:
@@ -488,7 +489,8 @@ async def test_controls_snapshot_sync_exact_keys():
     assert isinstance(snap, list)
     for row in snap:
         assert set(row.keys()) == {
-            "project", "enabled", "mode", "voice", "engine", "last_active"
+            "project", "enabled", "mode", "voice", "engine", "last_active",
+            "cwd",
         }
     by_name = {r["project"]: r for r in snap}
     assert by_name["qwing"]["enabled"] is True

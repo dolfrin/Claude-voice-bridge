@@ -18,6 +18,7 @@ run-forever wait. ``stop()`` shuts the Application down.
 
 from __future__ import annotations
 
+import html
 from typing import Awaitable, Callable, Protocol
 
 from telegram import (
@@ -94,6 +95,55 @@ def parse_callback(data: str) -> tuple[str, str]:
     action = parts[0]
     index_str = parts[1] if len(parts) > 1 else ""
     return action, index_str
+
+
+def format_projects(snapshot: list[dict]) -> str:
+    """Render /projects as a scannable HTML summary."""
+    if not snapshot:
+        return "no projects"
+
+    lines: list[str] = []
+    for _idx, row in _project_list_rows(snapshot):
+        status = "\U0001F7E2" if row["enabled"] else "\u26AA"
+        active = " \u2B50" if row.get("last_active") else ""
+        project = html.escape(row["project"])
+        cwd = _friendly_path(row.get("cwd") or "")
+        path_part = html.escape(cwd) if cwd else "-"
+        settings = html.escape(
+            f"{row['mode']} · {row['voice']} · {row['engine']}"
+        )
+        lines.extend([
+            f"{status} <b>{project}</b>{active}",
+            f"  \U0001F4C1 {path_part} · {settings}",
+            "",
+        ])
+    return "\n".join(lines).strip()
+
+
+def build_projects_list_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
+    """Compact one-button-per-project picker for /projects."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, row in _project_list_rows(snapshot):
+        status = "\U0001F7E2" if row["enabled"] else "\u26AA"
+        active = " \u2B50" if row.get("last_active") else ""
+        rows.append([
+            InlineKeyboardButton(
+                f"{status} {row['project']}{active}",
+                callback_data=f"ptog:{idx}",
+            )
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _project_list_rows(snapshot: list[dict]) -> list[tuple[int, dict]]:
+    rows = list(enumerate(snapshot))
+    return sorted(rows, key=lambda item: (0 if item[1].get("last_active") else 1, item[0]))
+
+
+def _friendly_path(path: str) -> str:
+    if path.startswith("/home/home/"):
+        return "~/" + path[len("/home/home/"):]
+    return path
 
 
 def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
@@ -323,6 +373,15 @@ class TelegramIO:
 
             if action == "tog":
                 await self.controls.toggle(project, not row["enabled"])
+            elif action == "ptog":
+                await self.controls.toggle(project, not row["enabled"])
+                snap = self.controls.snapshot()
+                await self._edit_callback_text(
+                    query,
+                    format_projects(snap),
+                    build_projects_list_markup(snap),
+                )
+                return
             elif action == "mode":
                 await self._edit_callback_markup(query, build_mode_markup(snap_list, idx))
                 return
@@ -350,6 +409,19 @@ class TelegramIO:
             if "message is not modified" not in str(exc).lower():
                 raise
 
+    async def _edit_callback_text(
+        self, query, text: str, markup: InlineKeyboardMarkup
+    ) -> None:
+        try:
+            await query.edit_message_text(
+                text=text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
     # --- text slash commands --------------------------------------------
     async def _cmd_projects(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -357,15 +429,11 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        lines = []
-        for r in self.controls.snapshot():
-            state = "on" if r["enabled"] else "off"
-            star = " *" if r["last_active"] else ""
-            lines.append(
-                f"{r['project']}: {state} · {r['mode']} · "
-                f"{r['voice']} · {r['engine']}{star}"
-            )
-        await msg.reply_text("\n".join(lines) if lines else "no projects")
+        await msg.reply_text(
+            format_projects(self.controls.snapshot()),
+            parse_mode="HTML",
+            reply_markup=build_projects_list_markup(self.controls.snapshot()),
+        )
 
     async def _cmd_on(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

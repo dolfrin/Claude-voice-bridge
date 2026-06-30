@@ -12,7 +12,9 @@ from voice_bridge.telegram_io import (
     TelegramIO,
     build_mode_markup,
     build_panel_markup,
+    build_projects_list_markup,
     build_voice_markup,
+    format_projects,
     parse_callback,
 )
 
@@ -38,9 +40,11 @@ class FakeControls:
         self.calls = []
         self._snapshot = [
             {"project": "qwing", "enabled": True, "mode": "safe",
-             "voice": "alloy", "engine": "openai", "last_active": True},
+             "voice": "alloy", "engine": "openai", "last_active": True,
+             "cwd": "/home/home/Projects/WhisperX"},
             {"project": "othersapp", "enabled": False, "mode": "full",
-             "voice": "echo", "engine": "openai", "last_active": False},
+             "voice": "echo", "engine": "openai", "last_active": False,
+             "cwd": "/home/home/Projects/othersapp"},
         ]
 
     async def toggle(self, project, on):
@@ -269,6 +273,34 @@ def test_build_panel_markup_empty_snapshot():
         "allon", "alloff", "engine"]
 
 
+def test_format_projects_uses_status_path_and_last_active_first():
+    snap = [
+        {"project": "off", "enabled": False, "mode": "safe",
+         "voice": "marin", "engine": "openai", "last_active": False,
+         "cwd": "/home/home/Projects/off"},
+        {"project": "active", "enabled": True, "mode": "ask",
+         "voice": "echo", "engine": "openai", "last_active": True,
+         "cwd": "/home/home/Projects/active"},
+    ]
+
+    text = format_projects(snap)
+
+    assert text.index("<b>active</b>") < text.index("<b>off</b>")
+    assert "\U0001F7E2 <b>active</b> \u2B50" in text
+    assert "\u26AA <b>off</b>" in text
+    assert "\U0001F4C1 ~/Projects/active · ask · echo · openai" in text
+
+
+def test_build_projects_list_markup_uses_compact_toggle_buttons():
+    snap = FakeControls().snapshot()
+    markup = build_projects_list_markup(snap)
+    buttons = [row[0] for row in markup.inline_keyboard]
+
+    assert [button.callback_data for button in buttons] == ["ptog:0", "ptog:1"]
+    assert buttons[0].text == "\U0001F7E2 qwing \u2B50"
+    assert buttons[1].text == "\u26AA othersapp"
+
+
 def test_build_mode_markup_lists_explicit_modes():
     snap = FakeControls().snapshot()
     markup = build_mode_markup(snap, 0)
@@ -483,6 +515,26 @@ async def test_callback_all_on_and_engine_toggle():
 
 
 @pytest.mark.asyncio
+async def test_callback_projects_picker_toggles_and_redraws_list():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "ptog:1"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("toggle", "othersapp", True) in controls.calls
+    kwargs = query.edit_message_text.await_args.kwargs
+    assert kwargs["parse_mode"] == "HTML"
+    assert kwargs["reply_markup"].inline_keyboard[1][0].callback_data == "ptog:1"
+
+
+@pytest.mark.asyncio
 async def test_callback_from_non_whitelisted_user_is_ignored():
     controls = FakeControls()
     io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
@@ -609,8 +661,12 @@ async def test_cmd_projects_lists_snapshot():
     await io._cmd_projects(upd, make_ctx([]))
 
     sent = upd.message.reply_text.await_args.args[0]
-    assert "qwing" in sent and "othersapp" in sent
+    kwargs = upd.message.reply_text.await_args.kwargs
+    assert "<b>qwing</b>" in sent and "<b>othersapp</b>" in sent
     assert "safe" in sent and "alloy" in sent
+    assert "~/Projects/WhisperX" in sent
+    assert kwargs["parse_mode"] == "HTML"
+    assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "ptog:0"
 
 
 @pytest.mark.asyncio

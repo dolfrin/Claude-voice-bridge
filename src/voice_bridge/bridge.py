@@ -244,6 +244,7 @@ class _Controls:
                 "voice": voice,
                 "engine": self._cfg.tts_backend,
                 "last_active": last_active == name,
+                "cwd": getattr(proj, "cwd", "") if proj is not None else "",
             }
 
     def snapshot(self) -> list[dict]:
@@ -256,6 +257,7 @@ class _Controls:
                 "voice": row["voice"],
                 "engine": row["engine"],
                 "last_active": row["last_active"],
+                "cwd": row["cwd"],
             }
             for name, row in self._mirror.items()
         ]
