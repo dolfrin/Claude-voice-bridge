@@ -148,7 +148,7 @@ TELEGRAM_ALLOWED_USER_ID=11223344
 ANTHROPIC_API_KEY=sk-ant-...
 
 # TTS: choose openai or piper
-TTS_BACKEND=openai            # openai|piper
+TTS_BACKEND=openai
 TTS_VOICE=alloy
 OPENAI_API_KEY=sk-...         # only needed if TTS_BACKEND=openai
 
@@ -158,8 +158,8 @@ PIPER_VOICE_PATH=/opt/piper/lt_LT-....onnx
 # STT
 WHISPER_MODEL=large-v3        # downloads on first run
 
-# Autonomy
-AUTONOMY_MODE=safe            # full|safe|ask
+# Autonomy: full, safe, or ask
+AUTONOMY_MODE=safe
 APPROVAL_TIMEOUT=300          # seconds; auto-deny after this
 
 # State
