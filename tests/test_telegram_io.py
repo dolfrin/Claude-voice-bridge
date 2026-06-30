@@ -1,0 +1,639 @@
+"""TDD tests for voice_bridge.telegram_io — whitelist, inbound voice+text,
+outbound send_update/send_question, /panel control board, slash commands,
+and run()/stop() lifecycle. All telegram network I/O is mocked."""
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from voice_bridge.config import Config
+from voice_bridge.telegram_io import (
+    TelegramIO,
+    build_panel_markup,
+    parse_callback,
+)
+
+
+def make_cfg(allowed_id=42):
+    return Config(
+        telegram_bot_token="TESTTOKEN",
+        telegram_allowed_user_id=allowed_id,
+        anthropic_api_key="ak",
+        openai_api_key="ok",
+        tts_backend="openai",
+        tts_voice="nova",
+        piper_voice_path="/opt/piper/x.onnx",
+        whisper_model="large-v3",
+        autonomy_mode="safe",
+        approval_timeout=300,
+        db_path=":memory:",
+    )
+
+
+class FakeControls:
+    def __init__(self):
+        self.calls = []
+        self._snapshot = [
+            {"project": "qwing", "enabled": True, "mode": "safe",
+             "voice": "nova", "engine": "openai", "last_active": True},
+            {"project": "othersapp", "enabled": False, "mode": "full",
+             "voice": "echo", "engine": "openai", "last_active": False},
+        ]
+
+    async def toggle(self, project, on):
+        self.calls.append(("toggle", project, on))
+
+    async def set_mode(self, project, mode):
+        self.calls.append(("set_mode", project, mode))
+
+    async def set_voice(self, project, voice):
+        self.calls.append(("set_voice", project, voice))
+
+    async def set_engine(self, name):
+        self.calls.append(("set_engine", name))
+
+    def snapshot(self):
+        return self._snapshot
+
+
+def make_message(*, message_id=10, user_id=42, text=None, voice=None,
+                 reply_to=None):
+    msg = MagicMock()
+    msg.message_id = message_id
+    msg.from_user = MagicMock()
+    msg.from_user.id = user_id
+    msg.text = text
+    msg.voice = voice
+    msg.reply_to_message = (
+        MagicMock(message_id=reply_to) if reply_to is not None else None
+    )
+    return msg
+
+
+# --------------------------------------------------------------------------
+# inbound: whitelist + message routing
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_text_message_from_allowed_user_routes_to_callback():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    update = MagicMock()
+    update.message = make_message(message_id=11, user_id=42,
+                                  text="kaip sekasi", reply_to=7)
+    update.callback_query = None
+
+    await io._handle_text(update, MagicMock())
+
+    assert received == [{
+        "message_id": 11,
+        "reply_to": 7,
+        "text": "kaip sekasi",
+        "is_voice": False,
+        "audio": None,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_voice_message_downloads_bytes_and_marks_is_voice():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    voice_obj = MagicMock()
+    tg_file = AsyncMock()
+    tg_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"OGGDATA"))
+    voice_obj.get_file = AsyncMock(return_value=tg_file)
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    update = MagicMock()
+    update.message = make_message(message_id=12, user_id=42, voice=voice_obj,
+                                  reply_to=None)
+    update.callback_query = None
+
+    await io._handle_voice(update, MagicMock())
+
+    assert received == [{
+        "message_id": 12,
+        "reply_to": None,
+        "text": "",
+        "is_voice": True,
+        "audio": b"OGGDATA",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_non_whitelisted_user_is_ignored():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    io = TelegramIO(make_cfg(allowed_id=42), on_user_message, FakeControls())
+    update = MagicMock()
+    update.message = make_message(message_id=13, user_id=999, text="hello")
+    update.callback_query = None
+
+    await io._handle_text(update, MagicMock())
+
+    assert received == []
+
+
+@pytest.mark.asyncio
+async def test_non_whitelisted_voice_is_ignored_no_download():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    voice_obj = MagicMock()
+    voice_obj.get_file = AsyncMock()
+    io = TelegramIO(make_cfg(allowed_id=42), on_user_message, FakeControls())
+    update = MagicMock()
+    update.message = make_message(message_id=14, user_id=999, voice=voice_obj)
+    update.callback_query = None
+
+    await io._handle_voice(update, MagicMock())
+
+    assert received == []
+    voice_obj.get_file.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
+# outbound: send_update + send_question
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_send_update_sends_text_then_voice_and_returns_ids():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=100))
+    bot.send_voice = AsyncMock(return_value=MagicMock(message_id=101))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    ids = await io.send_update(
+        project="qwing", voice_label="nova",
+        text="Pushintas kodas\n---\n```py\nx=1\n```",
+        voice_bytes=b"OGGVOICE",
+    )
+
+    assert ids == [100, 101]
+    bot.send_message.assert_awaited_once()
+    sent_text = bot.send_message.await_args.kwargs["text"]
+    assert "qwing" in sent_text
+    assert "Pushintas kodas" in sent_text
+    bot.send_voice.assert_awaited_once()
+    assert bot.send_voice.await_args.kwargs["voice"] == b"OGGVOICE"
+
+
+@pytest.mark.asyncio
+async def test_send_update_text_only_when_no_voice_bytes():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=200))
+    bot.send_voice = AsyncMock()
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    ids = await io.send_update(
+        project="qwing", voice_label="nova",
+        text="tik tekstas", voice_bytes=None,
+    )
+
+    assert ids == [200]
+    bot.send_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_question_returns_message_id():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=300))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    mid = await io.send_question("qwing", "Allow git push?")
+
+    assert mid == 300
+    sent = bot.send_message.await_args.kwargs["text"]
+    assert "qwing" in sent and "Allow git push?" in sent
+
+
+# --------------------------------------------------------------------------
+# /panel render + callback dispatch
+# --------------------------------------------------------------------------
+def test_build_panel_markup_has_per_project_and_global_rows():
+    snap = FakeControls().snapshot()
+    markup = build_panel_markup(snap)
+    kb = markup.inline_keyboard
+
+    # two project rows + one global row
+    assert len(kb) == 3
+    # project row buttons carry the project name in their callback_data
+    toggle_btns = [b for row in kb for b in row
+                   if b.callback_data.startswith("toggle:")]
+    assert {b.callback_data for b in toggle_btns} == {
+        "toggle:qwing:", "toggle:othersapp:"}
+    # global row carries all-on/all-off/engine
+    last = kb[-1]
+    assert [b.callback_data for b in last] == ["allon::", "alloff::", "engine::"]
+
+
+def test_build_panel_markup_reflects_enabled_mode_voice_engine():
+    snap = FakeControls().snapshot()
+    markup = build_panel_markup(snap)
+    texts = [b.text for row in markup.inline_keyboard for b in row]
+    joined = " ".join(texts)
+    # ON for qwing (enabled), OFF for othersapp (disabled)
+    on_labels = [t for t in texts if t in ("ON", "OFF")]
+    assert "ON" in on_labels and "OFF" in on_labels
+    # modes / voices / engine surfaced
+    assert any("safe" in t for t in texts)
+    assert any("full" in t for t in texts)
+    assert any("nova" in t for t in texts)
+    assert any("echo" in t for t in texts)
+    assert "openai" in joined
+
+
+def test_build_panel_markup_empty_snapshot():
+    markup = build_panel_markup([])
+    # only the global row
+    assert len(markup.inline_keyboard) == 1
+    assert [b.callback_data for b in markup.inline_keyboard[0]] == [
+        "allon::", "alloff::", "engine::"]
+
+
+def test_parse_callback_splits_action_project_value():
+    assert parse_callback("toggle:qwing:") == ("toggle", "qwing", "")
+    assert parse_callback("mode:qwing:full") == ("mode", "qwing", "full")
+    assert parse_callback("allon::") == ("allon", "", "")
+
+
+@pytest.mark.asyncio
+async def test_callback_toggle_off_project_calls_controls():
+    controls = FakeControls()  # qwing currently enabled=True
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "toggle:qwing:"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("toggle", "qwing", False) in controls.calls
+    query.answer.assert_awaited()
+    query.edit_message_reply_markup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_callback_mode_cycles_to_next_mode():
+    controls = FakeControls()  # qwing mode == "safe"
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "mode:qwing:"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("set_mode", "qwing", "full") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_callback_voice_cycles_to_next_voice():
+    controls = FakeControls()  # qwing voice == "nova"
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "voice:qwing:"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    # nova -> shimmer (next after nova in the OpenAI voice list)
+    assert any(c[0] == "set_voice" and c[1] == "qwing" for c in controls.calls)
+
+
+@pytest.mark.asyncio
+async def test_callback_all_on_and_engine_toggle():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+
+    async def run_cb(data):
+        q = AsyncMock()
+        q.data = data
+        q.from_user = MagicMock(id=42)
+        q.answer = AsyncMock()
+        q.edit_message_reply_markup = AsyncMock()
+        upd = MagicMock()
+        upd.callback_query = q
+        await io._handle_callback(upd, MagicMock())
+
+    await run_cb("allon::")
+    await run_cb("alloff::")
+    await run_cb("engine::")  # current engine openai -> piper
+
+    assert ("toggle", None, True) in controls.calls
+    assert ("toggle", None, False) in controls.calls
+    assert ("set_engine", "piper") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_callback_from_non_whitelisted_user_is_ignored():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "toggle:qwing:"
+    query.from_user = MagicMock(id=999)
+    query.answer = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert controls.calls == []
+
+
+# --------------------------------------------------------------------------
+# /panel command renders markup
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_panel_replies_with_markup():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = MagicMock()
+    msg.from_user = MagicMock(id=42)
+    msg.reply_text = AsyncMock()
+    upd = MagicMock()
+    upd.message = msg
+    upd.callback_query = None
+
+    await io._cmd_panel(upd, MagicMock())
+
+    msg.reply_text.assert_awaited_once()
+    markup = msg.reply_text.await_args.kwargs["reply_markup"]
+    assert len(markup.inline_keyboard) == 3
+
+
+# --------------------------------------------------------------------------
+# text slash commands
+# --------------------------------------------------------------------------
+def make_cmd_update(text, user_id=42, message_id=50):
+    msg = MagicMock()
+    msg.message_id = message_id
+    msg.from_user = MagicMock(id=user_id)
+    msg.text = text
+    msg.reply_text = AsyncMock()
+    upd = MagicMock()
+    upd.message = msg
+    upd.callback_query = None
+    return upd
+
+
+def make_ctx(args):
+    ctx = MagicMock()
+    ctx.args = args
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_cmd_projects_lists_snapshot():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/projects")
+
+    await io._cmd_projects(upd, make_ctx([]))
+
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "qwing" in sent and "othersapp" in sent
+    assert "safe" in sent and "nova" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_on_with_project_calls_toggle_true():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/on qwing")
+
+    await io._cmd_on(upd, make_ctx(["qwing"]))
+
+    assert ("toggle", "qwing", True) in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_off_no_arg_is_global():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/off")
+
+    await io._cmd_off(upd, make_ctx([]))
+
+    assert ("toggle", None, False) in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_mode_sets_per_project():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/mode full qwing")
+
+    await io._cmd_mode(upd, make_ctx(["full", "qwing"]))
+
+    assert ("set_mode", "qwing", "full") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_mode_rejects_invalid_mode():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/mode bogus")
+
+    await io._cmd_mode(upd, make_ctx(["bogus"]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cmd_voice_list_replies_voices():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice list")
+
+    await io._cmd_voice(upd, make_ctx(["list"]))
+
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "nova" in sent and "echo" in sent
+    assert controls.calls == []  # listing must not mutate state
+
+
+@pytest.mark.asyncio
+async def test_cmd_voice_set_for_project():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice shimmer for qwing")
+
+    await io._cmd_voice(upd, make_ctx(["shimmer", "for", "qwing"]))
+
+    assert ("set_voice", "qwing", "shimmer") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_engine_switches_backend():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/engine piper")
+
+    await io._cmd_engine(upd, make_ctx(["piper"]))
+
+    assert ("set_engine", "piper") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_engine_rejects_invalid():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/engine bogus")
+
+    await io._cmd_engine(upd, make_ctx(["bogus"]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cmd_status_routes_into_on_user_message():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    upd = make_cmd_update("/status qwing", message_id=77)
+
+    await io._cmd_status(upd, make_ctx(["qwing"]))
+
+    assert len(received) == 1
+    assert received[0]["message_id"] == 77
+    assert received[0]["is_voice"] is False
+    assert "qwing" in received[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_cmd_rejects_non_whitelisted():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    upd = make_cmd_update("/on qwing", user_id=999)
+
+    await io._cmd_on(upd, make_ctx(["qwing"]))
+
+    assert controls.calls == []
+
+
+# --------------------------------------------------------------------------
+# run() / stop() lifecycle
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_run_builds_application_and_registers_handlers(monkeypatch):
+    import voice_bridge.telegram_io as mod
+
+    added = []
+    fake_app = MagicMock()
+    fake_app.add_handler = MagicMock(side_effect=lambda h: added.append(h))
+    fake_app.initialize = AsyncMock()
+    fake_app.start = AsyncMock()
+    fake_app.updater = MagicMock()
+    fake_app.updater.start_polling = AsyncMock()
+
+    fake_builder = MagicMock()
+    fake_builder.token.return_value = fake_builder
+    fake_builder.build.return_value = fake_app
+
+    monkeypatch.setattr(
+        mod.Application, "builder",
+        classmethod(lambda cls: fake_builder),
+    )
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    await io.run()
+
+    fake_builder.token.assert_called_once_with("TESTTOKEN")
+    assert io.app is fake_app
+    fake_app.initialize.assert_awaited_once()
+    fake_app.start.assert_awaited_once()
+    fake_app.updater.start_polling.assert_awaited_once()
+    # at least: panel, projects, on, off, mode, voice, engine, status,
+    # callback, text msg, voice msg  == 11 handlers
+    assert len(added) >= 11
+
+    cmd_names = set()
+    for h in added:
+        cmds = getattr(h, "commands", None)
+        if cmds:
+            cmd_names |= set(cmds)
+    assert {"panel", "projects", "on", "off",
+            "mode", "voice", "engine", "status"} <= cmd_names
+
+
+@pytest.mark.asyncio
+async def test_run_returns_without_blocking(monkeypatch):
+    """run() must return so bridge main() owns the run-forever wait (C3)."""
+    import voice_bridge.telegram_io as mod
+
+    fake_app = MagicMock()
+    fake_app.add_handler = MagicMock()
+    fake_app.initialize = AsyncMock()
+    fake_app.start = AsyncMock()
+    fake_app.updater = MagicMock()
+    fake_app.updater.start_polling = AsyncMock()
+
+    fake_builder = MagicMock()
+    fake_builder.token.return_value = fake_builder
+    fake_builder.build.return_value = fake_app
+    monkeypatch.setattr(
+        mod.Application, "builder",
+        classmethod(lambda cls: fake_builder),
+    )
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    # Should complete promptly (does not block forever).
+    await io.run()
+
+
+@pytest.mark.asyncio
+async def test_stop_shuts_down_application():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    fake_app = MagicMock()
+    fake_app.updater = MagicMock()
+    fake_app.updater.running = True
+    fake_app.updater.stop = AsyncMock()
+    fake_app.running = True
+    fake_app.stop = AsyncMock()
+    fake_app.shutdown = AsyncMock()
+    io.app = fake_app
+
+    await io.stop()
+
+    fake_app.updater.stop.assert_awaited_once()
+    fake_app.stop.assert_awaited_once()
+    fake_app.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_is_noop_when_never_run():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    # app is None; stop must not raise.
+    await io.stop()
