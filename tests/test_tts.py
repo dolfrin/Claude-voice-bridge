@@ -1,0 +1,185 @@
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from voice_bridge.config import Config
+from voice_bridge.tts import TTSBackend, available_voices, get_tts
+from voice_bridge.tts.openai_tts import OpenAITTS
+from voice_bridge.tts.piper_tts import PiperTTS
+
+
+def _cfg(**overrides) -> Config:
+    base = dict(
+        telegram_bot_token="t",
+        telegram_allowed_user_id=1,
+        anthropic_api_key="a",
+        openai_api_key="sk-test",
+        tts_backend="openai",
+        tts_voice="nova",
+        piper_voice_path="/opt/piper/lt_LT.onnx",
+        whisper_model="large-v3",
+        autonomy_mode="safe",
+        approval_timeout=300,
+        db_path=":memory:",
+    )
+    base.update(overrides)
+    return Config(**base)
+
+
+def test_available_voices_openai_lists_known_voices():
+    voices = available_voices("openai")
+    assert isinstance(voices, list)
+    assert "nova" in voices
+    assert "alloy" in voices
+    assert all(isinstance(v, str) for v in voices)
+
+
+def test_available_voices_piper_returns_default_list():
+    voices = available_voices("piper")
+    assert voices == ["default"]
+
+
+def test_available_voices_unknown_backend_returns_empty():
+    assert available_voices("bogus") == []
+
+
+def test_ttsbackend_is_runtime_checkable_protocol():
+    assert isinstance(OpenAITTS("sk-test"), TTSBackend)
+    assert isinstance(PiperTTS("/opt/piper/lt_LT.onnx"), TTSBackend)
+    assert not isinstance(object(), TTSBackend)
+
+
+def test_get_tts_openai_builds_openai_backend():
+    with patch("voice_bridge.tts.openai_tts.OpenAI") as mock_openai:
+        backend = get_tts(_cfg(tts_backend="openai", openai_api_key="sk-xyz"))
+    assert isinstance(backend, OpenAITTS)
+    mock_openai.assert_called_once_with(api_key="sk-xyz")
+
+
+def test_get_tts_piper_builds_piper_backend():
+    backend = get_tts(_cfg(tts_backend="piper", piper_voice_path="/v/lt.onnx"))
+    assert isinstance(backend, PiperTTS)
+    assert backend._voice_path == "/v/lt.onnx"
+
+
+def test_get_tts_unknown_backend_raises():
+    with pytest.raises(ValueError, match="unknown TTS backend"):
+        get_tts(_cfg(tts_backend="bogus"))
+
+
+@pytest.mark.asyncio
+async def test_openai_synthesize_requests_opus_and_returns_bytes():
+    fake_response = MagicMock()
+    fake_response.read.return_value = b"OggS-opus-bytes"
+
+    fake_client = MagicMock()
+    fake_client.audio.speech.create.return_value = fake_response
+
+    with patch("voice_bridge.tts.openai_tts.OpenAI", return_value=fake_client) as mock_openai:
+        backend = OpenAITTS("sk-abc")
+        out = await backend.synthesize("Sveiki, viskas gerai.", "nova")
+
+    assert out == b"OggS-opus-bytes"
+    mock_openai.assert_called_once_with(api_key="sk-abc")
+    fake_client.audio.speech.create.assert_called_once_with(
+        model="gpt-4o-mini-tts",
+        voice="nova",
+        input="Sveiki, viskas gerai.",
+        response_format="opus",
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_synthesize_runs_off_the_event_loop():
+    fake_response = MagicMock()
+    fake_response.read.return_value = b"x"
+    fake_client = MagicMock()
+    fake_client.audio.speech.create.return_value = fake_response
+
+    loop = asyncio.get_running_loop()
+    calls: dict = {}
+    _real_run_in_executor = loop.run_in_executor
+
+    def spy_executor(executor, func, *args):
+        calls["used_executor"] = True
+        return _real_run_in_executor(executor, func, *args)
+
+    with patch("voice_bridge.tts.openai_tts.OpenAI", return_value=fake_client):
+        backend = OpenAITTS("sk-abc")
+        with patch.object(loop, "run_in_executor", side_effect=spy_executor):
+            await backend.synthesize("labas", "echo")
+
+    assert calls.get("used_executor") is True
+
+
+def _fake_proc(stdout: bytes, stderr: bytes = b"", returncode: int = 0):
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.returncode = returncode
+    return proc
+
+
+@pytest.mark.asyncio
+async def test_piper_synthesize_pipes_pcm_through_ffmpeg_to_opus():
+    piper_proc = _fake_proc(stdout=b"RAWPCM")
+    ffmpeg_proc = _fake_proc(stdout=b"OggS-piper-opus")
+
+    created = []
+
+    async def fake_exec(*args, **kwargs):
+        created.append(args)
+        return piper_proc if args[0] == "piper" else ffmpeg_proc
+
+    with patch(
+        "voice_bridge.tts.piper_tts.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        backend = PiperTTS("/opt/piper/lt_LT.onnx")
+        out = await backend.synthesize("Sveiki", "default")
+
+    assert out == b"OggS-piper-opus"
+    # piper invoked with the configured model path
+    assert created[0][0] == "piper"
+    assert "/opt/piper/lt_LT.onnx" in created[0]
+    assert "--output-raw" in created[0]
+    # ffmpeg invoked to encode opus in an ogg container
+    assert created[1][0] == "ffmpeg"
+    assert "libopus" in created[1]
+    assert "ogg" in created[1]
+    # text fed to piper stdin; piper pcm fed to ffmpeg stdin
+    piper_proc.communicate.assert_awaited_once_with(b"Sveiki")
+    ffmpeg_proc.communicate.assert_awaited_once_with(b"RAWPCM")
+
+
+@pytest.mark.asyncio
+async def test_piper_synthesize_raises_when_piper_fails():
+    piper_proc = _fake_proc(stdout=b"", stderr=b"model missing", returncode=1)
+
+    async def fake_exec(*args, **kwargs):
+        return piper_proc
+
+    with patch(
+        "voice_bridge.tts.piper_tts.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        backend = PiperTTS("/bad.onnx")
+        with pytest.raises(RuntimeError, match="piper failed"):
+            await backend.synthesize("x", "default")
+
+
+@pytest.mark.asyncio
+async def test_piper_synthesize_raises_when_ffmpeg_fails():
+    piper_proc = _fake_proc(stdout=b"RAWPCM")
+    ffmpeg_proc = _fake_proc(stdout=b"", stderr=b"enc error", returncode=1)
+
+    async def fake_exec(*args, **kwargs):
+        return piper_proc if args[0] == "piper" else ffmpeg_proc
+
+    with patch(
+        "voice_bridge.tts.piper_tts.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        backend = PiperTTS("/opt/piper/lt_LT.onnx")
+        with pytest.raises(RuntimeError, match="ffmpeg failed"):
+            await backend.synthesize("x", "default")
