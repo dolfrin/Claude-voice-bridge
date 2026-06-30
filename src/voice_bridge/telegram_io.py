@@ -121,6 +121,43 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def build_mode_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
+    """Render explicit mode choices for one project."""
+    row = snapshot[idx]
+    buttons = [
+        InlineKeyboardButton(
+            f"{'✓ ' if mode == row['mode'] else ''}{mode}",
+            callback_data=f"mset:{idx}:{mode}",
+        )
+        for mode in _MODES
+    ]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{row['project']} mode", callback_data=f"noop:{idx}")],
+        buttons,
+        [InlineKeyboardButton("back", callback_data="back")],
+    ])
+
+
+def build_voice_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
+    """Render explicit OpenAI voice choices for one project."""
+    row = snapshot[idx]
+    voices = available_voices("openai")
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(f"{row['project']} voice", callback_data=f"noop:{idx}")]
+    ]
+    for start in range(0, len(voices), 2):
+        pair = voices[start:start + 2]
+        rows.append([
+            InlineKeyboardButton(
+                f"{'✓ ' if voice == row['voice'] else ''}{voice}",
+                callback_data=f"vset:{idx}:{voice}",
+            )
+            for voice in pair
+        ])
+    rows.append([InlineKeyboardButton("back", callback_data="back")])
+    return InlineKeyboardMarkup(rows)
+
+
 class TelegramIO:
     def __init__(
         self,
@@ -240,6 +277,11 @@ class TelegramIO:
 
         if action == "noop":
             return
+        if action == "back":
+            await self._edit_callback_markup(
+                query, build_panel_markup(self.controls.snapshot())
+            )
+            return
 
         # Global actions do not need a project index.
         if action == "allon":
@@ -252,6 +294,12 @@ class TelegramIO:
             await self.controls.set_engine(_next(_ENGINES, cur))
         else:
             # Per-project actions: resolve project by index from a fresh snapshot.
+            value = ""
+            if action in {"mset", "vset"}:
+                try:
+                    index_str, value = index_str.split(":", 1)
+                except ValueError:
+                    return
             try:
                 idx = int(index_str)
             except (ValueError, TypeError):
@@ -265,15 +313,26 @@ class TelegramIO:
             if action == "tog":
                 await self.controls.toggle(project, not row["enabled"])
             elif action == "mode":
-                await self.controls.set_mode(
-                    project, _next(_MODES, row["mode"]))
+                await self._edit_callback_markup(query, build_mode_markup(snap_list, idx))
+                return
             elif action == "voice":
-                await self.controls.set_voice(
-                    project, _next(available_voices("openai"), row["voice"]))
+                await self._edit_callback_markup(query, build_voice_markup(snap_list, idx))
+                return
+            elif action == "mset":
+                if value not in _MODES:
+                    return
+                await self.controls.set_mode(project, value)
+            elif action == "vset":
+                if value not in available_voices("openai"):
+                    return
+                await self.controls.set_voice(project, value)
             else:
                 return
 
         new_markup = build_panel_markup(self.controls.snapshot())
+        await self._edit_callback_markup(query, new_markup)
+
+    async def _edit_callback_markup(self, query, new_markup: InlineKeyboardMarkup) -> None:
         try:
             await query.edit_message_reply_markup(reply_markup=new_markup)
         except BadRequest as exc:

@@ -10,7 +10,9 @@ from telegram.error import BadRequest
 from voice_bridge.config import Config
 from voice_bridge.telegram_io import (
     TelegramIO,
+    build_mode_markup,
     build_panel_markup,
+    build_voice_markup,
     parse_callback,
 )
 
@@ -267,9 +269,38 @@ def test_build_panel_markup_empty_snapshot():
         "allon", "alloff", "engine"]
 
 
+def test_build_mode_markup_lists_explicit_modes():
+    snap = FakeControls().snapshot()
+    markup = build_mode_markup(snap, 0)
+    texts = [b.text for row in markup.inline_keyboard for b in row]
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+
+    assert "qwing mode" in texts
+    assert "✓ safe" in texts
+    assert "full" in texts
+    assert "ask" in texts
+    assert {"mset:0:safe", "mset:0:full", "mset:0:ask"} <= set(data)
+    assert "back" in data
+
+
+def test_build_voice_markup_lists_explicit_voices():
+    snap = FakeControls().snapshot()
+    markup = build_voice_markup(snap, 0)
+    texts = [b.text for row in markup.inline_keyboard for b in row]
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+
+    assert "qwing voice" in texts
+    assert "✓ alloy" in texts
+    assert "ash" in texts
+    assert "echo" in texts
+    assert {"vset:0:alloy", "vset:0:ash", "vset:0:echo"} <= set(data)
+    assert "back" in data
+
+
 def test_parse_callback_splits_action_and_index():
     assert parse_callback("tog:0") == ("tog", "0")
     assert parse_callback("mode:1") == ("mode", "1")
+    assert parse_callback("mset:1:ask") == ("mset", "1:ask")
     assert parse_callback("allon") == ("allon", "")
     assert parse_callback("engine") == ("engine", "")
 
@@ -332,7 +363,7 @@ async def test_callback_ignores_stale_callback_query():
 
 
 @pytest.mark.asyncio
-async def test_callback_mode_cycles_to_next_mode():
+async def test_callback_mode_opens_mode_picker():
     controls = FakeControls()  # qwing is index 0, mode == "safe"
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     query = AsyncMock()
@@ -345,11 +376,32 @@ async def test_callback_mode_cycles_to_next_mode():
 
     await io._handle_callback(update, MagicMock())
 
-    assert ("set_mode", "qwing", "full") in controls.calls
+    assert controls.calls == []
+    markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+    texts = [b.text for row in markup.inline_keyboard for b in row]
+    assert "✓ safe" in texts
+    assert "full" in texts
 
 
 @pytest.mark.asyncio
-async def test_callback_voice_cycles_to_next_voice():
+async def test_callback_mode_choice_sets_mode():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "mset:0:ask"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("set_mode", "qwing", "ask") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_callback_voice_opens_voice_picker():
     controls = FakeControls()  # qwing is index 0, voice == "alloy"
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     query = AsyncMock()
@@ -362,7 +414,48 @@ async def test_callback_voice_cycles_to_next_voice():
 
     await io._handle_callback(update, MagicMock())
 
+    assert controls.calls == []
+    markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+    texts = [b.text for row in markup.inline_keyboard for b in row]
+    assert "✓ alloy" in texts
+    assert "ash" in texts
+
+
+@pytest.mark.asyncio
+async def test_callback_voice_choice_sets_voice():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "vset:0:ash"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
     assert ("set_voice", "qwing", "ash") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_callback_back_returns_to_main_panel():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "back"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert controls.calls == []
+    markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+    data = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert "tog:0" in data
 
 
 @pytest.mark.asyncio
