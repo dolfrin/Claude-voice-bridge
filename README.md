@@ -145,12 +145,15 @@ $EDITOR .env
 # Required
 TELEGRAM_BOT_TOKEN=123456789:AA...
 TELEGRAM_ALLOWED_USER_ID=11223344
-ANTHROPIC_API_KEY=sk-ant-...
 
 # TTS: choose openai or piper
 TTS_BACKEND=openai
 TTS_VOICE=alloy
 OPENAI_API_KEY=sk-...         # only needed if TTS_BACKEND=openai
+
+# Optional: set only if you want Claude pay-per-token API billing.
+# Leave unset to use your local Claude Code subscription login.
+# ANTHROPIC_API_KEY=sk-ant-...
 
 # Piper (only if TTS_BACKEND=piper)
 PIPER_VOICE_PATH=/opt/piper/lt_LT-....onnx
@@ -172,7 +175,7 @@ All keys and their meaning:
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | (required) | BotFather HTTP API token |
 | `TELEGRAM_ALLOWED_USER_ID` | (required) | Your numeric Telegram user id (whitelist) |
-| `ANTHROPIC_API_KEY` | (required) | Anthropic API key for the Agent SDK |
+| `ANTHROPIC_API_KEY` | — | Optional; set only for pay-per-token API billing. Leave unset to use local Claude Code subscription login |
 | `OPENAI_API_KEY` | — | OpenAI key; required only for `TTS_BACKEND=openai` |
 | `TTS_BACKEND` | `openai` | `openai` or `piper` |
 | `TTS_VOICE` | `alloy` | Voice name; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |

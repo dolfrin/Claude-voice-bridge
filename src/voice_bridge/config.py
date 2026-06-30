@@ -98,7 +98,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     return Config(
         telegram_bot_token=_require(env, "TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_id=_require_int(env, "TELEGRAM_ALLOWED_USER_ID"),
-        anthropic_api_key=_require(env, "ANTHROPIC_API_KEY"),
+        anthropic_api_key=env.get("ANTHROPIC_API_KEY") or "",
         openai_api_key=_require(env, "OPENAI_API_KEY"),
         tts_backend=tts_backend,
         tts_voice=env.get("TTS_VOICE") or "alloy",

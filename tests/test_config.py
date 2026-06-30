@@ -55,10 +55,10 @@ def test_load_config_applies_defaults_for_optional_keys():
     env = {
         "TELEGRAM_BOT_TOKEN": "123:abc",
         "TELEGRAM_ALLOWED_USER_ID": "42",
-        "ANTHROPIC_API_KEY": "sk-ant-test",
         "OPENAI_API_KEY": "sk-openai-test",
     }
     cfg = load_config(env)
+    assert cfg.anthropic_api_key == ""
     assert cfg.tts_backend == "openai"
     assert cfg.tts_voice == "alloy"
     assert cfg.piper_voice_path == ""
