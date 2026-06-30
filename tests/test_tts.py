@@ -16,7 +16,7 @@ def _cfg(**overrides) -> Config:
         anthropic_api_key="a",
         openai_api_key="sk-test",
         tts_backend="openai",
-        tts_voice="nova",
+        tts_voice="alloy",
         piper_voice_path="/opt/piper/lt_LT.onnx",
         whisper_model="large-v3",
         autonomy_mode="safe",
@@ -30,7 +30,7 @@ def _cfg(**overrides) -> Config:
 def test_available_voices_openai_lists_known_voices():
     voices = available_voices("openai")
     assert isinstance(voices, list)
-    assert "nova" in voices
+    assert "alloy" in voices
     assert "alloy" in voices
     assert all(isinstance(v, str) for v in voices)
 
@@ -78,13 +78,13 @@ async def test_openai_synthesize_requests_opus_and_returns_bytes():
 
     with patch("voice_bridge.tts.openai_tts.OpenAI", return_value=fake_client) as mock_openai:
         backend = OpenAITTS("sk-abc")
-        out = await backend.synthesize("Sveiki, viskas gerai.", "nova")
+        out = await backend.synthesize("Sveiki, viskas gerai.", "alloy")
 
     assert out == b"OggS-opus-bytes"
     mock_openai.assert_called_once_with(api_key="sk-abc")
     fake_client.audio.speech.create.assert_called_once_with(
         model="gpt-4o-mini-tts",
-        voice="nova",
+        voice="alloy",
         input="Sveiki, viskas gerai.",
         response_format="opus",
     )

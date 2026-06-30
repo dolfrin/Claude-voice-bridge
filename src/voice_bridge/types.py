@@ -1,4 +1,3 @@
-# src/voice_bridge/types.py
 from dataclasses import dataclass
 
 

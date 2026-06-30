@@ -33,7 +33,7 @@ RestartSec=5
 TimeoutStopSec=20
 KillSignal=SIGINT
 
-# Persistent state dir (DB_PATH default = /var/lib/voice-bridge/state.db).
+# Persistent state dir (.env.example sets DB_PATH=/var/lib/voice-bridge/state.db).
 # StateDirectory only applies to system-wide units; for --user units create the
 # dir manually or set DB_PATH=%h/.local/state/voice-bridge/state.db in .env.
 StateDirectory=voice-bridge

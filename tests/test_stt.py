@@ -32,7 +32,7 @@ def _fake_model_factory(captured):
 async def test_transcribe_joins_segments_and_strips():
     captured = {}
     model_cls = _fake_model_factory(captured)
-    with patch("voice_bridge.stt.WhisperModel", model_cls):
+    with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("large-v3")
         result = await t.transcribe(b"OggS-fake-opus-bytes")
     assert result == "Labas pasauli"
@@ -42,7 +42,7 @@ async def test_transcribe_joins_segments_and_strips():
 async def test_transcribe_passes_language_lt_by_default():
     captured = {}
     model_cls = _fake_model_factory(captured)
-    with patch("voice_bridge.stt.WhisperModel", model_cls):
+    with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("large-v3")
         await t.transcribe(b"OggS-fake")
     assert captured["kwargs"]["language"] == "lt"
@@ -52,7 +52,7 @@ async def test_transcribe_passes_language_lt_by_default():
 async def test_transcribe_honors_custom_language():
     captured = {}
     model_cls = _fake_model_factory(captured)
-    with patch("voice_bridge.stt.WhisperModel", model_cls):
+    with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("large-v3", language="en")
         await t.transcribe(b"OggS-fake")
     assert captured["kwargs"]["language"] == "en"
@@ -62,7 +62,7 @@ async def test_transcribe_honors_custom_language():
 async def test_transcribe_constructs_model_with_name_lazily():
     captured = {}
     model_cls = _fake_model_factory(captured)
-    with patch("voice_bridge.stt.WhisperModel", model_cls):
+    with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("medium")
         # not constructed at __init__ time
         captured["model_cls"].assert_not_called()
@@ -74,7 +74,7 @@ async def test_transcribe_constructs_model_with_name_lazily():
 async def test_transcribe_reuses_loaded_model():
     captured = {}
     model_cls = _fake_model_factory(captured)
-    with patch("voice_bridge.stt.WhisperModel", model_cls):
+    with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("large-v3")
         await t.transcribe(b"OggS-1")
         await t.transcribe(b"OggS-2")
@@ -97,7 +97,7 @@ async def test_transcribe_writes_ogg_temp_file_and_cleans_up(tmp_path):
     instance.transcribe.side_effect = transcribe
     model_cls = MagicMock(return_value=instance)
 
-    with patch("voice_bridge.stt.WhisperModel", model_cls):
+    with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("large-v3")
         result = await t.transcribe(b"OggS-payload")
 
@@ -125,7 +125,7 @@ async def test_transcribe_runs_off_event_loop():
     instance.transcribe.side_effect = transcribe
     model_cls = MagicMock(return_value=instance)
 
-    with patch("voice_bridge.stt.WhisperModel", model_cls):
+    with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("large-v3")
         await t.transcribe(b"OggS-fake")
 
@@ -145,7 +145,7 @@ async def test_transcribe_cleans_up_temp_file_on_error():
     instance.transcribe.side_effect = transcribe
     model_cls = MagicMock(return_value=instance)
 
-    with patch("voice_bridge.stt.WhisperModel", model_cls):
+    with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("large-v3")
         with pytest.raises(RuntimeError, match="decode failed"):
             await t.transcribe(b"OggS-fake")

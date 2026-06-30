@@ -157,7 +157,11 @@ def make_inbound(
 
     async def inbound(msg: dict) -> None:
         if msg.get("is_voice"):
-            text = await transcriber.transcribe(msg["audio"])
+            audio = msg.get("audio")
+            if audio is None:
+                await telegram.send_question("bridge", _MSG_NOT_UNDERSTOOD)
+                return
+            text = await transcriber.transcribe(audio)
             if not text.strip():
                 await telegram.send_question("bridge", _MSG_NOT_UNDERSTOOD)
                 return
@@ -338,9 +342,6 @@ async def build() -> Wiring:
 
     approvals = ApprovalManager(send_question, cfg.approval_timeout)
 
-    # outbound needs sessions.project + controls; both exist before any call.
-    controls_ref: dict = {}
-
     class _LazyTelegram:
         async def send_update(self, project, voice_label, text, voice_bytes):
             return await telegram_ref["io"].send_update(
@@ -375,7 +376,6 @@ async def build() -> Wiring:
     lazy_sessions = _LazySessions()
 
     controls = _Controls(lazy_sessions, store, cfg, tts_holder)
-    controls_ref["c"] = controls
 
     outbound = make_outbound(
         tts_holder, lazy_telegram, store, cfg, lazy_sessions, controls

@@ -12,8 +12,6 @@ import asyncio
 import os
 import tempfile
 
-from faster_whisper import WhisperModel
-
 
 class Transcriber:
     """Wraps a faster-whisper model for OGG/Opus -> text transcription."""
@@ -21,10 +19,12 @@ class Transcriber:
     def __init__(self, model_name: str, language: str = "lt") -> None:
         self.model_name = model_name
         self.language = language
-        self._model: WhisperModel | None = None
+        self._model: object | None = None
 
-    def _get_model(self) -> WhisperModel:
+    def _get_model(self) -> object:
         if self._model is None:
+            from faster_whisper import WhisperModel
+
             self._model = WhisperModel(self.model_name)
         return self._model
 

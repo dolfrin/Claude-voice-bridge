@@ -35,6 +35,7 @@ from telegram.ext import (
 )
 
 from .config import Config
+from .tts import available_voices
 
 
 class Controls(Protocol):
@@ -57,7 +58,6 @@ class Controls(Protocol):
 
 
 _MODES = ["safe", "full", "ask"]
-_OPENAI_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 _ENGINES = ["openai", "piper"]
 
 
@@ -263,7 +263,7 @@ class TelegramIO:
                     project, _next(_MODES, row["mode"]))
             elif action == "voice":
                 await self.controls.set_voice(
-                    project, _next(_OPENAI_VOICES, row["voice"]))
+                    project, _next(available_voices("openai"), row["voice"]))
             else:
                 return
 
@@ -329,7 +329,7 @@ class TelegramIO:
             return
         args = context.args
         if not args or args[0] == "list":
-            await msg.reply_text("voices: " + ", ".join(_OPENAI_VOICES))
+            await msg.reply_text("voices: " + ", ".join(available_voices("openai")))
             return
         voice = args[0]
         project = None

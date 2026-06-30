@@ -87,7 +87,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         anthropic_api_key=_require(env, "ANTHROPIC_API_KEY"),
         openai_api_key=_require(env, "OPENAI_API_KEY"),
         tts_backend=tts_backend,
-        tts_voice=env.get("TTS_VOICE") or "nova",
+        tts_voice=env.get("TTS_VOICE") or "alloy",
         piper_voice_path=env.get("PIPER_VOICE_PATH") or "",
         whisper_model=env.get("WHISPER_MODEL") or "large-v3",
         autonomy_mode=autonomy_mode,
@@ -104,7 +104,9 @@ def load_projects(path: str = "projects.yaml") -> list[ProjectConfig]:
     with open(path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
 
-    raw_projects = data.get("projects") or []
+    raw_projects = data.get("projects")
+    if not raw_projects:
+        raise ValueError("projects file must contain at least one project")
     projects: list[ProjectConfig] = []
     for idx, raw in enumerate(raw_projects):
         name = raw.get("name")

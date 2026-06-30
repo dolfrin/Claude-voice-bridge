@@ -165,7 +165,7 @@ class FakeTranscriber:
 
 
 class FakeCfg:
-    tts_voice = "nova"
+    tts_voice = "alloy"
     tts_backend = "openai"
     autonomy_mode = "safe"
     db_path = "/tmp/ignored.db"
@@ -304,7 +304,7 @@ async def test_make_outbound_unknown_project_uses_default_voice():
     outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
     await outbound(Outbound(project="ghost", text="Hi there", spoken="Hi there"))
 
-    assert tts_holder["backend"].calls == [("Hi there", "nova")]  # cfg.tts_voice
+    assert tts_holder["backend"].calls == [("Hi there", "alloy")]  # cfg.tts_voice
 
 
 # --------------------------------------------------------------------------- #
@@ -358,6 +358,23 @@ async def test_make_inbound_empty_transcript_asks_repeat_no_deliver():
     inbound = _inbound(transcriber, store, approvals, sessions, telegram)
     await inbound(_msg(reply_to=None, is_voice=True, audio=b"OGG"))
 
+    assert sessions.delivered == []
+    assert len(telegram.questions) == 1
+    assert "Nesupratau" in telegram.questions[0][1]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_voice_without_audio_asks_repeat_no_transcribe():
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber(text="should not run")
+    sessions = FakeSessions()
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, is_voice=True, audio=None))
+
+    assert transcriber.calls == []
     assert sessions.delivered == []
     assert len(telegram.questions) == 1
     assert "Nesupratau" in telegram.questions[0][1]
@@ -477,7 +494,7 @@ async def test_controls_snapshot_sync_exact_keys():
     assert by_name["qwing"]["voice"] == "echo"
     assert by_name["othersapp"]["enabled"] is False
     assert by_name["othersapp"]["mode"] == "safe"   # falls back to cfg
-    assert by_name["othersapp"]["voice"] == "nova"  # falls back to cfg
+    assert by_name["othersapp"]["voice"] == "alloy"  # falls back to cfg
     assert all(r["engine"] == "openai" for r in snap)
 
 
@@ -494,10 +511,10 @@ async def test_controls_toggle_all_off_disables_every_project():
 async def test_controls_set_voice_updates_mirror_and_project():
     controls, sessions, *_ = _make_controls()
     await controls.seed()
-    await controls.set_voice("qwing", "fable")
-    assert sessions.project("qwing").voice == "fable"
+    await controls.set_voice("qwing", "sage")
+    assert sessions.project("qwing").voice == "sage"
     snap = {r["project"]: r for r in controls.snapshot()}
-    assert snap["qwing"]["voice"] == "fable"
+    assert snap["qwing"]["voice"] == "sage"
 
 
 @pytest.mark.asyncio

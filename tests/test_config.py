@@ -20,7 +20,7 @@ def _full_env() -> dict[str, str]:
         "ANTHROPIC_API_KEY": "sk-ant-test",
         "OPENAI_API_KEY": "sk-openai-test",
         "TTS_BACKEND": "openai",
-        "TTS_VOICE": "nova",
+        "TTS_VOICE": "alloy",
         "PIPER_VOICE_PATH": "/opt/piper/lt.onnx",
         "WHISPER_MODEL": "large-v3",
         "AUTONOMY_MODE": "safe",
@@ -38,7 +38,7 @@ def test_load_config_parses_all_fields_with_correct_types():
     assert cfg.anthropic_api_key == "sk-ant-test"
     assert cfg.openai_api_key == "sk-openai-test"
     assert cfg.tts_backend == "openai"
-    assert cfg.tts_voice == "nova"
+    assert cfg.tts_voice == "alloy"
     assert cfg.piper_voice_path == "/opt/piper/lt.onnx"
     assert cfg.whisper_model == "large-v3"
     assert cfg.autonomy_mode == "safe"
@@ -56,7 +56,7 @@ def test_load_config_applies_defaults_for_optional_keys():
     }
     cfg = load_config(env)
     assert cfg.tts_backend == "openai"
-    assert cfg.tts_voice == "nova"
+    assert cfg.tts_voice == "alloy"
     assert cfg.piper_voice_path == ""
     assert cfg.whisper_model == "large-v3"
     assert cfg.autonomy_mode == "safe"
@@ -112,7 +112,7 @@ def test_load_projects_parses_fields_and_defaults(tmp_path):
             cwd: /home/home/Projects/WhisperX
             enabled: true
             autonomy: safe
-            voice: nova
+            voice: alloy
             model: claude-opus-4-8
             system_prompt_extra: "be terse"
           - name: bridge
@@ -130,7 +130,7 @@ def test_load_projects_parses_fields_and_defaults(tmp_path):
     assert qwing.cwd == "/home/home/Projects/WhisperX"
     assert qwing.enabled is True
     assert qwing.autonomy == "safe"
-    assert qwing.voice == "nova"
+    assert qwing.voice == "alloy"
     assert qwing.model == "claude-opus-4-8"
     assert qwing.system_prompt_extra == "be terse"
 
@@ -165,6 +165,14 @@ def test_load_projects_missing_file_raises_clear_error(tmp_path):
     assert "nope.yaml" in str(exc.value)
 
 
+def test_load_projects_empty_list_raises_clear_error(tmp_path):
+    path = tmp_path / "projects.yaml"
+    path.write_text("projects: []\n")
+    with pytest.raises(ValueError) as exc:
+        load_projects(str(path))
+    assert "at least one project" in str(exc.value)
+
+
 def test_effective_autonomy_prefers_project_override():
     cfg = load_config(_full_env())  # autonomy_mode == "safe"
     proj = ProjectConfig(name="x", cwd="/tmp/x", autonomy="full")
@@ -178,15 +186,15 @@ def test_effective_autonomy_falls_back_to_global():
 
 
 def test_effective_voice_prefers_project_override():
-    cfg = load_config(_full_env())  # tts_voice == "nova"
+    cfg = load_config(_full_env())  # tts_voice == "alloy"
     proj = ProjectConfig(name="x", cwd="/tmp/x", voice="echo")
     assert effective_voice(proj, cfg) == "echo"
 
 
 def test_effective_voice_falls_back_to_global():
-    cfg = load_config(_full_env())  # tts_voice == "nova"
+    cfg = load_config(_full_env())  # tts_voice == "alloy"
     proj = ProjectConfig(name="x", cwd="/tmp/x", voice=None)
-    assert effective_voice(proj, cfg) == "nova"
+    assert effective_voice(proj, cfg) == "alloy"
 
 
 def test_outbound_fields():

@@ -149,7 +149,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 # TTS: choose openai or piper
 TTS_BACKEND=openai            # openai|piper
-TTS_VOICE=nova
+TTS_VOICE=alloy
 OPENAI_API_KEY=sk-...         # only needed if TTS_BACKEND=openai
 
 # Piper (only if TTS_BACKEND=piper)
@@ -175,12 +175,12 @@ All keys and their meaning:
 | `ANTHROPIC_API_KEY` | (required) | Anthropic API key for the Agent SDK |
 | `OPENAI_API_KEY` | — | OpenAI key; required only for `TTS_BACKEND=openai` |
 | `TTS_BACKEND` | `openai` | `openai` or `piper` |
-| `TTS_VOICE` | `nova` | Voice name; for OpenAI one of `alloy/echo/fable/onyx/nova/shimmer` |
+| `TTS_VOICE` | `alloy` | Voice name; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |
 | `PIPER_VOICE_PATH` | — | Absolute path to `.onnx` model; required for `piper` backend |
 | `WHISPER_MODEL` | `large-v3` | faster-whisper model name |
 | `AUTONOMY_MODE` | `safe` | `full` (run everything) / `safe` (ask for risky ops) / `ask` (ask for all) |
 | `APPROVAL_TIMEOUT` | `300` | Seconds before an unanswered approval auto-denies |
-| `DB_PATH` | `/var/lib/voice-bridge/state.db` | SQLite database path |
+| `DB_PATH` | `voice-bridge.db` | SQLite database path |
 
 > `.env` is git-ignored and must be `chmod 600`. Never commit it.
 
@@ -197,7 +197,7 @@ projects:
     cwd: /home/home/Projects/WhisperX
     enabled: true
     autonomy: safe            # optional; overrides global AUTONOMY_MODE
-    voice: nova               # optional; overrides global TTS_VOICE
+    voice: alloy               # optional; overrides global TTS_VOICE
     model: claude-opus-4-8    # optional Claude model for this project
     system_prompt_extra: ""   # optional extra instructions appended to system prompt
 
@@ -234,8 +234,8 @@ systemctl --user enable --now voice-bridge.service
 loginctl enable-linger "$USER"   # keep it running after you log out
 ```
 
-For a `--user` unit the default `DB_PATH=/var/lib/voice-bridge/state.db` requires
-`/var/lib/voice-bridge` to exist and be writable. Either:
+The sample `.env.example` uses `DB_PATH=/var/lib/voice-bridge/state.db`, which
+requires `/var/lib/voice-bridge` to exist and be writable for a `--user` unit. Either:
 
 - Set `DB_PATH=$HOME/.local/state/voice-bridge/state.db` in `.env` and
   `mkdir -p ~/.local/state/voice-bridge`, **or**

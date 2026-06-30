@@ -21,7 +21,7 @@ def make_cfg(allowed_id=42):
         anthropic_api_key="ak",
         openai_api_key="ok",
         tts_backend="openai",
-        tts_voice="nova",
+        tts_voice="alloy",
         piper_voice_path="/opt/piper/x.onnx",
         whisper_model="large-v3",
         autonomy_mode="safe",
@@ -35,7 +35,7 @@ class FakeControls:
         self.calls = []
         self._snapshot = [
             {"project": "qwing", "enabled": True, "mode": "safe",
-             "voice": "nova", "engine": "openai", "last_active": True},
+             "voice": "alloy", "engine": "openai", "last_active": True},
             {"project": "othersapp", "enabled": False, "mode": "full",
              "voice": "echo", "engine": "openai", "last_active": False},
         ]
@@ -176,7 +176,7 @@ async def test_send_update_sends_text_then_voice_and_returns_ids():
     io.app.bot = bot
 
     ids = await io.send_update(
-        project="qwing", voice_label="nova",
+        project="qwing", voice_label="alloy",
         text="Pushintas kodas\n---\n```py\nx=1\n```",
         voice_bytes=b"OGGVOICE",
     )
@@ -200,7 +200,7 @@ async def test_send_update_text_only_when_no_voice_bytes():
     io.app.bot = bot
 
     ids = await io.send_update(
-        project="qwing", voice_label="nova",
+        project="qwing", voice_label="alloy",
         text="tik tekstas", voice_bytes=None,
     )
 
@@ -253,7 +253,7 @@ def test_build_panel_markup_reflects_enabled_mode_voice_engine():
     # modes / voices / engine surfaced
     assert any("safe" in t for t in texts)
     assert any("full" in t for t in texts)
-    assert any("nova" in t for t in texts)
+    assert any("alloy" in t for t in texts)
     assert any("echo" in t for t in texts)
     assert "openai" in joined
 
@@ -311,7 +311,7 @@ async def test_callback_mode_cycles_to_next_mode():
 
 @pytest.mark.asyncio
 async def test_callback_voice_cycles_to_next_voice():
-    controls = FakeControls()  # qwing is index 0, voice == "nova"
+    controls = FakeControls()  # qwing is index 0, voice == "alloy"
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     query = AsyncMock()
     query.data = "voice:0"
@@ -323,8 +323,7 @@ async def test_callback_voice_cycles_to_next_voice():
 
     await io._handle_callback(update, MagicMock())
 
-    # nova -> shimmer (next after nova in the OpenAI voice list)
-    assert any(c[0] == "set_voice" and c[1] == "qwing" for c in controls.calls)
+    assert ("set_voice", "qwing", "ash") in controls.calls
 
 
 @pytest.mark.asyncio
@@ -381,7 +380,7 @@ async def test_colon_project_name_toggle_resolves_correctly():
             self.calls = []
             self._snapshot = [
                 {"project": "a:b:c", "enabled": True, "mode": "safe",
-                 "voice": "nova", "engine": "openai", "last_active": False},
+                 "voice": "alloy", "engine": "openai", "last_active": False},
                 {"project": "normal", "enabled": False, "mode": "full",
                  "voice": "echo", "engine": "openai", "last_active": False},
             ]
@@ -479,7 +478,7 @@ async def test_cmd_projects_lists_snapshot():
 
     sent = upd.message.reply_text.await_args.args[0]
     assert "qwing" in sent and "othersapp" in sent
-    assert "safe" in sent and "nova" in sent
+    assert "safe" in sent and "alloy" in sent
 
 
 @pytest.mark.asyncio
@@ -536,7 +535,7 @@ async def test_cmd_voice_list_replies_voices():
     await io._cmd_voice(upd, make_ctx(["list"]))
 
     sent = upd.message.reply_text.await_args.args[0]
-    assert "nova" in sent and "echo" in sent
+    assert "alloy" in sent and "echo" in sent
     assert controls.calls == []  # listing must not mutate state
 
 

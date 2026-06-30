@@ -119,7 +119,7 @@ def make_cfg(**over):
         anthropic_api_key="a",
         openai_api_key="o",
         tts_backend="openai",
-        tts_voice="nova",
+        tts_voice="alloy",
         piper_voice_path="/x.onnx",
         whisper_model="large-v3",
         autonomy_mode="safe",
