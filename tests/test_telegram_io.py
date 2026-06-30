@@ -314,6 +314,24 @@ async def test_callback_ignores_not_modified_markup_error():
 
 
 @pytest.mark.asyncio
+async def test_callback_ignores_stale_callback_query():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "tog:0"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock(side_effect=BadRequest("Query is too old"))
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert controls.calls == []
+    query.edit_message_reply_markup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_callback_mode_cycles_to_next_mode():
     controls = FakeControls()  # qwing is index 0, mode == "safe"
     io = TelegramIO(make_cfg(), AsyncMock(), controls)

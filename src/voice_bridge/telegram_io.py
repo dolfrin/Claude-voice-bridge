@@ -230,7 +230,12 @@ class TelegramIO:
         query = update.callback_query
         if query is None or not self._allowed(query.from_user.id):
             return
-        await query.answer()
+        try:
+            await query.answer()
+        except BadRequest as exc:
+            if "query is too old" in str(exc).lower():
+                return
+            raise
         action, index_str = parse_callback(query.data)
 
         if action == "noop":
