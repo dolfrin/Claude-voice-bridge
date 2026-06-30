@@ -377,8 +377,12 @@ async def test_system_prompt_includes_extra_and_split_instruction():
     await sm.start_all()
 
     sp = FakeClaudeSDKClient.instances[0].options.system_prompt
-    assert "Be terse." in sp
-    assert "---" in sp
+    assert isinstance(sp, dict)
+    assert sp["type"] == "preset"
+    assert sp["preset"] == "claude_code"
+    append = sp["append"]
+    assert "Be terse." in append
+    assert "---" in append
 
     await sm.stop_all()
 
@@ -421,6 +425,28 @@ async def test_set_mode_when_not_running_only_updates_config():
     await sm.set_mode("qwing", "full")
     assert sm.project("qwing").autonomy == "full"
     assert FakeClaudeSDKClient.instances == []  # never started
+
+    await sm.stop_all()
+
+
+async def test_set_mode_invalid_mode_is_ignored():
+    project = make_project("qwing", autonomy="safe")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    assert sm.is_running("qwing") is True
+    first_client = FakeClaudeSDKClient.instances[0]
+
+    await sm.set_mode("qwing", "turbo")  # invalid mode
+
+    # Mode unchanged, session not restarted
+    assert sm.project("qwing").autonomy == "safe"
+    assert first_client.disconnected is False
+    assert len(FakeClaudeSDKClient.instances) == 1
 
     await sm.stop_all()
 

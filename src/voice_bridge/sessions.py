@@ -137,6 +137,9 @@ class SessionManager:
         cfg = self._projects.get(project)
         if cfg is None:
             return
+        if mode not in {"full", "safe", "ask"}:
+            logger.warning("set_mode: invalid mode %r for project %r; ignored", mode, project)
+            return
         cfg.autonomy = mode
         if project in self._sessions:
             await self._stop(project)
@@ -156,9 +159,9 @@ class SessionManager:
     ) -> ClaudeAgentOptions:
         mode = effective_autonomy(project, self._cfg)
 
-        append = _VOICE_SPLIT_INSTRUCTION
-        if project.system_prompt_extra:
-            append = f"{project.system_prompt_extra}\n\n{append}"
+        append_text = "\n\n".join(
+            p for p in [project.system_prompt_extra, _VOICE_SPLIT_INSTRUCTION] if p
+        )
 
         if mode == "full":
             permission_mode = "bypassPermissions"
@@ -170,7 +173,7 @@ class SessionManager:
         return ClaudeAgentOptions(
             cwd=project.cwd,
             model=project.model,
-            system_prompt=append,
+            system_prompt={"type": "preset", "preset": "claude_code", "append": append_text},
             permission_mode=permission_mode,
             can_use_tool=can_use_tool,
             mcp_servers={"bridge": notify_server},
