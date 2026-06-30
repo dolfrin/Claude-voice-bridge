@@ -4,7 +4,6 @@ projects:
     enabled: true
     autonomy: safe
     voice: alloy
-    model: claude-opus-4-8
     system_prompt_extra: ""
   - name: bridge
     cwd: /home/home/Projects/claude-voice-bridge
