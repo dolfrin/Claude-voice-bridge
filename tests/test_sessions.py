@@ -185,6 +185,18 @@ async def test_start_all_starts_only_enabled_projects():
     await sm.stop_all()
 
 
+def test_names_returns_configured_project_names_in_order():
+    projects = [make_project("qwing"), make_project("bridge")]
+    store = FakeStore()
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm(projects, store, on_outbound)
+
+    assert sm.names() == ["qwing", "bridge"]
+
+
 # --------------------------------------------------------------------------- #
 # deliver / streaming loop
 # --------------------------------------------------------------------------- #

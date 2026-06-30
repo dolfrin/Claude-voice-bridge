@@ -99,6 +99,10 @@ class SessionManager:
         """Return the ProjectConfig for *name*, or None if unknown."""
         return self._projects.get(name)
 
+    def names(self) -> list[str]:
+        """Return configured project names in projects.yaml order."""
+        return list(self._projects)
+
     def is_running(self, name: str) -> bool:
         """Return True if a live session task exists for *name*."""
         return name in self._sessions
