@@ -1,0 +1,48 @@
+# systemd/voice-bridge.service
+#
+# Install (run as the service user, not root):
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/voice-bridge.service ~/.config/systemd/user/voice-bridge.service
+#   # edit the three @@ paths below to match your checkout, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now voice-bridge.service
+#   loginctl enable-linger "$USER"   # keep the user service running after logout
+#
+# Or system-wide (as root): copy to /etc/systemd/system/, set User=, then
+#   systemctl daemon-reload && systemctl enable --now voice-bridge.service
+#
+# The three paths marked @@ must match your actual checkout location.
+# Example: replace /home/home/Projects/claude-voice-bridge with /opt/voice-bridge
+
+[Unit]
+Description=Claude Voice Bridge (Telegram <-> Claude Agent SDK)
+Documentation=file:///home/home/Projects/claude-voice-bridge/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# @@ Edit: absolute path to the repo root (projects.yaml lives here)
+WorkingDirectory=/home/home/Projects/claude-voice-bridge
+# @@ Edit: absolute path to the .env file (chmod 600, never commit it)
+EnvironmentFile=/home/home/Projects/claude-voice-bridge/.env
+# @@ Edit: absolute path to the venv Python interpreter
+ExecStart=/home/home/Projects/claude-voice-bridge/.venv/bin/python -m voice_bridge.bridge
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+# Persistent state dir (DB_PATH default = /var/lib/voice-bridge/state.db).
+# StateDirectory only applies to system-wide units; for --user units create the
+# dir manually or set DB_PATH=%h/.local/state/voice-bridge/state.db in .env.
+StateDirectory=voice-bridge
+StateDirectoryMode=0750
+
+# Logs go to the journal: journalctl --user -u voice-bridge -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=voice-bridge
+
+[Install]
+WantedBy=default.target
