@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-bridge"
+version = "0.1.0"
+description = "Telegram voice/text bridge for long-running Claude Agent SDK sessions"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk",
+    "python-telegram-bot>=21",
+    "faster-whisper",
+    "openai",
+    "piper-tts",
+    "pyyaml",
+    "aiosqlite",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
