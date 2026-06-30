@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from typing import Awaitable, Callable
 
 from voice_bridge.config import Config, ProjectConfig, effective_autonomy
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Risk classification
@@ -19,6 +22,13 @@ _RISKY_COMMAND_PATTERNS = [
     re.compile(r"\brm\b"),
     re.compile(r"\bssh\b"),
     re.compile(r"\bscp\b"),
+    re.compile(r"\bsftp\b"),
+    re.compile(r"\bnc\b"),
+    re.compile(r"\bnetcat\b"),
+    re.compile(r"\bncat\b"),
+    re.compile(r"\bmv\b"),
+    re.compile(r"\bchmod\b"),
+    re.compile(r"\bchown\b"),
     re.compile(r"\brsync\b"),
     re.compile(r"\bdeploy\b"),
     re.compile(r"\bvercel\b"),
@@ -32,8 +42,9 @@ _RISKY_COMMAND_PATTERNS = [
     re.compile(r"\bpip\s+install\b"),
     re.compile(r"\bapt(-get)?\s+install\b"),
     re.compile(r"\bbrew\s+install\b"),
-    re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"),
-    re.compile(r"\bwget\b.*\|\s*(ba)?sh\b"),
+    re.compile(r"\bsnap\s+install\b"),
+    re.compile(r"\bcurl\b.*\|"),
+    re.compile(r"\bwget\b.*\|"),
     re.compile(r"\bwallet\b"),
     re.compile(r"\bsend\b.*\b(eth|btc|usdc|sol)\b"),
     re.compile(r"\bmkfs\b"),
@@ -47,13 +58,13 @@ _RISKY_COMMAND_PATTERNS = [
 _PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 
 
-def _resolve(path: str) -> str:
-    return os.path.normpath(os.path.abspath(path))
+def _resolve(path: str, cwd: str) -> str:
+    return os.path.normpath(os.path.join(cwd, path))
 
 
 def _inside_cwd(path: str, cwd: str) -> bool:
-    base = _resolve(cwd)
-    target = _resolve(path)
+    base = os.path.normpath(os.path.abspath(cwd))
+    target = _resolve(path, base)
     return target == base or target.startswith(base + os.sep)
 
 
@@ -145,6 +156,13 @@ class ApprovalManager:
         message_id = await self._send_question(project, text)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
+        existing = self._pending.get(message_id)
+        if existing is not None and not existing.done():
+            logger.warning(
+                "ApprovalManager: duplicate message_id %s — resolving old future to False",
+                message_id,
+            )
+            existing.set_result(False)
         self._pending[message_id] = future
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
