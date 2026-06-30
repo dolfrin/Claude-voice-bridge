@@ -46,7 +46,7 @@ def test_available_voices_piper_returns_default_list():
 
 def test_available_voices_together_lists_known_voices():
     voices = available_voices("together")
-    assert "friendly sidekick" in voices
+    assert "Daniel - Modern Assistant" in voices
     assert "af_bella" in voices
 
 
@@ -85,6 +85,15 @@ def test_get_tts_together_builds_together_backend():
     assert backend._api_key == "tk-xyz"
     assert backend._model == "cartesia/sonic"
     assert backend._language == "lt"
+
+
+def test_get_tts_together_can_omit_language_hint():
+    backend = get_tts(_cfg(
+        tts_backend="together",
+        together_tts_language="",
+    ))
+    assert isinstance(backend, TogetherTTS)
+    assert backend._language == ""
 
 
 def test_get_tts_unknown_backend_raises():
@@ -170,15 +179,45 @@ async def test_together_synthesize_requests_mp3_and_converts_to_opus(monkeypatch
     )
 
     backend = TogetherTTS("tk-abc", model="cartesia/sonic", language="lt")
-    out = await backend.synthesize("Labas, patikrinam balsą.", "friendly sidekick")
+    out = await backend.synthesize("Labas, patikrinam balsą.", "Daniel - Modern Assistant")
 
     assert out == b"OggS-together-opus"
     assert captured["url"] == "https://api.together.ai/v1/audio/speech"
     assert captured["headers"]["Authorization"] == "Bearer tk-abc"
+    assert captured["headers"]["User-agent"] == "voice-bridge/0.1"
     assert captured["timeout"] == 60
     assert b'"model": "cartesia/sonic"' in captured["body"]
-    assert b'"voice": "friendly sidekick"' in captured["body"]
+    assert b'"voice": "Daniel - Modern Assistant"' in captured["body"]
     assert b'"language": "lt"' in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_together_synthesize_omits_empty_language(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"MP3"
+
+    def fake_urlopen(request, timeout):
+        captured["body"] = request.data
+        return FakeResponse()
+
+    monkeypatch.setattr("voice_bridge.tts.together_tts.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "voice_bridge.tts.together_tts._mp3_to_ogg_opus",
+        AsyncMock(return_value=b"OggS"),
+    )
+
+    await TogetherTTS("tk-abc", language="").synthesize("Labas", "friendly sidekick")
+
+    assert b'"language"' not in captured["body"]
 
 
 @pytest.mark.asyncio

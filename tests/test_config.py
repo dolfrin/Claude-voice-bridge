@@ -120,6 +120,13 @@ def test_load_config_accepts_together_backend():
     assert cfg.openai_api_key == ""
 
 
+def test_load_config_together_language_auto_omits_language_hint():
+    env = _full_env()
+    env["TOGETHER_TTS_LANGUAGE"] = "auto"
+    cfg = load_config(env)
+    assert cfg.together_tts_language == ""
+
+
 def test_load_config_invalid_autonomy_raises_clear_error():
     env = _full_env()
     env["AUTONOMY_MODE"] = "yolo"

@@ -32,19 +32,22 @@ class TogetherTTS:
         return await _mp3_to_ogg_opus(mp3)
 
     def _request_mp3(self, text: str, voice: str) -> bytes:
-        body = json.dumps({
+        payload = {
             "model": self._model,
             "input": text,
             "voice": voice,
             "response_format": _RESPONSE_FORMAT,
-            "language": self._language,
-        }).encode("utf-8")
+        }
+        if self._language:
+            payload["language"] = self._language
+        body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             _ENDPOINT,
             data=body,
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "voice-bridge/0.1",
             },
             method="POST",
         )

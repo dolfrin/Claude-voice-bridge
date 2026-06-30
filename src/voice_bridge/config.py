@@ -80,6 +80,15 @@ def _optional_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
     raise ValueError(f"Config key {key} must be a boolean, got: {raw!r}")
 
 
+def _together_language(env: Mapping[str, str]) -> str:
+    raw = env.get("TOGETHER_TTS_LANGUAGE")
+    if raw is None:
+        return "lt"
+    if raw.strip().lower() == "auto":
+        return ""
+    return raw
+
+
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     """Build a validated Config from a mapping (defaults to os.environ)."""
     env = os.environ if env is None else env
@@ -108,7 +117,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         together_api_key=env.get("TOGETHER_API_KEY") or "",
         together_tts_model=env.get("TOGETHER_TTS_MODEL") or "cartesia/sonic",
-        together_tts_language=env.get("TOGETHER_TTS_LANGUAGE") or "lt",
+        together_tts_language=_together_language(env),
         tts_backend=tts_backend,
         tts_voice=env.get("TTS_VOICE") or "alloy",
         piper_voice_path=env.get("PIPER_VOICE_PATH") or "",

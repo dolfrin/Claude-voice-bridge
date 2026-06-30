@@ -153,7 +153,7 @@ TTS_VOICE=alloy
 OPENAI_API_KEY=sk-...         # only needed if TTS_BACKEND=openai
 TOGETHER_API_KEY=             # only needed if TTS_BACKEND=together
 TOGETHER_TTS_MODEL=cartesia/sonic
-TOGETHER_TTS_LANGUAGE=lt
+TOGETHER_TTS_LANGUAGE=auto
 
 # Optional: set only if you want Claude pay-per-token API billing.
 # Leave unset to use your local Claude Code subscription login.
@@ -183,7 +183,7 @@ All keys and their meaning:
 | `OPENAI_API_KEY` | — | OpenAI key; required only for `TTS_BACKEND=openai` |
 | `TOGETHER_API_KEY` | — | Together AI key; required only for `TTS_BACKEND=together` |
 | `TOGETHER_TTS_MODEL` | `cartesia/sonic` | Together TTS model |
-| `TOGETHER_TTS_LANGUAGE` | `lt` | Together TTS language hint |
+| `TOGETHER_TTS_LANGUAGE` | `lt` | Together TTS language hint; use `auto` to omit it |
 | `TTS_BACKEND` | `openai` | `openai`, `piper`, or `together` |
 | `TTS_VOICE` | `alloy` | Voice name; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |
 | `PIPER_VOICE_PATH` | — | Absolute path to `.onnx` model; required for `piper` backend |

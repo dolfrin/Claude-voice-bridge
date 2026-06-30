@@ -18,8 +18,15 @@ _OPENAI_VOICES = [
     "verse",
 ]
 _TOGETHER_VOICES = [
+    "Daniel - Modern Assistant",
+    "Skylar - Friendly Guide",
+    "Corey - Supportive Buddy",
+    "Gemma - Decisive Agent",
+    "Cora - Service Specialist",
+    "Ella - Caring Scout",
+    "Riya - College Roommate",
+    "Grace - Helpful Hand",
     "friendly sidekick",
-    "laidback woman",
     "tara",
     "leah",
     "jess",
