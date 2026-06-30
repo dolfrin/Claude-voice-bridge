@@ -83,9 +83,14 @@ async def test_openai_synthesize_requests_opus_and_returns_bytes():
     assert out == b"OggS-opus-bytes"
     mock_openai.assert_called_once_with(api_key="sk-abc")
     fake_client.audio.speech.create.assert_called_once_with(
-        model="gpt-4o-mini-tts",
+        model="gpt-4o-mini-tts-2025-12-15",
         voice="alloy",
         input="Sveiki, viskas gerai.",
+        instructions=(
+            "Speak Lithuanian naturally, like a calm human assistant in a private voice "
+            "message. Avoid announcer, robotic, overly formal, or synthetic intonation. "
+            "Use natural pacing, warm tone, and clear articulation."
+        ),
         response_format="opus",
     )
 

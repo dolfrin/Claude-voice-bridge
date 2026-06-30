@@ -5,7 +5,12 @@ import asyncio
 
 from openai import OpenAI
 
-_MODEL = "gpt-4o-mini-tts"
+_MODEL = "gpt-4o-mini-tts-2025-12-15"
+_INSTRUCTIONS = (
+    "Speak Lithuanian naturally, like a calm human assistant in a private voice "
+    "message. Avoid announcer, robotic, overly formal, or synthetic intonation. "
+    "Use natural pacing, warm tone, and clear articulation."
+)
 
 
 class OpenAITTS:
@@ -20,6 +25,7 @@ class OpenAITTS:
                 model=_MODEL,
                 voice=voice,
                 input=text,
+                instructions=_INSTRUCTIONS,
                 response_format="opus",
             )
             return response.read()

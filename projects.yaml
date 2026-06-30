@@ -3,7 +3,7 @@ projects:
     cwd: /home/home/Projects/WhisperX
     enabled: true
     autonomy: safe
-    voice: coral
+    voice: marin
     system_prompt_extra: ""
   - name: bridge
     cwd: /home/home/Projects/claude-voice-bridge
