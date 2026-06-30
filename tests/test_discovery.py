@@ -33,6 +33,15 @@ def test_discover_projects_reads_recent_local_vscode_workspaces(tmp_path):
     ]
 
 
+def test_discover_projects_skips_projects_root_itself(tmp_path):
+    home = tmp_path / "home"
+    root = home / "Projects"
+    root.mkdir(parents=True)
+    _workspace(home, "root", root.as_uri(), 100)
+
+    assert discover_projects(limit=10, home=home) == []
+
+
 def test_discover_projects_skips_explicit_cwds_and_honors_limit(tmp_path):
     home = tmp_path / "home"
     root = home / "Projects"

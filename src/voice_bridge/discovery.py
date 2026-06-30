@@ -123,6 +123,8 @@ def _claude_history_paths(home: Path, projects_root: Path):
 def _is_local_project(path: Path, projects_root: Path) -> bool:
     if not path.exists() or not path.is_dir():
         return False
+    if path == projects_root:
+        return False
     try:
         path.relative_to(projects_root)
     except ValueError:
