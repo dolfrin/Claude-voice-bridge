@@ -233,14 +233,13 @@ def test_build_panel_markup_has_per_project_and_global_rows():
 
     # two project rows + one global row
     assert len(kb) == 3
-    # project row buttons carry the project name in their callback_data
+    # per-project toggle buttons use index-based callback_data
     toggle_btns = [b for row in kb for b in row
-                   if b.callback_data.startswith("toggle:")]
-    assert {b.callback_data for b in toggle_btns} == {
-        "toggle:qwing:", "toggle:othersapp:"}
-    # global row carries all-on/all-off/engine
+                   if b.callback_data.startswith("tog:")]
+    assert {b.callback_data for b in toggle_btns} == {"tog:0", "tog:1"}
+    # global row carries all-on/all-off/engine (no colon suffix)
     last = kb[-1]
-    assert [b.callback_data for b in last] == ["allon::", "alloff::", "engine::"]
+    assert [b.callback_data for b in last] == ["allon", "alloff", "engine"]
 
 
 def test_build_panel_markup_reflects_enabled_mode_voice_engine():
@@ -264,21 +263,22 @@ def test_build_panel_markup_empty_snapshot():
     # only the global row
     assert len(markup.inline_keyboard) == 1
     assert [b.callback_data for b in markup.inline_keyboard[0]] == [
-        "allon::", "alloff::", "engine::"]
+        "allon", "alloff", "engine"]
 
 
-def test_parse_callback_splits_action_project_value():
-    assert parse_callback("toggle:qwing:") == ("toggle", "qwing", "")
-    assert parse_callback("mode:qwing:full") == ("mode", "qwing", "full")
-    assert parse_callback("allon::") == ("allon", "", "")
+def test_parse_callback_splits_action_and_index():
+    assert parse_callback("tog:0") == ("tog", "0")
+    assert parse_callback("mode:1") == ("mode", "1")
+    assert parse_callback("allon") == ("allon", "")
+    assert parse_callback("engine") == ("engine", "")
 
 
 @pytest.mark.asyncio
 async def test_callback_toggle_off_project_calls_controls():
-    controls = FakeControls()  # qwing currently enabled=True
+    controls = FakeControls()  # qwing is index 0, currently enabled=True
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     query = AsyncMock()
-    query.data = "toggle:qwing:"
+    query.data = "tog:0"
     query.from_user = MagicMock(id=42)
     query.answer = AsyncMock()
     query.edit_message_reply_markup = AsyncMock()
@@ -294,10 +294,10 @@ async def test_callback_toggle_off_project_calls_controls():
 
 @pytest.mark.asyncio
 async def test_callback_mode_cycles_to_next_mode():
-    controls = FakeControls()  # qwing mode == "safe"
+    controls = FakeControls()  # qwing is index 0, mode == "safe"
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     query = AsyncMock()
-    query.data = "mode:qwing:"
+    query.data = "mode:0"
     query.from_user = MagicMock(id=42)
     query.answer = AsyncMock()
     query.edit_message_reply_markup = AsyncMock()
@@ -311,10 +311,10 @@ async def test_callback_mode_cycles_to_next_mode():
 
 @pytest.mark.asyncio
 async def test_callback_voice_cycles_to_next_voice():
-    controls = FakeControls()  # qwing voice == "nova"
+    controls = FakeControls()  # qwing is index 0, voice == "nova"
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     query = AsyncMock()
-    query.data = "voice:qwing:"
+    query.data = "voice:0"
     query.from_user = MagicMock(id=42)
     query.answer = AsyncMock()
     query.edit_message_reply_markup = AsyncMock()
@@ -342,9 +342,9 @@ async def test_callback_all_on_and_engine_toggle():
         upd.callback_query = q
         await io._handle_callback(upd, MagicMock())
 
-    await run_cb("allon::")
-    await run_cb("alloff::")
-    await run_cb("engine::")  # current engine openai -> piper
+    await run_cb("allon")
+    await run_cb("alloff")
+    await run_cb("engine")  # current engine openai -> piper
 
     assert ("toggle", None, True) in controls.calls
     assert ("toggle", None, False) in controls.calls
@@ -356,7 +356,7 @@ async def test_callback_from_non_whitelisted_user_is_ignored():
     controls = FakeControls()
     io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
     query = AsyncMock()
-    query.data = "toggle:qwing:"
+    query.data = "tog:0"
     query.from_user = MagicMock(id=999)
     query.answer = AsyncMock()
     update = MagicMock()
@@ -365,6 +365,66 @@ async def test_callback_from_non_whitelisted_user_is_ignored():
     await io._handle_callback(update, MagicMock())
 
     assert controls.calls == []
+
+
+# --------------------------------------------------------------------------
+# regression: project names containing ":" round-trip correctly
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_colon_project_name_toggle_resolves_correctly():
+    """A project named with colons (e.g. 'a:b:c') must round-trip through
+    build_panel_markup -> callback_data -> _handle_callback and resolve to
+    the correct controls.toggle('a:b:c', ...) call."""
+
+    class ColonControls:
+        def __init__(self):
+            self.calls = []
+            self._snapshot = [
+                {"project": "a:b:c", "enabled": True, "mode": "safe",
+                 "voice": "nova", "engine": "openai", "last_active": False},
+                {"project": "normal", "enabled": False, "mode": "full",
+                 "voice": "echo", "engine": "openai", "last_active": False},
+            ]
+
+        async def toggle(self, project, on):
+            self.calls.append(("toggle", project, on))
+
+        async def set_mode(self, project, mode):
+            self.calls.append(("set_mode", project, mode))
+
+        async def set_voice(self, project, voice):
+            self.calls.append(("set_voice", project, voice))
+
+        async def set_engine(self, name):
+            self.calls.append(("set_engine", name))
+
+        def snapshot(self):
+            return self._snapshot
+
+    controls = ColonControls()
+    snap = controls.snapshot()
+
+    # Verify the panel encodes project 'a:b:c' (index 0) as "tog:0"
+    markup = build_panel_markup(snap)
+    kb = markup.inline_keyboard
+    tog_btn = next(b for b in kb[0] if b.callback_data.startswith("tog:"))
+    assert tog_btn.callback_data == "tog:0", (
+        f"Expected 'tog:0', got {tog_btn.callback_data!r}")
+
+    # Simulate tapping that button: _handle_callback must call toggle('a:b:c', False)
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = tog_btn.callback_data  # "tog:0"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("toggle", "a:b:c", False) in controls.calls, (
+        f"Expected toggle('a:b:c', False), got {controls.calls}")
 
 
 # --------------------------------------------------------------------------

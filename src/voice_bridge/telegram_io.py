@@ -70,15 +70,18 @@ def _next(seq: list[str], current: str) -> str:
     return seq[(i + 1) % len(seq)]
 
 
-def parse_callback(data: str) -> tuple[str, str, str]:
-    """Decode ``"<action>:<project>:<value>"`` callback data.
+def parse_callback(data: str) -> tuple[str, str]:
+    """Decode ``"<action>:<index_or_empty>"`` callback data.
 
-    project ``""`` means a global action; value ``""`` means no payload.
+    Returns ``(action, index_str)`` where ``index_str`` is the project index
+    (as a string) for per-project actions, or ``""`` for global actions.
+    Global actions: ``allon``, ``alloff``, ``engine``.
+    Per-project actions: ``tog``, ``mode``, ``voice``, ``noop``.
     """
-    parts = data.split(":", 2)
-    while len(parts) < 3:
-        parts.append("")
-    return parts[0], parts[1], parts[2]
+    parts = data.split(":", 1)
+    action = parts[0]
+    index_str = parts[1] if len(parts) > 1 else ""
+    return action, index_str
 
 
 def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
@@ -86,28 +89,33 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
 
     Pure function: maps a snapshot (list of dicts keyed by ``"project"``) to an
     ``InlineKeyboardMarkup`` with one row per project plus a global row.
+
+    Per-project buttons encode the project's INDEX into the snapshot list as
+    callback_data (e.g. ``"tog:0"``). This avoids any dependency on project-name
+    characters (especially ``:``) and keeps callback_data well under the 64-byte
+    Telegram limit. Index order is stable (projects come from static config).
     """
     rows: list[list[InlineKeyboardButton]] = []
-    for row in snapshot:
+    for i, row in enumerate(snapshot):
         proj = row["project"]
         dot = "\U0001F7E2" if row["enabled"] else "\U0001F534"  # green/red
         on_label = "ON" if row["enabled"] else "OFF"
         rows.append([
             InlineKeyboardButton(
-                f"{dot} {proj}", callback_data=f"noop:{proj}:"),
+                f"{dot} {proj}", callback_data=f"noop:{i}"),
             InlineKeyboardButton(
-                on_label, callback_data=f"toggle:{proj}:"),
+                on_label, callback_data=f"tog:{i}"),
             InlineKeyboardButton(
-                f"{row['mode']} ▾", callback_data=f"mode:{proj}:"),
+                f"{row['mode']} ▾", callback_data=f"mode:{i}"),
             InlineKeyboardButton(
-                f"{row['voice']} ▾", callback_data=f"voice:{proj}:"),
+                f"{row['voice']} ▾", callback_data=f"voice:{i}"),
         ])
     engine = snapshot[0]["engine"] if snapshot else "openai"
     rows.append([
-        InlineKeyboardButton("▶ ALL ON", callback_data="allon::"),
-        InlineKeyboardButton("⏸ ALL OFF", callback_data="alloff::"),
+        InlineKeyboardButton("▶ ALL ON", callback_data="allon"),
+        InlineKeyboardButton("⏸ ALL OFF", callback_data="alloff"),
         InlineKeyboardButton(
-            f"engine: {engine} ▾", callback_data="engine::"),
+            f"engine: {engine} ▾", callback_data="engine"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -222,29 +230,42 @@ class TelegramIO:
         if query is None or not self._allowed(query.from_user.id):
             return
         await query.answer()
-        action, project, _value = parse_callback(query.data)
-        snap = {r["project"]: r for r in self.controls.snapshot()}
+        action, index_str = parse_callback(query.data)
 
         if action == "noop":
             return
-        if action == "toggle":
-            cur = snap.get(project, {}).get("enabled", False)
-            await self.controls.toggle(project, not cur)
-        elif action == "mode":
-            cur = snap.get(project, {}).get("mode", _MODES[0])
-            await self.controls.set_mode(project, _next(_MODES, cur))
-        elif action == "voice":
-            cur = snap.get(project, {}).get("voice", _OPENAI_VOICES[0])
-            await self.controls.set_voice(project, _next(_OPENAI_VOICES, cur))
-        elif action == "allon":
+
+        # Global actions do not need a project index.
+        if action == "allon":
             await self.controls.toggle(None, True)
         elif action == "alloff":
             await self.controls.toggle(None, False)
         elif action == "engine":
-            cur = next(iter(snap.values()), {}).get("engine", _ENGINES[0])
+            snap_list = self.controls.snapshot()
+            cur = snap_list[0]["engine"] if snap_list else _ENGINES[0]
             await self.controls.set_engine(_next(_ENGINES, cur))
         else:
-            return
+            # Per-project actions: resolve project by index from a fresh snapshot.
+            try:
+                idx = int(index_str)
+            except (ValueError, TypeError):
+                return
+            snap_list = self.controls.snapshot()
+            if idx < 0 or idx >= len(snap_list):
+                return  # guard against out-of-range
+            row = snap_list[idx]
+            project = row["project"]
+
+            if action == "tog":
+                await self.controls.toggle(project, not row["enabled"])
+            elif action == "mode":
+                await self.controls.set_mode(
+                    project, _next(_MODES, row["mode"]))
+            elif action == "voice":
+                await self.controls.set_voice(
+                    project, _next(_OPENAI_VOICES, row["voice"]))
+            else:
+                return
 
         new_markup = build_panel_markup(self.controls.snapshot())
         await query.edit_message_reply_markup(reply_markup=new_markup)
