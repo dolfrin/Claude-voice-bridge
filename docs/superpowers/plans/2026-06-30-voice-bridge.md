@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Python 3.11+, asyncio throughout. Single event loop.
+- Python 3.10 (server has 3.10.12; PEP 604 `X | None` unions and `match` are available). `requires-python = ">=3.10"`. asyncio throughout. Single event loop. (See correction C11.)
 - Telegram voice format is OGG/Opus; TTS must emit OGG/Opus bytes; STT must accept OGG/Opus bytes.
 - Only TELEGRAM_ALLOWED_USER_ID may interact; every inbound update is whitelisted first.
 - Voice channel NEVER contains code: strip fenced blocks, inline code, hex colors, dimensions/units (10px,2rem), file paths, URLs, snake_case/camelCase/CONSTANT identifiers.
@@ -186,7 +186,107 @@ real SDK installed.
 Task 8 captures `SystemMessage(subtype="init").data["session_id"]`. Before relying on
 resume, confirm against the installed `claude-agent-sdk` (per the SDK docs the id also
 appears on `ResultMessage.session_id`). If the field differs, adjust the capture and
-leave a comment linking the SDK `sessions` doc.
+leave a comment linking the SDK `sessions` doc. (Superseded by C12 — the field is verified.)
+
+### C11 — Environment & test foundation (controller has set this up)
+- **Target Python 3.10**, not 3.11. Set `requires-python = ">=3.10"` in pyproject (overrides Task 1's `>=3.11`). Everything used (PEP 604 unions, `match`) exists in 3.10.
+- A virtualenv exists at `.venv/` (git-ignored) with **pytest, pytest-asyncio, pyyaml, aiosqlite, claude-agent-sdk, python-telegram-bot, openai** installed. Activate it to run tests: `. .venv/bin/activate && python -m pytest`.
+- The two HEAVY deps **faster-whisper** and **piper-tts** are NOT installed. Therefore:
+  - `stt.py` and `tts/piper_tts.py` MUST lazy-import them **inside** the constructor/method (not at module top level), so importing the module never requires the package.
+  - Task 1 creates `tests/conftest.py` that registers lightweight `sys.modules` stubs so test collection never fails:
+    ```python
+    # tests/conftest.py
+    import sys, types
+    def _ensure(name):
+        if name not in sys.modules:
+            sys.modules[name] = types.ModuleType(name)
+        return sys.modules[name]
+    fw = _ensure("faster_whisper")
+    if not hasattr(fw, "WhisperModel"):
+        fw.WhisperModel = object  # tests patch voice_bridge.stt.WhisperModel
+    _ensure("piper")  # piper_tts lazy-imports 'piper'; tests patch the subprocess/synth call
+    ```
+- pytest config (`[tool.pytest.ini_options] asyncio_mode = "auto"`) is in pyproject from Task 1 — keep it.
+
+### C12 — Verified `claude-agent-sdk` API (v0.2.110) — use these EXACT shapes (Tasks 6, 7, 8)
+Introspected from the installed package; this OVERRIDES any guessed SDK usage in the task bodies.
+
+Imports:
+```python
+from claude_agent_sdk import (
+    ClaudeSDKClient, ClaudeAgentOptions,
+    AssistantMessage, TextBlock, ResultMessage, SystemMessage,
+    PermissionResultAllow, PermissionResultDeny,
+    create_sdk_mcp_server, tool,
+)
+```
+
+**session_id (resolves C10):** read it directly from `ResultMessage.session_id` (also on `AssistantMessage.session_id`). Do NOT parse `SystemMessage.data`.
+
+**permission_mode** valid literals: `'default','acceptEdits','plan','bypassPermissions','dontAsk','auto'`.
+
+**Streaming session loop (Task 8), canonical:**
+```python
+options = ClaudeAgentOptions(
+    cwd=project.cwd,
+    model=project.model,                       # or None
+    system_prompt=appended_instructions,        # str
+    permission_mode="bypassPermissions" if mode == "full" else "default",
+    can_use_tool=None if mode == "full" else make_can_use_tool(project, cfg, approvals),
+    mcp_servers={"bridge": notify_server},      # create_sdk_mcp_server("bridge", tools=[...])
+    allowed_tools=["mcp__bridge__notify_user"],
+    resume=saved_session_id,                     # str | None
+)
+client = ClaudeSDKClient(options)
+await client.connect()
+try:
+    while True:
+        text = await queue.get()                # next user turn (None => shutdown sentinel)
+        if text is None:
+            break
+        await client.query(text)
+        async for msg in client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                parts = [b.text for b in msg.content if isinstance(b, TextBlock)]
+                if parts:
+                    await on_outbound(Outbound(project.name, "\n".join(parts), ""))  # spoken filled in make_outbound
+            elif isinstance(msg, ResultMessage):
+                if msg.session_id:
+                    await store.set_session_id(project.name, msg.session_id)
+finally:
+    await client.disconnect()
+```
+`ClaudeSDKClient` methods: `connect, disconnect, query, receive_response, receive_messages, interrupt, set_model, set_permission_mode`. Tests mock `ClaudeSDKClient` with a fake exposing `connect/query/receive_response/disconnect` (an async-generator `receive_response`).
+
+**can_use_tool (Task 6)** — exact signature `ClaudeAgentOptions.can_use_tool: Callable[[str, dict, ToolPermissionContext], Awaitable[PermissionResultAllow | PermissionResultDeny]]`:
+```python
+def make_can_use_tool(project, cfg, approvals):
+    mode = effective_autonomy(project, cfg)         # 'full'|'safe'|'ask'
+    async def can_use_tool(tool_name, tool_input, context):
+        if mode == "full":
+            return PermissionResultAllow()
+        if mode == "safe" and not is_risky(tool_name, tool_input, project.cwd):
+            return PermissionResultAllow()
+        approved = await approvals.request(project.name, tool_name, tool_input)
+        return PermissionResultAllow() if approved else PermissionResultDeny(message="User denied or timed out")
+    return can_use_tool
+```
+`PermissionResultAllow()` (no args = allow). `PermissionResultDeny(message=...)`. Task 6 tests stub these two classes via `sys.modules` OR import them for real (the SDK IS installed, so real import works — prefer real import, drop the C9 stub requirement since the SDK is present).
+
+**MCP notify tool (Task 7):**
+```python
+from claude_agent_sdk import tool, create_sdk_mcp_server
+NOTIFY_TOOL_NAME = "mcp__bridge__notify_user"
+def make_notify_server(on_notify):
+    @tool("notify_user",
+          "Send a short status/question to the user. 'summary' is spoken aloud (no code); 'detail' is text-only.",
+          {"summary": str, "detail": str})
+    async def notify_user(args):
+        await on_notify(args.get("summary", ""), args.get("detail", ""))
+        return {"content": [{"type": "text", "text": "delivered"}]}
+    return create_sdk_mcp_server("bridge", tools=[notify_user])
+```
+`create_sdk_mcp_server(name, version="1.0.0", tools=[...])` returns the value to put in `mcp_servers`. Tests call `notify_user(...)`'s handler directly (it's wrapped; access via the returned server's tool list or keep a reference) and assert `on_notify` fired with `(summary, detail)`.
 
 ---
 
