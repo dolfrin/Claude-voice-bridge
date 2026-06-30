@@ -51,7 +51,8 @@ One always-on Python service, `systemd`-managed:
 Each module is a single-responsibility unit with a well-defined interface:
 
 - **telegram_io** — long-polling bot; receives voice + text; sends text + voice;
-  handles commands (`/mode`, `/voice`, `/projects`, `/status`).
+  handles commands and the `/panel` inline-button control board (`callback_query`
+  toggles for per-project on/off, all-on/all-off, mode, voice, engine).
 - **stt** — `transcribe(ogg_bytes) -> str` via faster-whisper (VAD trim, `lt`).
 - **tts/** — `TTSBackend` interface + `openai_tts` + `piper_tts`;
   `synthesize(text, voice) -> ogg_bytes`.
@@ -121,6 +122,7 @@ resumes the conversation.
   projects:
     - name: qwing
       cwd: /home/home/Projects/WhisperX
+      enabled: true             # on/off; default true. Persisted state in SQLite
       autonomy: safe            # optional override of global AUTONOMY_MODE
       voice: nova               # optional override of global TTS_VOICE
       model: claude-opus-4-8    # optional
@@ -129,9 +131,15 @@ resumes the conversation.
 - One `ClaudeSDKClient` per project in streaming-input mode (async generator of user
   messages drained from the project's queue). The bridge awaits each assistant
   response, emits outbound messages, then waits for the next queued user turn.
+- **Enabled (on/off) state per project.** When a project is **off** its session is
+  held: it is not drained, emits no outbound messages, and inbound replies to it are
+  rejected with a short note ("qwing is off"). When toggled **on** it resumes from its
+  saved `session_id`. A global toggle flips all projects at once. The `enabled` flag is
+  persisted in SQLite (survives restart) and seeded from `projects.yaml`.
 - **Persistence/restart:** SQLite stores each project's `session_id` (captured from the
-  `system`/`init` message), the `message_id ↔ project` map, and pending approvals. On
-  restart, sessions resume via the SDK `resume` option; lazily re-spawned on first use.
+  `system`/`init` message), `enabled` state, the `message_id ↔ project` map, and pending
+  approvals. On restart, sessions resume via the SDK `resume` option; lazily re-spawned
+  on first use (only for enabled projects).
 - **last-active project** is tracked for inbound fallback routing.
 - Concurrency: N independent `ClaudeSDKClient` instances in one event loop (SDK
   supports multiple concurrent sessions; each is isolated by `cwd` + `session_id`).
@@ -175,16 +183,42 @@ is told "no answer, skipped" so it can move on or pause gracefully.
     different and is identifiable by ear, complementing the spoken name prefix.
   - Live switch: `/voice list`, `/voice <name>` (optionally `/voice <name> for <project>`).
 
-## 8. Telegram commands
+## 8. Telegram control: commands + button panel
+
+### 8.1 Control panel (`/panel`) — inline keyboard buttons
+
+`/panel` renders a live control board using Telegram **inline keyboard buttons**
+(`InlineKeyboardMarkup` + `callback_query`). No separate UI app — it lives in the chat.
+Tapping a button toggles state instantly and the message edits in place:
+
+```
+🟢 qwing       [ ON  ] [ safe ▾ ] [ nova ▾ ]
+🔴 othersapp   [ OFF ] [ full ▾ ] [ echo ▾ ]
+──────────────────────────────────────────
+[ ▶ ALL ON ]   [ ⏸ ALL OFF ]   [ engine: openai ▾ ]
+```
+
+- Per-project **ON/OFF** toggle (enable/disable that project).
+- Global **ALL ON / ALL OFF** toggles every project at once.
+- Per-project autonomy (`safe`/`full`/`ask`) and voice cycle via their buttons.
+- Global TTS engine toggle.
+
+Buttons are the easy path when you can glance at the phone; the text commands below do
+the same thing and remain available for typing or via voice intent.
+
+### 8.2 Text commands
 
 | Command | Effect |
 |---|---|
-| `/projects` | List projects + current mode/voice/last-active |
+| `/panel` | Show the inline-button control board |
+| `/projects` | List projects + current on/off, mode, voice, last-active |
+| `/on [project]` / `/off [project]` | Enable/disable a project (no arg = the global all-on/all-off) |
 | `/status [project]` | Ask a project for a quick status |
 | `/mode <full\|safe\|ask> [project]` | Set autonomy globally or per project |
 | `/voice list` / `/voice <name> [for <project>]` | List/set TTS voice |
 | `/engine <openai\|piper>` | Switch TTS backend |
-| `/pause [project]` / `/resume [project]` | Hold/continue a session |
+
+(On/off is the single hold mechanism — there is no separate pause/resume concept.)
 
 ## 9. Security
 
@@ -271,5 +305,7 @@ DB_PATH=/var/lib/voice-bridge/state.db
   last-active fallback both verified).
 - Voice never dictates code or `: 10px`-style fragments (sanitizer unit-tested).
 - `/mode`, `/voice`, `/engine` switch behavior live.
+- `/panel` buttons toggle per-project on/off and all-on/all-off; off projects go silent
+  and resume cleanly when switched back on (state survives restart).
 - `safe` mode blocks a `git push` and asks by voice; `deny`/timeout both handled.
 - Only the whitelisted Telegram user can drive the bot.
