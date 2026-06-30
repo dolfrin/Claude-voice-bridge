@@ -171,6 +171,8 @@ class FakeCfg:
     db_path = "/tmp/ignored.db"
     whisper_model = "large-v3"
     approval_timeout = 300
+    auto_discover_projects = False
+    auto_discover_limit = 12
 
 
 def _msg(message_id=7, reply_to=None, text="", is_voice=False, audio=None):

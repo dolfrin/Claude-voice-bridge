@@ -25,6 +25,8 @@ class Config:
     autonomy_mode: str
     approval_timeout: int
     db_path: str
+    auto_discover_projects: bool = False
+    auto_discover_limit: int = 12
 
 
 @dataclass
@@ -63,6 +65,18 @@ def _optional_int(env: Mapping[str, str], key: str, default: int) -> int:
         raise ValueError(f"Config key {key} must be an integer, got: {raw!r}")
 
 
+def _optional_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
+    raw = env.get(key)
+    if raw is None or raw == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Config key {key} must be a boolean, got: {raw!r}")
+
+
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     """Build a validated Config from a mapping (defaults to os.environ)."""
     env = os.environ if env is None else env
@@ -93,6 +107,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         autonomy_mode=autonomy_mode,
         approval_timeout=_optional_int(env, "APPROVAL_TIMEOUT", 300),
         db_path=env.get("DB_PATH") or "voice-bridge.db",
+        auto_discover_projects=_optional_bool(
+            env, "AUTO_DISCOVER_PROJECTS", False
+        ),
+        auto_discover_limit=_optional_int(env, "AUTO_DISCOVER_LIMIT", 12),
     )
 
 

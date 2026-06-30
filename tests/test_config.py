@@ -26,6 +26,8 @@ def _full_env() -> dict[str, str]:
         "AUTONOMY_MODE": "safe",
         "APPROVAL_TIMEOUT": "300",
         "DB_PATH": "/var/lib/voice-bridge/state.db",
+        "AUTO_DISCOVER_PROJECTS": "true",
+        "AUTO_DISCOVER_LIMIT": "8",
     }
 
 
@@ -45,6 +47,8 @@ def test_load_config_parses_all_fields_with_correct_types():
     assert cfg.approval_timeout == 300
     assert isinstance(cfg.approval_timeout, int)
     assert cfg.db_path == "/var/lib/voice-bridge/state.db"
+    assert cfg.auto_discover_projects is True
+    assert cfg.auto_discover_limit == 8
 
 
 def test_load_config_applies_defaults_for_optional_keys():
@@ -62,6 +66,8 @@ def test_load_config_applies_defaults_for_optional_keys():
     assert cfg.autonomy_mode == "safe"
     assert cfg.approval_timeout == 300
     assert cfg.db_path == "voice-bridge.db"
+    assert cfg.auto_discover_projects is False
+    assert cfg.auto_discover_limit == 12
 
 
 def test_load_config_missing_required_key_raises_clear_error():
@@ -102,6 +108,14 @@ def test_load_config_invalid_autonomy_raises_clear_error():
     with pytest.raises(ValueError) as exc:
         load_config(env)
     assert "AUTONOMY_MODE" in str(exc.value)
+
+
+def test_load_config_invalid_auto_discover_bool_raises_clear_error():
+    env = _full_env()
+    env["AUTO_DISCOVER_PROJECTS"] = "maybe"
+    with pytest.raises(ValueError) as exc:
+        load_config(env)
+    assert "AUTO_DISCOVER_PROJECTS" in str(exc.value)
 
 
 def test_load_projects_parses_fields_and_defaults(tmp_path):

@@ -34,6 +34,7 @@ from .config import (
     load_config,
     load_projects,
 )
+from .discovery import discover_projects, merge_projects
 from .routing import Store
 from .sanitizer import prepare_outbound, to_spoken
 from .sessions import SessionManager
@@ -324,6 +325,12 @@ async def build() -> Wiring:
     """
     cfg = load_config()
     projects = load_projects()
+    if cfg.auto_discover_projects:
+        explicit_cwds = {p.cwd for p in projects}
+        projects = merge_projects(
+            projects,
+            discover_projects(cfg.auto_discover_limit, explicit_cwds=explicit_cwds),
+        )
 
     store = Store(cfg.db_path)
     await store.init()

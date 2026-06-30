@@ -181,6 +181,8 @@ All keys and their meaning:
 | `AUTONOMY_MODE` | `safe` | `full` (run everything) / `safe` (ask for risky ops) / `ask` (ask for all) |
 | `APPROVAL_TIMEOUT` | `300` | Seconds before an unanswered approval auto-denies |
 | `DB_PATH` | `voice-bridge.db` | SQLite database path |
+| `AUTO_DISCOVER_PROJECTS` | `false` | Add recent local VS Code/Claude projects to `/panel` at startup, disabled by default |
+| `AUTO_DISCOVER_LIMIT` | `12` | Maximum auto-discovered projects to add |
 
 > `.env` is git-ignored and must be `chmod 600`. Never commit it.
 
@@ -190,6 +192,11 @@ Declare the projects you want the bridge to manage. `enabled` is seeded into SQL
 first run and persisted thereafter (the `/panel` button or `/on`/`/off` commands
 override it at runtime). All keys except `name` and `cwd` are optional overrides of the
 global config.
+
+If `AUTO_DISCOVER_PROJECTS=true`, the bridge also scans recent local VS Code and Claude
+project history under `~/Projects` at startup. Discovered projects are added to the
+runtime panel with `enabled: false`; entries in `projects.yaml` always win when names or
+directories overlap.
 
 ```yaml
 projects:
