@@ -16,6 +16,27 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 NOTIFY_TOOL_NAME = "mcp__bridge__notify_user"
 
 
+def _build_notify_tool(on_notify: Callable[[str, str], Awaitable[None]]):
+    """Build the ``notify_user`` tool bound to *on_notify*.
+
+    Returns:
+        An ``SdkMcpTool`` instance ready for use with ``create_sdk_mcp_server``.
+    """
+
+    @tool(
+        "notify_user",
+        "Send a short status/question to the user. 'summary' is spoken aloud (no code); 'detail' is text-only.",
+        {"summary": str, "detail": str},
+    )
+    async def notify_user(args: dict) -> dict:
+        summary = args.get("summary", "")
+        detail = args.get("detail", "")
+        await on_notify(summary, detail)
+        return {"content": [{"type": "text", "text": "delivered"}]}
+
+    return notify_user
+
+
 def make_notify_server(on_notify: Callable[[str, str], Awaitable[None]]):
     """Build the in-process MCP server exposing ``notify_user``.
 
@@ -27,22 +48,4 @@ def make_notify_server(on_notify: Callable[[str, str], Awaitable[None]]):
         The SDK MCP server config (from ``create_sdk_mcp_server``) for use in
         ``ClaudeAgentOptions.mcp_servers``.
     """
-
-    @tool(
-        "notify_user",
-        "Send the user a short status update mid-turn. "
-        "summary is a one-line spoken-friendly message; detail is optional "
-        "longer context shown in text.",
-        {"summary": str, "detail": str},
-    )
-    async def notify_user(args: dict) -> dict:
-        summary = args["summary"]
-        detail = args.get("detail", "")
-        await on_notify(summary, detail)
-        return {"content": [{"type": "text", "text": "Notification sent to user."}]}
-
-    return create_sdk_mcp_server(
-        name="bridge",
-        version="1.0.0",
-        tools=[notify_user],
-    )
+    return create_sdk_mcp_server("bridge", tools=[_build_notify_tool(on_notify)])
