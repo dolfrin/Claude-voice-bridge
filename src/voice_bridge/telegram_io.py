@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Awaitable, Callable, Protocol
 
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -60,6 +61,16 @@ class Controls(Protocol):
 
 _MODES = ["safe", "full", "ask"]
 _ENGINES = ["openai", "piper"]
+_BOT_COMMANDS = [
+    BotCommand("panel", "Open project control panel"),
+    BotCommand("projects", "List project state"),
+    BotCommand("status", "Ask a project for status"),
+    BotCommand("on", "Enable one project or all"),
+    BotCommand("off", "Disable one project or all"),
+    BotCommand("mode", "Set autonomy mode"),
+    BotCommand("voice", "List or set TTS voice"),
+    BotCommand("engine", "Switch TTS backend"),
+]
 
 
 def _next(seq: list[str], current: str) -> str:
@@ -471,6 +482,7 @@ class TelegramIO:
             only_me & filters.TEXT & ~filters.COMMAND, self._handle_text))
 
         await app.initialize()
+        await app.bot.set_my_commands(_BOT_COMMANDS)
         await app.start()
         await app.updater.start_polling()
 

@@ -746,6 +746,8 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.add_handler = MagicMock(side_effect=lambda h: added.append(h))
     fake_app.initialize = AsyncMock()
     fake_app.start = AsyncMock()
+    fake_app.bot = MagicMock()
+    fake_app.bot.set_my_commands = AsyncMock()
     fake_app.updater = MagicMock()
     fake_app.updater.start_polling = AsyncMock()
 
@@ -764,6 +766,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_builder.token.assert_called_once_with("TESTTOKEN")
     assert io.app is fake_app
     fake_app.initialize.assert_awaited_once()
+    fake_app.bot.set_my_commands.assert_awaited_once()
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
     # at least: panel, projects, on, off, mode, voice, engine, status,
@@ -778,6 +781,11 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     assert {"panel", "projects", "on", "off",
             "mode", "voice", "engine", "status"} <= cmd_names
 
+    registered = fake_app.bot.set_my_commands.await_args.args[0]
+    registered_names = {cmd.command for cmd in registered}
+    assert {"panel", "projects", "status", "on", "off",
+            "mode", "voice", "engine"} == registered_names
+
 
 @pytest.mark.asyncio
 async def test_run_returns_without_blocking(monkeypatch):
@@ -788,6 +796,8 @@ async def test_run_returns_without_blocking(monkeypatch):
     fake_app.add_handler = MagicMock()
     fake_app.initialize = AsyncMock()
     fake_app.start = AsyncMock()
+    fake_app.bot = MagicMock()
+    fake_app.bot.set_my_commands = AsyncMock()
     fake_app.updater = MagicMock()
     fake_app.updater.start_polling = AsyncMock()
 
