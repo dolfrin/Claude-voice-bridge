@@ -125,7 +125,12 @@ def make_outbound(
                 logger.exception("TTS synthesize failed for %s; sending text-only", o.project)
                 voice_bytes = None
 
-        ids = await telegram.send_update(o.project, voice, full_text, voice_bytes)
+        if o.file_path:
+            ids = await telegram.send_file(
+                o.project, voice, full_text, voice_bytes, o.file_path
+            )
+        else:
+            ids = await telegram.send_update(o.project, voice, full_text, voice_bytes)
         for mid in ids:
             await store.map_message(mid, o.project)
         await store.set_last_active(o.project)
@@ -419,6 +424,11 @@ async def build() -> Wiring:
         async def send_update(self, project, voice_label, text, voice_bytes):
             return await telegram_ref["io"].send_update(
                 project, voice_label, text, voice_bytes
+            )
+
+        async def send_file(self, project, voice_label, text, voice_bytes, file_path):
+            return await telegram_ref["io"].send_file(
+                project, voice_label, text, voice_bytes, file_path
             )
 
         async def send_question(self, project, text):

@@ -43,7 +43,7 @@ from claude_agent_sdk import (
 
 from .approvals import ApprovalManager, make_can_use_tool
 from .config import Config, ProjectConfig, effective_autonomy
-from .notify_tool import NOTIFY_TOOL_NAME, make_notify_server
+from .notify_tool import NOTIFY_TOOL_NAME, SEND_FILE_TOOL_NAME, make_notify_server
 from .routing import Store
 from .transcript import append_transcript
 from .types import Outbound
@@ -198,7 +198,7 @@ class SessionManager:
             permission_mode=permission_mode,
             can_use_tool=can_use_tool,
             mcp_servers={"bridge": notify_server},
-            allowed_tools=[NOTIFY_TOOL_NAME],
+            allowed_tools=[NOTIFY_TOOL_NAME, SEND_FILE_TOOL_NAME],
             resume=resume,
         )
 
@@ -219,13 +219,39 @@ class SessionManager:
 
         return on_notify
 
+    def _make_on_send_file(
+        self, project_name: str
+    ) -> Callable[[str, str], Awaitable[str]]:
+        project = self._projects[project_name]
+
+        async def on_send_file(path: str, caption: str) -> str:
+            resolved = _resolve_project_file(project.cwd, path)
+            if resolved is None:
+                return "denied: path must be inside the project directory"
+            if not resolved.is_file():
+                return "not found: file does not exist"
+            await self._on_outbound(
+                Outbound(
+                    project=project_name,
+                    text=caption.strip() or resolved.name,
+                    spoken="",
+                    file_path=str(resolved),
+                )
+            )
+            return "delivered"
+
+        return on_send_file
+
     async def _start(self, name: str) -> None:
         if name in self._sessions:
             return
         project = self._projects[name]
         sess = _Session(project)
 
-        notify_server = make_notify_server(self._make_on_notify(name))
+        notify_server = make_notify_server(
+            self._make_on_notify(name),
+            self._make_on_send_file(name),
+        )
         resume = await self._store.get_session_id(name)
         options = self._build_options(project, resume, notify_server)
 
@@ -373,3 +399,18 @@ class SessionManager:
             )
         except Exception:  # pragma: no cover - defensive
             logger.exception("failed to emit crash Outbound for %s", name)
+
+
+def _resolve_project_file(cwd: str, requested: str) -> Path | None:
+    if not requested.strip():
+        return None
+    root = Path(cwd).resolve()
+    path = Path(requested).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return resolved

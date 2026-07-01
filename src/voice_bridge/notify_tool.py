@@ -1,9 +1,8 @@
-"""In-process Claude Agent SDK MCP server exposing ``notify_user``.
+"""In-process Claude Agent SDK MCP server exposing bridge tools.
 
-This lets a running agent ping the user mid-turn. The single tool forwards its
-arguments to an injected async ``on_notify(summary, detail)`` callback, which the
-bridge wires to the Telegram + TTS outbound path. No blocking work happens here,
-so the single event loop is never stalled.
+This lets a running agent ping the user mid-turn and send project-local files
+back to Telegram. Tool callbacks are injected by the bridge and stay async, so
+the single event loop is never stalled.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 # Server name "bridge" + tool name "notify_user" => SDK fully-qualified name.
 NOTIFY_TOOL_NAME = "mcp__bridge__notify_user"
+SEND_FILE_TOOL_NAME = "mcp__bridge__send_file"
 
 
 def _build_notify_tool(on_notify: Callable[[str, str], Awaitable[None]]):
@@ -37,15 +37,39 @@ def _build_notify_tool(on_notify: Callable[[str, str], Awaitable[None]]):
     return notify_user
 
 
-def make_notify_server(on_notify: Callable[[str, str], Awaitable[None]]):
-    """Build the in-process MCP server exposing ``notify_user``.
+def _build_send_file_tool(on_send_file: Callable[[str, str], Awaitable[str]]):
+    """Build the ``send_file`` tool bound to *on_send_file*."""
+
+    @tool(
+        "send_file",
+        "Send a project-local file to the user on Telegram. 'path' must be inside the project directory; 'caption' is optional.",
+        {"path": str, "caption": str},
+    )
+    async def send_file(args: dict) -> dict:
+        path = args.get("path", "")
+        caption = args.get("caption", "")
+        result = await on_send_file(path, caption)
+        return {"content": [{"type": "text", "text": result}]}
+
+    return send_file
+
+
+def make_notify_server(
+    on_notify: Callable[[str, str], Awaitable[None]],
+    on_send_file: Callable[[str, str], Awaitable[str]] | None = None,
+):
+    """Build the in-process MCP server exposing bridge tools.
 
     Args:
         on_notify: async callback invoked as ``on_notify(summary, detail)`` each
             time the agent calls the tool.
+        on_send_file: async callback invoked as ``on_send_file(path, caption)``.
 
     Returns:
         The SDK MCP server config (from ``create_sdk_mcp_server``) for use in
         ``ClaudeAgentOptions.mcp_servers``.
     """
-    return create_sdk_mcp_server("bridge", tools=[_build_notify_tool(on_notify)])
+    tools = [_build_notify_tool(on_notify)]
+    if on_send_file is not None:
+        tools.append(_build_send_file_tool(on_send_file))
+    return create_sdk_mcp_server("bridge", tools=tools)

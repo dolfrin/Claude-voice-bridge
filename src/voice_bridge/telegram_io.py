@@ -66,6 +66,9 @@ class Controls(Protocol):
 
 _MODES = ["safe", "full", "ask"]
 _ENGINES = ["auto", "openai", "piper", "together"]
+_PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+_AUDIO_SUFFIXES = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
+_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 _BOT_COMMANDS = [
     BotCommand("panel", "🎛 Valdymo panelė"),
     BotCommand("projects", "🟢 Aktyvūs projektai"),
@@ -349,6 +352,58 @@ class TelegramIO:
             text=f"[{project}] {text}",
         )
         return msg.message_id
+
+    async def send_file(
+        self,
+        project: str,
+        voice_label: str,
+        text: str,
+        voice_bytes: bytes | None,
+        file_path: str,
+    ) -> list[int]:
+        """Send a project-produced file and optional voice summary."""
+        bot = self.app.bot
+        ids: list[int] = []
+        path = Path(file_path)
+        caption = f"[{project}] {text}".strip()
+        suffix = path.suffix.lower()
+
+        with path.open("rb") as fh:
+            if suffix in _PHOTO_SUFFIXES:
+                msg = await bot.send_photo(
+                    chat_id=self._chat_id,
+                    photo=fh,
+                    caption=caption,
+                )
+            elif suffix in _AUDIO_SUFFIXES:
+                msg = await bot.send_audio(
+                    chat_id=self._chat_id,
+                    audio=fh,
+                    caption=caption,
+                )
+            elif suffix in _VIDEO_SUFFIXES:
+                msg = await bot.send_video(
+                    chat_id=self._chat_id,
+                    video=fh,
+                    caption=caption,
+                )
+            else:
+                msg = await bot.send_document(
+                    chat_id=self._chat_id,
+                    document=fh,
+                    caption=caption,
+                    filename=path.name,
+                )
+        ids.append(msg.message_id)
+
+        if voice_bytes is not None:
+            voice_msg = await bot.send_voice(
+                chat_id=self._chat_id,
+                voice=voice_bytes,
+                caption=f"{project} · {voice_label}",
+            )
+            ids.append(voice_msg.message_id)
+        return ids
 
     async def send_disabled_project_prompt(self, project: str, text: str) -> int:
         """Ask whether to enable a disabled project and send the pending turn."""

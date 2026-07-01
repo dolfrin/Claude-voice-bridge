@@ -84,6 +84,7 @@ class FakeTelegram:
     def __init__(self, ids=None):
         self.ids = ids or [101]
         self.updates: list[tuple] = []
+        self.files: list[tuple] = []
         self.questions: list[tuple[str, str]] = []
         self.disabled_prompts: list[tuple[str, str]] = []
         self.ran = 0
@@ -91,6 +92,10 @@ class FakeTelegram:
 
     async def send_update(self, project, voice_label, text, voice_bytes):
         self.updates.append((project, voice_label, text, voice_bytes))
+        return list(self.ids)
+
+    async def send_file(self, project, voice_label, text, voice_bytes, file_path):
+        self.files.append((project, voice_label, text, voice_bytes, file_path))
         return list(self.ids)
 
     async def send_question(self, project, text):
@@ -326,6 +331,34 @@ async def test_make_outbound_unknown_project_uses_default_voice():
     await outbound(Outbound(project="ghost", text="Hi there", spoken="Hi there"))
 
     assert tts_holder["backend"].calls == [("Hi there", "alloy")]  # cfg.tts_voice
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_file_sends_file_and_maps_message(tmp_path):
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"V")}
+    telegram = FakeTelegram(ids=[501])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    controls = _Controls(sessions, store, FakeCfg(), tts_holder)
+    path = tmp_path / "result.txt"
+    path.write_text("ok")
+
+    outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
+    await outbound(
+        Outbound(
+            project="qwing",
+            text="Rezultatas prisegtas",
+            spoken="",
+            file_path=str(path),
+        )
+    )
+
+    assert telegram.updates == []
+    assert telegram.files == [
+        ("qwing", "echo", "Rezultatas prisegtas", b"V", str(path))
+    ]
+    assert tts_holder["backend"].calls == [("Rezultatas prisegtas", "echo")]
+    assert store.mapped == [(501, "qwing")]
 
 
 # --------------------------------------------------------------------------- #

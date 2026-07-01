@@ -1,10 +1,17 @@
 import pytest
 
-from voice_bridge.notify_tool import NOTIFY_TOOL_NAME, _build_notify_tool, make_notify_server
+from voice_bridge.notify_tool import (
+    NOTIFY_TOOL_NAME,
+    SEND_FILE_TOOL_NAME,
+    _build_notify_tool,
+    _build_send_file_tool,
+    make_notify_server,
+)
 
 
 def test_notify_tool_name_is_fully_qualified():
     assert NOTIFY_TOOL_NAME == "mcp__bridge__notify_user"
+    assert SEND_FILE_TOOL_NAME == "mcp__bridge__send_file"
 
 
 def test_build_notify_tool_returns_sdk_tool_with_correct_name():
@@ -21,6 +28,15 @@ def test_build_notify_tool_has_summary_detail_schema():
 
     tool_obj = _build_notify_tool(spy)
     assert tool_obj.input_schema == {"summary": str, "detail": str}
+
+
+def test_build_send_file_tool_has_path_caption_schema():
+    async def spy(path, caption):
+        return "delivered"
+
+    tool_obj = _build_send_file_tool(spy)
+    assert tool_obj.name == "send_file"
+    assert tool_obj.input_schema == {"path": str, "caption": str}
 
 
 @pytest.mark.asyncio
@@ -63,6 +79,36 @@ async def test_handler_defaults_detail_to_empty_string():
     await tool_obj.handler({"summary": "tests passed"})
 
     assert calls == [("tests passed", "")]
+
+
+@pytest.mark.asyncio
+async def test_send_file_handler_invokes_callback():
+    calls = []
+
+    async def spy(path, caption):
+        calls.append((path, caption))
+        return "delivered"
+
+    tool_obj = _build_send_file_tool(spy)
+    result = await tool_obj.handler({"path": "dist/out.zip", "caption": "build"})
+
+    assert calls == [("dist/out.zip", "build")]
+    assert result["content"][0]["text"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_send_file_handler_defaults_args_to_empty_string():
+    calls = []
+
+    async def spy(path, caption):
+        calls.append((path, caption))
+        return "denied"
+
+    tool_obj = _build_send_file_tool(spy)
+    result = await tool_obj.handler({})
+
+    assert calls == [("", "")]
+    assert result["content"][0]["text"] == "denied"
 
 
 def test_make_notify_server_returns_non_none():

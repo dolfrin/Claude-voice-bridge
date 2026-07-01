@@ -590,8 +590,9 @@ async def test_notify_callback_emits_outbound_with_detail_and_summary(monkeypatc
 
     captured = {}
 
-    def fake_make_notify_server(on_notify):
+    def fake_make_notify_server(on_notify, on_send_file=None):
         captured["on_notify"] = on_notify
+        captured["on_send_file"] = on_send_file
         return object()
 
     monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
@@ -615,6 +616,69 @@ async def test_notify_callback_emits_outbound_with_detail_and_summary(monkeypatc
     await sm.stop_all()
 
 
+async def test_send_file_callback_emits_project_file_outbound(tmp_path, monkeypatch):
+    project = make_project("qwing", cwd=str(tmp_path))
+    target = tmp_path / "dist" / "out.txt"
+    target.parent.mkdir()
+    target.write_text("ok")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    captured = {}
+
+    def fake_make_notify_server(on_notify, on_send_file=None):
+        captured["on_send_file"] = on_send_file
+        return object()
+
+    monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    result = await captured["on_send_file"]("dist/out.txt", "rezultatas")
+
+    assert result == "delivered"
+    assert len(outbound) == 1
+    assert outbound[0].project == "qwing"
+    assert outbound[0].text == "rezultatas"
+    assert outbound[0].spoken == ""
+    assert outbound[0].file_path == str(target.resolve())
+
+    await sm.stop_all()
+
+
+async def test_send_file_callback_denies_path_outside_project(tmp_path, monkeypatch):
+    project = make_project("qwing", cwd=str(tmp_path))
+    outside = tmp_path.parent / "secret.txt"
+    outside.write_text("secret")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    captured = {}
+
+    def fake_make_notify_server(on_notify, on_send_file=None):
+        captured["on_send_file"] = on_send_file
+        return object()
+
+    monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    result = await captured["on_send_file"](str(outside), "no")
+
+    assert result.startswith("denied:")
+    assert outbound == []
+
+    await sm.stop_all()
+
+
 async def test_each_project_gets_its_own_notify_server(monkeypatch):
     projects = [make_project("qwing"), make_project("beta", cwd="/tmp/beta")]
     store = FakeStore(enabled={"qwing": True, "beta": True})
@@ -625,7 +689,7 @@ async def test_each_project_gets_its_own_notify_server(monkeypatch):
 
     notifies = {}
 
-    def fake_make_notify_server(on_notify):
+    def fake_make_notify_server(on_notify, on_send_file=None):
         # bind by identity; collect them in order
         notifies[len(notifies)] = on_notify
         return object()

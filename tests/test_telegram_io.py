@@ -295,6 +295,59 @@ async def test_send_update_text_only_when_no_voice_bytes():
 
 
 @pytest.mark.asyncio
+async def test_send_file_sends_document_for_unknown_suffix(tmp_path):
+    path = tmp_path / "report.txt"
+    path.write_text("hello")
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_document = AsyncMock(return_value=MagicMock(message_id=210))
+    bot.send_voice = AsyncMock()
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    ids = await io.send_file(
+        project="qwing",
+        voice_label="alloy",
+        text="čia failas",
+        voice_bytes=None,
+        file_path=str(path),
+    )
+
+    assert ids == [210]
+    bot.send_document.assert_awaited_once()
+    kwargs = bot.send_document.await_args.kwargs
+    assert kwargs["chat_id"] == 42
+    assert kwargs["caption"] == "[qwing] čia failas"
+    assert kwargs["filename"] == "report.txt"
+    bot.send_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_file_uses_photo_method_for_images(tmp_path):
+    path = tmp_path / "shot.png"
+    path.write_bytes(b"PNG")
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_photo = AsyncMock(return_value=MagicMock(message_id=211))
+    bot.send_voice = AsyncMock(return_value=MagicMock(message_id=212))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    ids = await io.send_file(
+        project="qwing",
+        voice_label="alloy",
+        text="screenshot",
+        voice_bytes=b"VOICE",
+        file_path=str(path),
+    )
+
+    assert ids == [211, 212]
+    bot.send_photo.assert_awaited_once()
+    assert bot.send_photo.await_args.kwargs["caption"] == "[qwing] screenshot"
+    bot.send_voice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_send_question_returns_message_id():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     bot = MagicMock()
