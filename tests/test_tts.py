@@ -26,6 +26,7 @@ def _cfg(**overrides) -> Config:
         autonomy_mode="safe",
         approval_timeout=300,
         db_path=":memory:",
+        open_vscode_on_enable=False,
     )
     base.update(overrides)
     return Config(**base)

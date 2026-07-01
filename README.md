@@ -193,6 +193,7 @@ All keys and their meaning:
 | `DB_PATH` | `voice-bridge.db` | SQLite database path |
 | `AUTO_DISCOVER_PROJECTS` | `false` | Add recent local VS Code/Claude projects to `/panel` at startup, disabled by default |
 | `AUTO_DISCOVER_LIMIT` | `12` | Maximum auto-discovered projects to add |
+| `OPEN_VSCODE_ON_ENABLE` | `false` | Run `code <project cwd>` when a project is enabled from Telegram |
 
 > `.env` is git-ignored and must be `chmod 600`. Never commit it.
 

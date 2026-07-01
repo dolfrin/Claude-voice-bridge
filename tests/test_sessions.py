@@ -128,6 +128,7 @@ def make_cfg(**over):
         autonomy_mode="safe",
         approval_timeout=300,
         db_path=":memory:",
+        open_vscode_on_enable=False,
     )
     base.update(over)
     return Config(**base)
@@ -315,6 +316,43 @@ async def test_set_enabled_false_stops_and_persists_then_true_restarts():
     assert sm.is_running("qwing") is True
     assert store._enabled["qwing"] is True
     assert len(FakeClaudeSDKClient.instances) == 2
+
+    await sm.stop_all()
+
+
+async def test_set_enabled_true_opens_vscode_when_configured(monkeypatch):
+    project = make_project("qwing", cwd="/tmp/qwing")
+    store = FakeStore(enabled={"qwing": False})
+    calls = []
+
+    class FakeProc:
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeProc()
+
+    monkeypatch.setattr(sessions_mod.shutil, "which", lambda name: "/usr/bin/code")
+    monkeypatch.setattr(sessions_mod.asyncio, "create_subprocess_exec", fake_exec)
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm(
+        [project],
+        store,
+        on_outbound,
+        cfg=make_cfg(open_vscode_on_enable=True),
+    )
+
+    await sm.set_enabled("qwing", True)
+
+    assert calls
+    assert calls[0][0][:2] == ("/usr/bin/code", "/tmp/qwing")
+    assert sm.is_running("qwing") is True
 
     await sm.stop_all()
 

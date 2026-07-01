@@ -35,6 +35,7 @@ def make_cfg(allowed_id=42):
         autonomy_mode="safe",
         approval_timeout=300,
         db_path=":memory:",
+        open_vscode_on_enable=False,
     )
 
 

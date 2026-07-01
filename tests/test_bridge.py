@@ -174,6 +174,7 @@ class FakeCfg:
     approval_timeout = 300
     auto_discover_projects = False
     auto_discover_limit = 12
+    open_vscode_on_enable = False
 
 
 def _msg(message_id=7, reply_to=None, text="", is_voice=False, audio=None):

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from typing import Awaitable, Callable
 
 from claude_agent_sdk import (
@@ -131,6 +132,8 @@ class SessionManager:
             return
         await self._store.set_enabled(project, enabled)
         if enabled:
+            if self._cfg.open_vscode_on_enable:
+                await self._open_vscode(self._projects[project])
             await self._start(project)
         else:
             await self._stop(project)
@@ -219,6 +222,24 @@ class SessionManager:
 
         self._sessions[name] = sess
         sess.task = asyncio.create_task(self._run_loop(sess))
+
+    async def _open_vscode(self, project: ProjectConfig) -> None:
+        code = shutil.which("code")
+        if code is None:
+            logger.warning("OPEN_VSCODE_ON_ENABLE is set but 'code' is not on PATH")
+            return
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                code,
+                project.cwd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode != 0:
+                logger.warning("code %s exited with %s", project.cwd, proc.returncode)
+        except OSError:
+            logger.exception("failed to open VS Code for %s", project.cwd)
 
     async def _stop(self, name: str) -> None:
         sess = self._sessions.pop(name, None)
