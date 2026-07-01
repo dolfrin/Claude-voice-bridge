@@ -43,6 +43,7 @@ from .approvals import ApprovalManager, make_can_use_tool
 from .config import Config, ProjectConfig, effective_autonomy
 from .notify_tool import NOTIFY_TOOL_NAME, make_notify_server
 from .routing import Store
+from .transcript import append_transcript
 from .types import Outbound
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,7 @@ class SessionManager:
             if text is _SHUTDOWN:
                 return
             try:
+                await append_transcript(sess.project.cwd, "user", text)
                 await client.query(text)
                 parts: list[str] = []
                 async for msg in client.receive_response():
@@ -269,6 +271,7 @@ class SessionManager:
                             await self._store.set_session_id(name, session_id)
                 joined = "\n".join(p for p in parts if p).strip()
                 if joined:
+                    await append_transcript(sess.project.cwd, "assistant", joined)
                     await self._on_outbound(
                         Outbound(project=name, text=joined, spoken="")
                     )
@@ -288,6 +291,7 @@ class SessionManager:
                 await sess.client.disconnect()
             except Exception:  # pragma: no cover - defensive
                 logger.exception("session %s disconnect after crash failed", name)
+        await append_transcript(sess.project.cwd, "system", f"Sesija krito: {err}")
         try:
             await self._on_outbound(
                 Outbound(

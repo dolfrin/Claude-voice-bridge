@@ -281,6 +281,9 @@ journalctl --user -u voice-bridge -f
 | `/voice list` / `/voice <name> [for <project>]` | List available voices / set TTS voice |
 | `/engine <openai\|piper\|together>` | Switch TTS backend live (no restart needed) |
 
+Telegram turns are mirrored into each project's `.claude/voice-bridge-chat.md`
+so the voice/text conversation is visible from the IDE file tree.
+
 ### Reply routing
 
 - **Swipe-reply (quote-reply)** a specific message → that message's project receives

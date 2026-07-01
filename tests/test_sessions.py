@@ -237,6 +237,32 @@ async def test_deliver_drains_turn_captures_session_id_and_emits_outbound():
     await sm.stop_all()
 
 
+async def test_deliver_mirrors_turns_to_project_transcript(tmp_path):
+    project = make_project("qwing", cwd=str(tmp_path))
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[assistant("Padaryta."), result("sess-1")]]
+
+    await sm.deliver("qwing", "sutvarkyk sita vieta")
+
+    transcript = tmp_path / ".claude" / "voice-bridge-chat.md"
+    assert await _wait_for(lambda: transcript.exists())
+    text = transcript.read_text(encoding="utf-8")
+    assert "Telegram" in text
+    assert "sutvarkyk sita vieta" in text
+    assert "Claude" in text
+    assert "Padaryta." in text
+
+    await sm.stop_all()
+
+
 async def test_deliver_to_unstarted_project_is_noop():
     project = make_project("qwing", enabled=False)
     store = FakeStore(enabled={"qwing": False})
