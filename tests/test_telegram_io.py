@@ -746,6 +746,20 @@ async def test_cmd_projects_all_lists_inactive_projects():
 
 
 @pytest.mark.asyncio
+async def test_cmd_projects_all_alias_lists_inactive_projects():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/projects_all")
+
+    await io._cmd_projects_all(upd, make_ctx([]))
+
+    sent = upd.message.reply_text.await_args.args[0]
+    kwargs = upd.message.reply_text.await_args.kwargs
+    assert "<b>qwing</b>" in sent and "<b>othersapp</b>" in sent
+    assert kwargs["reply_markup"].inline_keyboard[1][0].callback_data == "sel:1"
+
+
+@pytest.mark.asyncio
 async def test_cmd_on_with_project_calls_toggle_true():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
@@ -901,21 +915,21 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.bot.set_my_commands.assert_awaited_once()
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
-    # at least: panel, projects, on, off, mode, voice, engine, status,
-    # callback, text msg, voice msg  == 11 handlers
-    assert len(added) >= 11
+    # at least: panel, projects, projects_all, on, off, mode, voice, engine,
+    # status, callback, text msg, voice msg == 12 handlers
+    assert len(added) >= 12
 
     cmd_names = set()
     for h in added:
         cmds = getattr(h, "commands", None)
         if cmds:
             cmd_names |= set(cmds)
-    assert {"panel", "projects", "on", "off",
+    assert {"panel", "projects", "projects_all", "on", "off",
             "mode", "voice", "engine", "status"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"panel", "projects", "status", "on", "off",
+    assert {"panel", "projects", "projects_all", "status", "on", "off",
             "mode", "voice", "engine"} == registered_names
 
 

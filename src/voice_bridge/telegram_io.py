@@ -66,6 +66,7 @@ _ENGINES = ["openai", "piper", "together"]
 _BOT_COMMANDS = [
     BotCommand("panel", "Open project control panel"),
     BotCommand("projects", "List project state"),
+    BotCommand("projects_all", "List every project"),
     BotCommand("status", "Ask a project for status"),
     BotCommand("on", "Enable one project or all"),
     BotCommand("off", "Disable one project or all"),
@@ -102,7 +103,7 @@ def format_projects(snapshot: list[dict], show_all: bool = False) -> str:
     """Render /projects as a scannable HTML summary."""
     rows = _project_list_rows(snapshot, show_all=show_all)
     if not rows:
-        return "no active projects\nUse /projects all to show every project."
+        return "no active projects\nUse /projects_all to show every project."
 
     lines: list[str] = []
     for _idx, row in rows:
@@ -459,6 +460,19 @@ class TelegramIO:
             reply_markup=build_projects_list_markup(snapshot, show_all=show_all),
         )
 
+    async def _cmd_projects_all(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        snapshot = self.controls.snapshot()
+        await msg.reply_text(
+            format_projects(snapshot, show_all=True),
+            parse_mode="HTML",
+            reply_markup=build_projects_list_markup(snapshot, show_all=True),
+        )
+
     async def _cmd_on(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -558,6 +572,8 @@ class TelegramIO:
             CommandHandler("panel", self._cmd_panel, filters=only_me))
         app.add_handler(
             CommandHandler("projects", self._cmd_projects, filters=only_me))
+        app.add_handler(
+            CommandHandler("projects_all", self._cmd_projects_all, filters=only_me))
         app.add_handler(
             CommandHandler("on", self._cmd_on, filters=only_me))
         app.add_handler(
