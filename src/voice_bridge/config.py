@@ -31,6 +31,7 @@ class Config:
     auto_discover_projects: bool = False
     auto_discover_limit: int = 12
     open_vscode_on_enable: bool = False
+    close_vscode_on_disable: bool = False
 
 
 @dataclass
@@ -132,6 +133,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         auto_discover_limit=_optional_int(env, "AUTO_DISCOVER_LIMIT", 12),
         open_vscode_on_enable=_optional_bool(env, "OPEN_VSCODE_ON_ENABLE", False),
+        close_vscode_on_disable=_optional_bool(env, "CLOSE_VSCODE_ON_DISABLE", False),
     )
 
 

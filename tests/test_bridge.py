@@ -175,6 +175,7 @@ class FakeCfg:
     auto_discover_projects = False
     auto_discover_limit = 12
     open_vscode_on_enable = False
+    close_vscode_on_disable = False
 
 
 def _msg(message_id=7, reply_to=None, text="", is_voice=False, audio=None):

@@ -129,6 +129,7 @@ def make_cfg(**over):
         approval_timeout=300,
         db_path=":memory:",
         open_vscode_on_enable=False,
+        close_vscode_on_disable=False,
     )
     base.update(over)
     return Config(**base)
@@ -355,6 +356,51 @@ async def test_set_enabled_true_opens_vscode_when_configured(monkeypatch):
     assert sm.is_running("qwing") is True
 
     await sm.stop_all()
+
+
+async def test_set_enabled_false_closes_matching_vscode_window(monkeypatch):
+    project = make_project("qwing", cwd="/tmp/WhisperX")
+    store = FakeStore(enabled={"qwing": True})
+    calls = []
+
+    class FakeProc:
+        def __init__(self, stdout=b"", returncode=0):
+            self.stdout = stdout
+            self.returncode = returncode
+
+        async def communicate(self):
+            return self.stdout, b""
+
+        async def wait(self):
+            return self.returncode
+
+    async def fake_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        if args[:2] == ("/usr/bin/wmctrl", "-l"):
+            return FakeProc(
+                b"0x1 0 home Something - Other - Visual Studio Code\n"
+                b"0x2 0 home Port Android app - WhisperX - Visual Studio Code\n"
+            )
+        return FakeProc()
+
+    monkeypatch.setattr(sessions_mod.shutil, "which", lambda name: "/usr/bin/wmctrl")
+    monkeypatch.setattr(sessions_mod.asyncio, "create_subprocess_exec", fake_exec)
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm(
+        [project],
+        store,
+        on_outbound,
+        cfg=make_cfg(close_vscode_on_disable=True),
+    )
+    await sm.start_all()
+
+    await sm.set_enabled("qwing", False)
+
+    assert any(call[0] == ("/usr/bin/wmctrl", "-ic", "0x2") for call in calls)
+    assert not any(call[0] == ("/usr/bin/wmctrl", "-ic", "0x1") for call in calls)
 
 
 # --------------------------------------------------------------------------- #

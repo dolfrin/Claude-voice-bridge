@@ -36,6 +36,7 @@ def make_cfg(allowed_id=42):
         approval_timeout=300,
         db_path=":memory:",
         open_vscode_on_enable=False,
+        close_vscode_on_disable=False,
     )
 
 

@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from claude_agent_sdk import (
@@ -137,6 +138,8 @@ class SessionManager:
             await self._start(project)
         else:
             await self._stop(project)
+            if self._cfg.close_vscode_on_disable:
+                await self._close_vscode(self._projects[project])
 
     async def set_mode(self, project: str, mode: str) -> None:
         """Update a project's autonomy; restart the running session so the new
@@ -240,6 +243,43 @@ class SessionManager:
                 logger.warning("code %s exited with %s", project.cwd, proc.returncode)
         except OSError:
             logger.exception("failed to open VS Code for %s", project.cwd)
+
+    async def _close_vscode(self, project: ProjectConfig) -> None:
+        wmctrl = shutil.which("wmctrl")
+        if wmctrl is None:
+            logger.warning("CLOSE_VSCODE_ON_DISABLE is set but 'wmctrl' is not on PATH")
+            return
+        basename = Path(project.cwd).name
+        try:
+            list_proc = await asyncio.create_subprocess_exec(
+                wmctrl,
+                "-l",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await list_proc.communicate()
+            if list_proc.returncode != 0:
+                logger.warning("wmctrl -l exited with %s", list_proc.returncode)
+                return
+            for line in out.decode("utf-8", "replace").splitlines():
+                parts = line.split(None, 3)
+                if len(parts) < 4:
+                    continue
+                window_id, title = parts[0], parts[3]
+                if "Visual Studio Code" not in title:
+                    continue
+                if f" - {basename} - Visual Studio Code" not in title:
+                    continue
+                close_proc = await asyncio.create_subprocess_exec(
+                    wmctrl,
+                    "-ic",
+                    window_id,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await close_proc.wait()
+        except OSError:
+            logger.exception("failed to close VS Code for %s", project.cwd)
 
     async def _stop(self, name: str) -> None:
         sess = self._sessions.pop(name, None)

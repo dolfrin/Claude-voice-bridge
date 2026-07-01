@@ -34,6 +34,7 @@ def _cfg(autonomy_mode: str = "safe", approval_timeout: int = 300) -> Config:
         approval_timeout=approval_timeout,
         db_path=":memory:",
         open_vscode_on_enable=False,
+        close_vscode_on_disable=False,
     )
 
 

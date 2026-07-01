@@ -32,6 +32,7 @@ def _full_env() -> dict[str, str]:
         "AUTO_DISCOVER_PROJECTS": "true",
         "AUTO_DISCOVER_LIMIT": "8",
         "OPEN_VSCODE_ON_ENABLE": "true",
+        "CLOSE_VSCODE_ON_DISABLE": "true",
     }
 
 
@@ -57,6 +58,7 @@ def test_load_config_parses_all_fields_with_correct_types():
     assert cfg.auto_discover_projects is True
     assert cfg.auto_discover_limit == 8
     assert cfg.open_vscode_on_enable is True
+    assert cfg.close_vscode_on_disable is True
 
 
 def test_load_config_applies_defaults_for_optional_keys():
@@ -80,6 +82,7 @@ def test_load_config_applies_defaults_for_optional_keys():
     assert cfg.auto_discover_projects is False
     assert cfg.auto_discover_limit == 12
     assert cfg.open_vscode_on_enable is False
+    assert cfg.close_vscode_on_disable is False
 
 
 def test_load_config_missing_required_key_raises_clear_error():
