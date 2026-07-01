@@ -499,6 +499,40 @@ def _make_controls():
 
 
 @pytest.mark.asyncio
+async def test_make_inbound_attachment_is_saved_and_added_to_prompt(tmp_path):
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing", cwd=str(tmp_path))])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound({
+        "message_id": 77,
+        "reply_to": None,
+        "text": "peržiūrėk",
+        "is_voice": False,
+        "audio": None,
+        "attachments": [{
+            "kind": "document",
+            "file_name": "log.txt",
+            "mime_type": "text/plain",
+            "data": b"hello",
+        }],
+    })
+
+    assert len(sessions.delivered) == 1
+    project, prompt = sessions.delivered[0]
+    assert project == "qwing"
+    assert "peržiūrėk" in prompt
+    assert ".claude/voice-bridge-inbox/" in prompt
+    assert "log.txt" in prompt
+    saved_files = list((tmp_path / ".claude" / "voice-bridge-inbox").glob("*log.txt"))
+    assert len(saved_files) == 1
+    assert saved_files[0].read_bytes() == b"hello"
+
+
+@pytest.mark.asyncio
 async def test_controls_snapshot_sync_exact_keys():
     controls, *_ = _make_controls()
     await controls.seed()

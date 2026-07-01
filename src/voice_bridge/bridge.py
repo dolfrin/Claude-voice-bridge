@@ -25,6 +25,7 @@ import signal
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
+from .attachments import format_attachment_prompt, save_attachments
 from .approvals import ApprovalManager, parse_yes_no
 from .config import (
     Config,
@@ -183,12 +184,29 @@ def make_inbound(
             names = ", ".join(sessions.names()) if hasattr(sessions, "names") else ""
             await telegram.send_question("bridge", f"Į kurį projektą? {names}".strip())
             return
+        text = await _attach_files_to_prompt(project, text, msg, sessions)
         if reason == "off":
             await telegram.send_disabled_project_prompt(project, text)
             return
         await sessions.deliver(project, text)
 
     return inbound
+
+
+async def _attach_files_to_prompt(
+    project: str,
+    text: str,
+    msg: dict,
+    sessions: SessionManager,
+) -> str:
+    attachments = msg.get("attachments") or []
+    if not attachments:
+        return text
+    proj = sessions.project(project) if hasattr(sessions, "project") else None
+    if proj is None:
+        return text
+    saved = await save_attachments(proj.cwd, attachments)
+    return format_attachment_prompt(text, saved)
 
 
 # --------------------------------------------------------------------------- #

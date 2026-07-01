@@ -19,6 +19,7 @@ run-forever wait. ``stop()`` shuts the Application down.
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
 from telegram import (
@@ -294,6 +295,24 @@ class TelegramIO:
             "text": "",
             "is_voice": True,
             "audio": audio,
+        })
+
+    async def _handle_attachment(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        attachment = await _download_attachment(msg)
+        if attachment is None:
+            return
+        await self.on_user_message({
+            "message_id": msg.message_id,
+            "reply_to": self._reply_to(msg),
+            "text": msg.caption or "",
+            "is_voice": False,
+            "audio": None,
+            "attachments": [attachment],
         })
 
     # --- outbound --------------------------------------------------------
@@ -647,6 +666,17 @@ class TelegramIO:
         app.add_handler(MessageHandler(
             only_me & filters.VOICE, self._handle_voice))
         app.add_handler(MessageHandler(
+            only_me
+            & (
+                filters.PHOTO
+                | filters.Document.ALL
+                | filters.AUDIO
+                | filters.VIDEO
+                | filters.VIDEO_NOTE
+            ),
+            self._handle_attachment,
+        ))
+        app.add_handler(MessageHandler(
             only_me & filters.TEXT & ~filters.COMMAND, self._handle_text))
 
         await app.initialize()
@@ -665,3 +695,52 @@ class TelegramIO:
         if getattr(app, "running", False):
             await app.stop()
         await app.shutdown()
+
+
+async def _download_attachment(msg) -> dict | None:
+    kind = "file"
+    file_name = ""
+    mime_type = None
+    source = None
+
+    if getattr(msg, "photo", None):
+        kind = "photo"
+        source = msg.photo[-1]
+        file_name = "photo.jpg"
+    elif getattr(msg, "document", None) is not None:
+        doc = msg.document
+        kind = "document"
+        source = doc
+        file_name = doc.file_name or "document.bin"
+        mime_type = getattr(doc, "mime_type", None)
+    elif getattr(msg, "audio", None) is not None:
+        audio = msg.audio
+        kind = "audio"
+        source = audio
+        file_name = audio.file_name or "audio.bin"
+        mime_type = getattr(audio, "mime_type", None)
+    elif getattr(msg, "video", None) is not None:
+        video = msg.video
+        kind = "video"
+        source = video
+        file_name = video.file_name or "video.mp4"
+        mime_type = getattr(video, "mime_type", None)
+    elif getattr(msg, "video_note", None) is not None:
+        kind = "video_note"
+        source = msg.video_note
+        file_name = "video_note.mp4"
+
+    if source is None:
+        return None
+    tg_file = await source.get_file()
+    data = bytes(await tg_file.download_as_bytearray())
+    return {
+        "kind": kind,
+        "file_name": _clean_telegram_filename(file_name),
+        "mime_type": mime_type,
+        "data": data,
+    }
+
+
+def _clean_telegram_filename(name: str) -> str:
+    return Path(name or "file.bin").name or "file.bin"

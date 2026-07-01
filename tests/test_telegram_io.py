@@ -104,7 +104,13 @@ def make_message(*, message_id=10, user_id=42, text=None, voice=None,
     msg.from_user = MagicMock()
     msg.from_user.id = user_id
     msg.text = text
+    msg.caption = None
     msg.voice = voice
+    msg.photo = []
+    msg.document = None
+    msg.audio = None
+    msg.video = None
+    msg.video_note = None
     msg.reply_to_message = (
         MagicMock(message_id=reply_to) if reply_to is not None else None
     )
@@ -164,6 +170,45 @@ async def test_voice_message_downloads_bytes_and_marks_is_voice():
         "text": "",
         "is_voice": True,
         "audio": b"OGGDATA",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_document_message_downloads_attachment_with_caption():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    doc = MagicMock()
+    doc.file_name = "report.pdf"
+    doc.mime_type = "application/pdf"
+    tg_file = AsyncMock()
+    tg_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"PDFDATA"))
+    doc.get_file = AsyncMock(return_value=tg_file)
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    update = MagicMock()
+    msg = make_message(message_id=15, user_id=42, reply_to=7)
+    msg.document = doc
+    msg.caption = "peržiūrėk"
+    update.message = msg
+    update.callback_query = None
+
+    await io._handle_attachment(update, MagicMock())
+
+    assert received == [{
+        "message_id": 15,
+        "reply_to": 7,
+        "text": "peržiūrėk",
+        "is_voice": False,
+        "audio": None,
+        "attachments": [{
+            "kind": "document",
+            "file_name": "report.pdf",
+            "mime_type": "application/pdf",
+            "data": b"PDFDATA",
+        }],
     }]
 
 
