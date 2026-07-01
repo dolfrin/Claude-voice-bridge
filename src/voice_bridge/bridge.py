@@ -184,9 +184,7 @@ def make_inbound(
             await telegram.send_question("bridge", f"Į kurį projektą? {names}".strip())
             return
         if reason == "off":
-            await telegram.send_question(
-                "bridge", f"{project} išjungtas (/on {project})"
-            )
+            await telegram.send_disabled_project_prompt(project, text)
             return
         await sessions.deliver(project, text)
 
@@ -276,6 +274,12 @@ class _Controls:
     async def select(self, project: str) -> None:
         if project not in self._mirror:
             return
+        await self._store.set_last_active(project)
+        self.mark_last_active(project)
+
+    async def enable_and_deliver(self, project: str, text: str) -> None:
+        await self.toggle(project, True)
+        await self._sessions.deliver(project, text)
         await self._store.set_last_active(project)
         self.mark_last_active(project)
 

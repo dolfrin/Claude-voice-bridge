@@ -56,6 +56,7 @@ class Controls(Protocol):
 
     async def toggle(self, project: str | None, on: bool) -> None: ...
     async def select(self, project: str) -> None: ...
+    async def enable_and_deliver(self, project: str, text: str) -> None: ...
     async def set_mode(self, project: str | None, mode: str) -> None: ...
     async def set_voice(self, project: str | None, voice: str) -> None: ...
     async def set_engine(self, name: str) -> None: ...
@@ -244,6 +245,8 @@ class TelegramIO:
         self.on_user_message = on_user_message
         self.controls = controls
         self.app: Application | None = None
+        self._pending_off_sends: dict[str, tuple[str, str]] = {}
+        self._pending_off_seq = 0
 
     # --- whitelist -------------------------------------------------------
     def _allowed(self, user_id: int | None) -> bool:
@@ -326,6 +329,29 @@ class TelegramIO:
         )
         return msg.message_id
 
+    async def send_disabled_project_prompt(self, project: str, text: str) -> int:
+        """Ask whether to enable a disabled project and send the pending turn."""
+        self._pending_off_seq += 1
+        token = str(self._pending_off_seq)
+        self._pending_off_sends[token] = (project, text)
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "Įjungti ir siųsti", callback_data=f"offsend:{token}"
+                )
+            ],
+            [InlineKeyboardButton("Atšaukti", callback_data=f"offcancel:{token}")],
+        ])
+        msg = await self.app.bot.send_message(
+            chat_id=self._chat_id,
+            text=(
+                f"[bridge] {project} išjungtas.\n"
+                "Įjungti projektą ir išsiųsti paskutinę žinutę?"
+            ),
+            reply_markup=markup,
+        )
+        return msg.message_id
+
     # --- /panel + callbacks ---------------------------------------------
     async def _cmd_panel(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -356,6 +382,18 @@ class TelegramIO:
             await self._edit_callback_markup(
                 query, build_panel_markup(self.controls.snapshot())
             )
+            return
+        if action in {"offsend", "offcancel"}:
+            pending = self._pending_off_sends.pop(index_str, None)
+            if pending is None:
+                await query.edit_message_text("Šita užklausa nebegalioja.")
+                return
+            project, text = pending
+            if action == "offcancel":
+                await query.edit_message_text(f"Atšaukta: {project}")
+                return
+            await self.controls.enable_and_deliver(project, text)
+            await query.edit_message_text(f"Įjungta ir išsiųsta į {project}.")
             return
 
         # Global actions do not need a project index.

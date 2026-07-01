@@ -66,6 +66,15 @@ class FakeControls:
             else:
                 row["last_active"] = False
 
+    async def enable_and_deliver(self, project, text):
+        self.calls.append(("enable_and_deliver", project, text))
+        for row in self._snapshot:
+            if row["project"] == project:
+                row["enabled"] = True
+                row["last_active"] = True
+            else:
+                row["last_active"] = False
+
     async def set_mode(self, project, mode):
         self.calls.append(("set_mode", project, mode))
 
@@ -591,6 +600,48 @@ async def test_callback_projects_picker_toggle_redraws_list():
     kwargs = query.edit_message_text.await_args.kwargs
     assert kwargs["parse_mode"] == "HTML"
     assert kwargs["reply_markup"].inline_keyboard[1][1].callback_data == "ptgl:1"
+
+
+@pytest.mark.asyncio
+async def test_callback_disabled_project_prompt_enables_and_sends():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    io._pending_off_sends["7"] = ("othersapp", "go")
+    query = AsyncMock()
+    query.data = "offsend:7"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("enable_and_deliver", "othersapp", "go") in controls.calls
+    query.edit_message_text.assert_awaited_once_with(
+        "Įjungta ir išsiųsta į othersapp."
+    )
+    assert io._pending_off_sends == {}
+
+
+@pytest.mark.asyncio
+async def test_callback_disabled_project_prompt_can_cancel():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    io._pending_off_sends["8"] = ("othersapp", "go")
+    query = AsyncMock()
+    query.data = "offcancel:8"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert controls.calls == []
+    query.edit_message_text.assert_awaited_once_with("Atšaukta: othersapp")
+    assert io._pending_off_sends == {}
 
 
 @pytest.mark.asyncio

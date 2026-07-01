@@ -85,6 +85,7 @@ class FakeTelegram:
         self.ids = ids or [101]
         self.updates: list[tuple] = []
         self.questions: list[tuple[str, str]] = []
+        self.disabled_prompts: list[tuple[str, str]] = []
         self.ran = 0
         self.stopped = 0
 
@@ -95,6 +96,10 @@ class FakeTelegram:
     async def send_question(self, project, text):
         self.questions.append((project, text))
         return 999
+
+    async def send_disabled_project_prompt(self, project, text):
+        self.disabled_prompts.append((project, text))
+        return 1000
 
     async def run(self):
         self.ran += 1
@@ -450,7 +455,7 @@ async def test_make_inbound_no_target_sends_which_project():
 
 
 @pytest.mark.asyncio
-async def test_make_inbound_disabled_target_sends_off_notice():
+async def test_make_inbound_disabled_target_asks_to_enable_and_send():
     store = FakeStore(by_message={42: "qwing"}, enabled={"qwing": False})
     approvals = FakeApprovals()
     transcriber = FakeTranscriber()
@@ -461,9 +466,8 @@ async def test_make_inbound_disabled_target_sends_off_notice():
     await inbound(_msg(reply_to=42, text="go"))
 
     assert sessions.delivered == []
-    assert len(telegram.questions) == 1
-    assert "qwing" in telegram.questions[0][1]
-    assert "/on" in telegram.questions[0][1]
+    assert telegram.questions == []
+    assert telegram.disabled_prompts == [("qwing", "go")]
 
 
 # --------------------------------------------------------------------------- #
@@ -527,6 +531,21 @@ async def test_controls_select_marks_last_active_without_enabling_project():
     assert snap["othersapp"]["enabled"] is False
     assert snap["othersapp"]["last_active"] is True
     assert snap["qwing"]["last_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_controls_enable_and_deliver_starts_project_then_sends_text():
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+
+    await controls.enable_and_deliver("othersapp", "go")
+
+    assert sessions.enabled_calls == [("othersapp", True)]
+    assert sessions.delivered == [("othersapp", "go")]
+    assert store.last_active_calls == ["othersapp"]
+    snap = {row["project"]: row for row in controls.snapshot()}
+    assert snap["othersapp"]["enabled"] is True
+    assert snap["othersapp"]["last_active"] is True
 
 
 @pytest.mark.asyncio
