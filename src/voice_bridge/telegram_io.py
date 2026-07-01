@@ -66,16 +66,16 @@ class Controls(Protocol):
 _MODES = ["safe", "full", "ask"]
 _ENGINES = ["openai", "piper", "together"]
 _BOT_COMMANDS = [
-    BotCommand("panel", "Open project control panel"),
-    BotCommand("projects", "List project state"),
-    BotCommand("projects_all", "List every project"),
-    BotCommand("projects_refresh", "Scan for new projects"),
-    BotCommand("status", "Ask a project for status"),
-    BotCommand("on", "Enable one project or all"),
-    BotCommand("off", "Disable one project or all"),
-    BotCommand("mode", "Set autonomy mode"),
-    BotCommand("voice", "List or set TTS voice"),
-    BotCommand("engine", "Switch TTS backend"),
+    BotCommand("panel", "🎛 Valdymo panelė"),
+    BotCommand("projects", "🟢 Aktyvūs projektai"),
+    BotCommand("projects_all", "📚 Visi projektai"),
+    BotCommand("projects_refresh", "🔎 Ieškoti naujų projektų"),
+    BotCommand("status", "📡 Paklausti projekto statuso"),
+    BotCommand("on", "▶️ Įjungti projektą arba visus"),
+    BotCommand("off", "⏸ Išjungti projektą arba visus"),
+    BotCommand("mode", "🛡 Keisti safe/full/ask režimą"),
+    BotCommand("voice", "🔊 Balsai ir TTS balsas"),
+    BotCommand("engine", "🧠 Keisti TTS variklį"),
 ]
 
 
