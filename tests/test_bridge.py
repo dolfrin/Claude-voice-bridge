@@ -109,11 +109,13 @@ class FakeTelegram:
 
 
 class FakeProject:
-    def __init__(self, name, voice=None, autonomy=None, cwd=None):
+    def __init__(self, name, voice=None, autonomy=None, cwd=None, enabled=True, display_name=None):
         self.name = name
         self.voice = voice
         self.autonomy = autonomy
         self.cwd = cwd or f"/tmp/{name}"
+        self.enabled = enabled
+        self.display_name = display_name
 
 
 class FakeSessions:
@@ -130,6 +132,15 @@ class FakeSessions:
 
     def names(self):
         return list(self._projects)
+
+    def add_projects(self, projects):
+        added = 0
+        for project in projects:
+            if project.name in self._projects:
+                continue
+            self._projects[project.name] = project
+            added += 1
+        return added
 
     async def deliver(self, project, text):
         self.delivered.append((project, text))
@@ -546,6 +557,30 @@ async def test_controls_enable_and_deliver_starts_project_then_sends_text():
     snap = {row["project"]: row for row in controls.snapshot()}
     assert snap["othersapp"]["enabled"] is True
     assert snap["othersapp"]["last_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_controls_refresh_projects_discovers_new_disabled_project(monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+    controls._cfg.auto_discover_projects = True
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda: [
+        FakeProject("qwing", voice="echo", autonomy="full"),
+        FakeProject("othersapp"),
+    ])
+    monkeypatch.setattr(bridge_mod, "discover_projects", lambda limit, explicit_cwds=None: [
+        FakeProject("fresh", cwd="/home/home/Projects/Fresh", enabled=False),
+    ])
+
+    added = await controls.refresh_projects()
+
+    assert added == 1
+    assert "fresh" in sessions.names()
+    snap = {row["project"]: row for row in controls.snapshot()}
+    assert snap["fresh"]["enabled"] is False
+    assert snap["fresh"]["cwd"] == "/home/home/Projects/Fresh"
 
 
 @pytest.mark.asyncio

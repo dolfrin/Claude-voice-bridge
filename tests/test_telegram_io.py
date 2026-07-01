@@ -75,6 +75,15 @@ class FakeControls:
             else:
                 row["last_active"] = False
 
+    async def refresh_projects(self):
+        self.calls.append(("refresh_projects",))
+        self._snapshot.append(
+            {"project": "fresh", "enabled": False, "mode": "safe",
+             "voice": "alloy", "engine": "openai", "last_active": False,
+             "cwd": "/home/home/Projects/Fresh"}
+        )
+        return 1
+
     async def set_mode(self, project, mode):
         self.calls.append(("set_mode", project, mode))
 
@@ -811,6 +820,22 @@ async def test_cmd_projects_all_alias_lists_inactive_projects():
 
 
 @pytest.mark.asyncio
+async def test_cmd_projects_refresh_scans_and_lists_all_projects():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/projects_refresh")
+
+    await io._cmd_projects_refresh(upd, make_ctx([]))
+
+    assert ("refresh_projects",) in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    kwargs = upd.message.reply_text.await_args.kwargs
+    assert "Pridėta naujų projektų: 1" in sent
+    assert "<b>fresh</b>" in sent
+    assert kwargs["reply_markup"].inline_keyboard[2][0].callback_data == "sel:2"
+
+
+@pytest.mark.asyncio
 async def test_cmd_on_with_project_calls_toggle_true():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
@@ -966,21 +991,21 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.bot.set_my_commands.assert_awaited_once()
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
-    # at least: panel, projects, projects_all, on, off, mode, voice, engine,
-    # status, callback, text msg, voice msg == 12 handlers
-    assert len(added) >= 12
+    # at least: panel, projects, projects_all, projects_refresh, on, off,
+    # mode, voice, engine, status, callback, text msg, voice msg == 13 handlers
+    assert len(added) >= 13
 
     cmd_names = set()
     for h in added:
         cmds = getattr(h, "commands", None)
         if cmds:
             cmd_names |= set(cmds)
-    assert {"panel", "projects", "projects_all", "on", "off",
+    assert {"panel", "projects", "projects_all", "projects_refresh", "on", "off",
             "mode", "voice", "engine", "status"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"panel", "projects", "projects_all", "status", "on", "off",
+    assert {"panel", "projects", "projects_all", "projects_refresh", "status", "on", "off",
             "mode", "voice", "engine"} == registered_names
 
 

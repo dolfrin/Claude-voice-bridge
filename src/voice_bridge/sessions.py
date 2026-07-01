@@ -106,6 +106,16 @@ class SessionManager:
         """Return configured project names in projects.yaml order."""
         return list(self._projects)
 
+    def add_projects(self, projects: list[ProjectConfig]) -> int:
+        """Add newly discovered projects without starting their sessions."""
+        added = 0
+        for project in projects:
+            if project.name in self._projects:
+                continue
+            self._projects[project.name] = project
+            added += 1
+        return added
+
     def is_running(self, name: str) -> bool:
         """Return True if a live session task exists for *name*."""
         return name in self._sessions

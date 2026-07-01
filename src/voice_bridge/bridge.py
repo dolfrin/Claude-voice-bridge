@@ -308,6 +308,38 @@ class _Controls:
             if proj is not None:
                 proj.voice = voice  # so effective_voice picks it up
 
+    async def refresh_projects(self) -> int:
+        explicit = load_projects()
+        discovered: list[ProjectConfig] = []
+        if self._cfg.auto_discover_projects:
+            explicit_cwds = {p.cwd for p in explicit}
+            discovered = discover_projects(
+                self._cfg.auto_discover_limit,
+                explicit_cwds=explicit_cwds,
+            )
+        candidates = merge_projects(explicit, discovered)
+        existing = set(self._mirror)
+        new_projects = [project for project in candidates if project.name not in existing]
+        if not new_projects:
+            return 0
+
+        if hasattr(self._sessions, "add_projects"):
+            self._sessions.add_projects(new_projects)
+        await self._store.seed(new_projects)
+        enabled = await self._store.enabled_map()
+        last_active = await self._store.get_last_active()
+        for project in new_projects:
+            self._mirror[project.name] = {
+                "display_name": getattr(project, "display_name", None) or project.name,
+                "enabled": enabled.get(project.name, project.enabled),
+                "mode": effective_autonomy(project, self._cfg),
+                "voice": effective_voice(project, self._cfg),
+                "engine": self._cfg.tts_backend,
+                "last_active": last_active == project.name,
+                "cwd": project.cwd,
+            }
+        return len(new_projects)
+
     async def set_engine(self, name: str) -> None:
         # C4: rebuild the live TTS backend so subsequent sends use it.
         self._cfg.tts_backend = name
@@ -398,6 +430,9 @@ async def build() -> Wiring:
 
         async def set_mode(self, project, mode):
             await sessions_ref["sm"].set_mode(project, mode)
+
+        def add_projects(self, projects):
+            return sessions_ref["sm"].add_projects(projects)
 
     lazy_sessions = _LazySessions()
 

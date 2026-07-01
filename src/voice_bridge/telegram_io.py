@@ -57,6 +57,7 @@ class Controls(Protocol):
     async def toggle(self, project: str | None, on: bool) -> None: ...
     async def select(self, project: str) -> None: ...
     async def enable_and_deliver(self, project: str, text: str) -> None: ...
+    async def refresh_projects(self) -> int: ...
     async def set_mode(self, project: str | None, mode: str) -> None: ...
     async def set_voice(self, project: str | None, voice: str) -> None: ...
     async def set_engine(self, name: str) -> None: ...
@@ -68,6 +69,7 @@ _BOT_COMMANDS = [
     BotCommand("panel", "Open project control panel"),
     BotCommand("projects", "List project state"),
     BotCommand("projects_all", "List every project"),
+    BotCommand("projects_refresh", "Scan for new projects"),
     BotCommand("status", "Ask a project for status"),
     BotCommand("on", "Enable one project or all"),
     BotCommand("off", "Disable one project or all"),
@@ -511,6 +513,21 @@ class TelegramIO:
             reply_markup=build_projects_list_markup(snapshot, show_all=True),
         )
 
+    async def _cmd_projects_refresh(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        added = await self.controls.refresh_projects()
+        snapshot = self.controls.snapshot()
+        await msg.reply_text(
+            f"Pridėta naujų projektų: {added}\n\n"
+            + format_projects(snapshot, show_all=True),
+            parse_mode="HTML",
+            reply_markup=build_projects_list_markup(snapshot, show_all=True),
+        )
+
     async def _cmd_on(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -612,6 +629,8 @@ class TelegramIO:
             CommandHandler("projects", self._cmd_projects, filters=only_me))
         app.add_handler(
             CommandHandler("projects_all", self._cmd_projects_all, filters=only_me))
+        app.add_handler(
+            CommandHandler("projects_refresh", self._cmd_projects_refresh, filters=only_me))
         app.add_handler(
             CommandHandler("on", self._cmd_on, filters=only_me))
         app.add_handler(
