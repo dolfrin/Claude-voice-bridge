@@ -374,6 +374,9 @@ async def build() -> Wiring:
         async def send_question(self, project, text):
             return await telegram_ref["io"].send_question(project, text)
 
+        async def send_disabled_project_prompt(self, project, text):
+            return await telegram_ref["io"].send_disabled_project_prompt(project, text)
+
     lazy_telegram = _LazyTelegram()
 
     sessions_ref: dict = {}

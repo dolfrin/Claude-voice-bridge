@@ -646,3 +646,36 @@ async def test_build_wires_and_run_loop(monkeypatch):
     assert telegram.ran == 1
     assert telegram.stopped == 1
     assert sessions.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_build_inbound_forwards_disabled_project_prompt(monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    cfg = FakeCfg()
+    projects = [FakeProject("qwing", voice="echo")]
+
+    store = FakeStore(last_active="qwing", enabled={"qwing": False})
+    telegram = FakeTelegram()
+    sessions = FakeSessions(projects)
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda path="projects.yaml": projects)
+    monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
+    monkeypatch.setattr(
+        bridge_mod, "Transcriber", lambda model_name, language="lt": FakeTranscriber()
+    )
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
+    monkeypatch.setattr(
+        bridge_mod, "ApprovalManager", lambda send_question, timeout: FakeApprovals()
+    )
+    monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
+    monkeypatch.setattr(
+        bridge_mod, "TelegramIO", lambda cfg, on_user_message, controls: telegram
+    )
+
+    wired = await build()
+    await wired.inbound(_msg(text="go"))
+
+    assert telegram.disabled_prompts == [("qwing", "go")]
+    assert sessions.delivered == []
