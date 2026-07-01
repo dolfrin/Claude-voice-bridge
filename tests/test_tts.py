@@ -5,6 +5,7 @@ import pytest
 
 from voice_bridge.config import Config
 from voice_bridge.tts import TTSBackend, available_voices, get_tts
+from voice_bridge.tts.auto_tts import AutoTTS, _looks_english
 from voice_bridge.tts.openai_tts import OpenAITTS
 from voice_bridge.tts.piper_tts import PiperTTS
 from voice_bridge.tts.together_tts import TogetherTTS
@@ -41,6 +42,12 @@ def test_available_voices_openai_lists_known_voices():
     assert all(isinstance(v, str) for v in voices)
 
 
+def test_available_voices_auto_uses_openai_voice_list():
+    voices = available_voices("auto")
+    assert "alloy" in voices
+    assert "coral" in voices
+
+
 def test_available_voices_piper_returns_default_list():
     voices = available_voices("piper")
     assert voices == ["default"]
@@ -57,6 +64,7 @@ def test_available_voices_unknown_backend_returns_empty():
 
 
 def test_ttsbackend_is_runtime_checkable_protocol():
+    assert isinstance(AutoTTS("sk-test", "/opt/piper/en.onnx"), TTSBackend)
     assert isinstance(OpenAITTS("sk-test"), TTSBackend)
     assert isinstance(PiperTTS("/opt/piper/lt_LT.onnx"), TTSBackend)
     assert isinstance(TogetherTTS("tk-test"), TTSBackend)
@@ -68,6 +76,16 @@ def test_get_tts_openai_builds_openai_backend():
         backend = get_tts(_cfg(tts_backend="openai", openai_api_key="sk-xyz"))
     assert isinstance(backend, OpenAITTS)
     mock_openai.assert_called_once_with(api_key="sk-xyz")
+
+
+def test_get_tts_auto_builds_auto_backend():
+    with patch("voice_bridge.tts.openai_tts.OpenAI"):
+        backend = get_tts(_cfg(
+            tts_backend="auto",
+            openai_api_key="sk-xyz",
+            piper_voice_path="/v/en.onnx",
+        ))
+    assert isinstance(backend, AutoTTS)
 
 
 def test_get_tts_piper_builds_piper_backend():
@@ -151,6 +169,52 @@ async def test_openai_synthesize_runs_off_the_event_loop():
             await backend.synthesize("labas", "echo")
 
     assert calls.get("used_executor") is True
+
+
+def test_auto_language_heuristic_routes_clear_english_to_piper():
+    assert _looks_english("The build is complete and tests passed.") is True
+    assert _looks_english("Viskas gerai, testai praėjo.") is False
+    assert _looks_english("Reikia sutvarkyti build.") is False
+
+
+@pytest.mark.asyncio
+async def test_auto_tts_uses_piper_for_english():
+    backend = AutoTTS("sk-test", "/v/en.onnx")
+    backend._piper.synthesize = AsyncMock(return_value=b"PIPER")
+    backend._openai.synthesize = AsyncMock(return_value=b"OPENAI")
+
+    out = await backend.synthesize("The build is complete.", "coral")
+
+    assert out == b"PIPER"
+    backend._piper.synthesize.assert_awaited_once_with("The build is complete.", "coral")
+    backend._openai.synthesize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_tts_uses_openai_for_lithuanian():
+    backend = AutoTTS("sk-test", "/v/en.onnx")
+    backend._piper.synthesize = AsyncMock(return_value=b"PIPER")
+    backend._openai.synthesize = AsyncMock(return_value=b"OPENAI")
+
+    out = await backend.synthesize("Viskas gerai, testai praėjo.", "coral")
+
+    assert out == b"OPENAI"
+    backend._piper.synthesize.assert_not_awaited()
+    backend._openai.synthesize.assert_awaited_once_with(
+        "Viskas gerai, testai praėjo.", "coral"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_tts_falls_back_to_openai_when_piper_fails():
+    backend = AutoTTS("sk-test", "/v/en.onnx")
+    backend._piper.synthesize = AsyncMock(side_effect=RuntimeError("piper down"))
+    backend._openai.synthesize = AsyncMock(return_value=b"OPENAI")
+
+    out = await backend.synthesize("The build is complete.", "coral")
+
+    assert out == b"OPENAI"
+    backend._openai.synthesize.assert_awaited_once_with("The build is complete.", "coral")
 
 
 @pytest.mark.asyncio

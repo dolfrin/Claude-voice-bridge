@@ -53,6 +53,10 @@ class TTSBackend(Protocol):
 def get_tts(cfg: Config) -> TTSBackend:
     """Construct the configured TTS backend, dispatching on ``cfg.tts_backend``."""
     backend = cfg.tts_backend
+    if backend == "auto":
+        from voice_bridge.tts.auto_tts import AutoTTS
+
+        return AutoTTS(cfg.openai_api_key, cfg.piper_voice_path)
     if backend == "openai":
         from voice_bridge.tts.openai_tts import OpenAITTS
 
@@ -74,6 +78,8 @@ def get_tts(cfg: Config) -> TTSBackend:
 
 def available_voices(backend: str) -> list[str]:
     """List selectable voices for ``backend`` (empty list if unknown)."""
+    if backend == "auto":
+        return list(_OPENAI_VOICES)
     if backend == "openai":
         return list(_OPENAI_VOICES)
     if backend == "piper":

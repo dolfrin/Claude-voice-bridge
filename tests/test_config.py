@@ -126,6 +126,19 @@ def test_load_config_accepts_together_backend():
     assert cfg.openai_api_key == ""
 
 
+def test_load_config_accepts_auto_backend_and_requires_openai_key():
+    env = _full_env()
+    env["TTS_BACKEND"] = "auto"
+    cfg = load_config(env)
+    assert cfg.tts_backend == "auto"
+    assert cfg.openai_api_key == "sk-openai-test"
+
+    del env["OPENAI_API_KEY"]
+    with pytest.raises(ValueError) as exc:
+        load_config(env)
+    assert "OPENAI_API_KEY" in str(exc.value)
+
+
 def test_load_config_together_language_auto_omits_language_hint():
     env = _full_env()
     env["TOGETHER_TTS_LANGUAGE"] = "auto"

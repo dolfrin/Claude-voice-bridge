@@ -64,7 +64,7 @@ class Controls(Protocol):
 
 
 _MODES = ["safe", "full", "ask"]
-_ENGINES = ["openai", "piper", "together"]
+_ENGINES = ["auto", "openai", "piper", "together"]
 _BOT_COMMANDS = [
     BotCommand("panel", "🎛 Valdymo panelė"),
     BotCommand("projects", "🟢 Aktyvūs projektai"),
@@ -589,7 +589,7 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args or context.args[0] not in _ENGINES:
-            await msg.reply_text("usage: /engine <openai|piper|together>")
+            await msg.reply_text("usage: /engine <auto|openai|piper|together>")
             return
         name = context.args[0]
         await self.controls.set_engine(name)

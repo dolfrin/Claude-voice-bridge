@@ -908,11 +908,11 @@ async def test_cmd_voice_set_for_project():
 async def test_cmd_engine_switches_backend():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
-    upd = make_cmd_update("/engine piper")
+    upd = make_cmd_update("/engine auto")
 
-    await io._cmd_engine(upd, make_ctx(["piper"]))
+    await io._cmd_engine(upd, make_ctx(["auto"]))
 
-    assert ("set_engine", "piper") in controls.calls
+    assert ("set_engine", "auto") in controls.calls
 
 
 @pytest.mark.asyncio

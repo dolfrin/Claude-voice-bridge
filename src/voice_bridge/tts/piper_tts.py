@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import sys
+from pathlib import Path
 
 
 class PiperTTS:
@@ -11,8 +14,9 @@ class PiperTTS:
         self._voice_path = voice_path
 
     async def synthesize(self, text: str, voice: str) -> bytes:
+        piper_bin = _piper_executable()
         piper = await asyncio.create_subprocess_exec(
-            "piper",
+            piper_bin,
             "--model",
             self._voice_path,
             "--output-raw",
@@ -51,3 +55,13 @@ class PiperTTS:
                 f"ffmpeg failed ({ffmpeg.returncode}): {ffmpeg_err.decode('utf-8', 'replace')}"
             )
         return ogg
+
+
+def _piper_executable() -> str:
+    found = shutil.which("piper")
+    if found is not None:
+        return found
+    venv_bin = Path(sys.executable).resolve().parent / "piper"
+    if venv_bin.exists():
+        return str(venv_bin)
+    return "piper"
