@@ -38,7 +38,7 @@ Full design: [`docs/superpowers/specs/2026-06-30-voice-bridge-design.md`](docs/s
 | 📎 | File input | Photos, docs, archives, audio, video, and video notes go to the project inbox |
 | 🎵 | Audio files | `mp3`, `m4a`, `ogg`, `wav`, etc. are transcribed and attached |
 | 🎬 | Video preview | Video uploads can get a first-frame preview via `ffmpeg` |
-| 🧾 | Handoff | `/handoff` shows the latest `.claude/voice-bridge-chat.md` history |
+| 🧾 | Handoff | `/handoff` shows the selected project's `.claude/voice-bridge-chat.md` history |
 | ⛔ | Interrupt | `/stop`, menu Stop, or `!` prefix interrupts/restarts the session |
 | 🔘 | Claude buttons | Claude can call `ask_user` to show tappable Telegram choices |
 | 📤 | File delivery | Claude can call `send_file` to send project-local files back |
@@ -52,7 +52,7 @@ Full design: [`docs/superpowers/specs/2026-06-30-voice-bridge-design.md`](docs/s
 ├─ 🟢 Aktyvūs      active sessions
 ├─ 📚 Visi         all discovered projects
 ├─ 🎛 Panelė       mode / voice / engine / on-off controls
-├─ 🧾 Handoff      latest project transcript
+├─ 🧾 Handoff      last-active project transcript
 ├─ ⛔ Stop         interrupt current work
 └─ 🔎 Ieškoti      refresh local projects
 ```
@@ -65,7 +65,7 @@ Common patterns:
 | Reply to exact project | Telegram quote-reply any bot message from that project |
 | Send to current project | Send plain text or voice |
 | Interrupt and replace task | Start a message with `!`, e.g. `! stop, fix tests instead` |
-| Resume at PC | Open `.claude/voice-bridge-chat.md` or send `/handoff` |
+| Resume at PC | Open that project's `.claude/voice-bridge-chat.md` or send `/handoff` |
 
 ---
 
@@ -381,7 +381,7 @@ journalctl --user -u voice-bridge -f
 | 🟢 | `/projects` | Active/last-active projects with select and on/off buttons |
 | 📚 | `/projects_all` or `/projects all` | All known projects, including disabled ones |
 | 🔎 | `/projects_refresh` | Scan recent VS Code/Claude projects and add new ones disabled |
-| 🧾 | `/handoff [project]` | Show the tail of `.claude/voice-bridge-chat.md` |
+| 🧾 | `/handoff [project]` | Show the tail of that project's `.claude/voice-bridge-chat.md`; no arg uses last-active |
 | ▶️ | `/on [project]` | Enable one project, or all projects with no arg |
 | ⏸ | `/off [project]` | Disable one project, or all projects with no arg |
 | ⛔ | `/stop [project]` | Interrupt/restart active or named project and clear queued work |
@@ -536,7 +536,7 @@ deployment good.
 - [ ] **Menu + handoff.** Send `/menu`; tap **Aktyvūs**, **Visi**, **Panelė**,
   **Handoff**, and **Stop**. Confirm each button edits the Telegram message with the
   expected view or status. Send `/handoff qwing` and confirm it shows the tail of
-  `.claude/voice-bridge-chat.md`.
+  `qwing`'s project-local `.claude/voice-bridge-chat.md`.
 - [ ] **Interrupt.** Start a longer task, then send `/stop qwing`; confirm the project
   reports it was interrupted and accepts a new turn. Start another long task and send a
   message beginning with `!`; confirm the old work is interrupted and the new text is
