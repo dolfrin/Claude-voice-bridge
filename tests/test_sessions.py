@@ -263,6 +263,29 @@ async def test_deliver_reports_queue_position_when_busy():
     await sm.stop_all()
 
 
+async def test_interrupt_restarts_enabled_session_and_emits_status():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    first = FakeClaudeSDKClient.instances[0]
+
+    stopped = await sm.interrupt("qwing")
+
+    assert stopped is True
+    assert first.disconnected is True
+    assert len(FakeClaudeSDKClient.instances) == 2
+    assert outbound[-1].text == "Nutraukta."
+    assert outbound[-1].spoken == " "
+
+    await sm.stop_all()
+
+
 async def test_deliver_mirrors_turns_to_project_transcript(tmp_path):
     project = make_project("qwing", cwd=str(tmp_path))
     store = FakeStore(enabled={"qwing": True})

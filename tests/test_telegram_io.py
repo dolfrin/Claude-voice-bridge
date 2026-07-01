@@ -96,6 +96,10 @@ class FakeControls:
     async def set_engine(self, name):
         self.calls.append(("set_engine", name))
 
+    async def interrupt(self, project):
+        self.calls.append(("interrupt", project))
+        return f"{project or 'active'}: nutraukta."
+
     def snapshot(self):
         return self._snapshot
 
@@ -424,6 +428,7 @@ def test_build_menu_markup_has_primary_actions():
         "menu:projects_all",
         "menu:panel",
         "menu:handoff",
+        "menu:stop",
         "menu:refresh",
     ]
 
@@ -929,6 +934,26 @@ async def test_menu_projects_callback_edits_to_projects_list():
     assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "sel:0"
 
 
+@pytest.mark.asyncio
+async def test_menu_stop_callback_interrupts_active_project():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = MagicMock()
+    query.from_user = MagicMock(id=42)
+    query.data = "menu:stop"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("interrupt", None) in controls.calls
+    kwargs = query.edit_message_text.await_args.kwargs
+    assert "active: nutraukta" in kwargs["text"]
+    assert kwargs["reply_markup"].inline_keyboard[2][0].callback_data == "menu:stop"
+
+
 # --------------------------------------------------------------------------
 # text slash commands
 # --------------------------------------------------------------------------
@@ -1034,6 +1059,19 @@ async def test_cmd_off_no_arg_is_global():
     await io._cmd_off(upd, make_ctx([]))
 
     assert ("toggle", None, False) in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_stop_interrupts_project():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/stop qwing")
+
+    await io._cmd_stop(upd, make_ctx(["qwing"]))
+
+    assert ("interrupt", "qwing") in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "qwing: nutraukta" in sent
 
 
 @pytest.mark.asyncio
@@ -1201,21 +1239,21 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.bot.set_my_commands.assert_awaited_once()
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
-    # at least: menu, panel, projects, projects_all, projects_refresh, handoff, on, off,
-    # mode, voice, engine, status, callback, text msg, voice msg, attachments.
-    assert len(added) >= 16
+    # at least: menu, panel, projects, projects_all, projects_refresh, handoff,
+    # on, off, stop, mode, voice, engine, status, callback, text, voice, attachments.
+    assert len(added) >= 17
 
     cmd_names = set()
     for h in added:
         cmds = getattr(h, "commands", None)
         if cmds:
             cmd_names |= set(cmds)
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off",
+    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off", "stop",
             "mode", "voice", "engine", "status"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off",
+    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off", "stop",
             "mode", "voice", "engine"} == registered_names
 
 

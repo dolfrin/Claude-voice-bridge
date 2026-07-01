@@ -64,6 +64,7 @@ class Controls(Protocol):
     async def set_mode(self, project: str | None, mode: str) -> None: ...
     async def set_voice(self, project: str | None, voice: str) -> None: ...
     async def set_engine(self, name: str) -> None: ...
+    async def interrupt(self, project: str | None) -> str: ...
 
 
 _MODES = ["safe", "full", "ask"]
@@ -81,6 +82,7 @@ _BOT_COMMANDS = [
     BotCommand("status", "📡 Paklausti projekto statuso"),
     BotCommand("on", "▶️ Įjungti projektą arba visus"),
     BotCommand("off", "⏸ Išjungti projektą arba visus"),
+    BotCommand("stop", "⛔ Nutraukti einamą darbą"),
     BotCommand("mode", "🛡 Keisti safe/full/ask režimą"),
     BotCommand("voice", "🔊 Balsai ir TTS balsas"),
     BotCommand("engine", "🧠 Keisti TTS variklį"),
@@ -164,7 +166,10 @@ def build_menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎛 Panelė", callback_data="menu:panel"),
             InlineKeyboardButton("🧾 Handoff", callback_data="menu:handoff"),
         ],
-        [InlineKeyboardButton("🔎 Ieškoti naujų", callback_data="menu:refresh")],
+        [
+            InlineKeyboardButton("⛔ Stop", callback_data="menu:stop"),
+            InlineKeyboardButton("🔎 Ieškoti naujų", callback_data="menu:refresh"),
+        ],
     ])
 
 
@@ -668,6 +673,12 @@ class TelegramIO:
                 + format_projects(snapshot, show_all=True),
                 build_projects_list_markup(snapshot, show_all=True),
             )
+        elif action == "stop":
+            await self._edit_callback_text(
+                query,
+                await self.controls.interrupt(None),
+                build_menu_markup(),
+            )
         elif action == "handoff":
             await self._edit_callback_text(
                 query,
@@ -757,6 +768,16 @@ class TelegramIO:
         project = context.args[0] if context.args else None
         await self.controls.toggle(project, False)
         await msg.reply_text(f"{project or 'all'} off")
+
+    async def _cmd_stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        project = context.args[0] if context.args else None
+        result = await self.controls.interrupt(project)
+        await msg.reply_text(result)
 
     async def _cmd_mode(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -871,6 +892,8 @@ class TelegramIO:
             CommandHandler("on", self._cmd_on, filters=only_me))
         app.add_handler(
             CommandHandler("off", self._cmd_off, filters=only_me))
+        app.add_handler(
+            CommandHandler("stop", self._cmd_stop, filters=only_me))
         app.add_handler(
             CommandHandler("mode", self._cmd_mode, filters=only_me))
         app.add_handler(

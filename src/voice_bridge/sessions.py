@@ -149,6 +149,17 @@ class SessionManager:
         if position > 1:
             await self._emit_status(project, f"Eilėje: {position}.")
 
+    async def interrupt(self, project: str) -> bool:
+        """Cancel the running session, drop queued turns, and restart if enabled."""
+        if project not in self._projects:
+            return False
+        was_running = project in self._sessions
+        await self._stop(project)
+        if await self._store.is_enabled(project):
+            await self._start(project)
+        await self._emit_status(project, "Nutraukta.")
+        return was_running
+
     async def set_enabled(self, project: str, enabled: bool) -> None:
         """Persist the enabled flag and start (resume) or stop the session."""
         if project not in self._projects:

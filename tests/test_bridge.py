@@ -129,6 +129,7 @@ class FakeSessions:
         self.delivered: list[tuple[str, str]] = []
         self.enabled_calls: list[tuple[str, bool]] = []
         self.mode_calls: list[tuple[str, str]] = []
+        self.interrupt_calls: list[str] = []
         self.started = 0
         self.stopped = 0
 
@@ -155,6 +156,10 @@ class FakeSessions:
 
     async def set_mode(self, project, mode):
         self.mode_calls.append((project, mode))
+
+    async def interrupt(self, project):
+        self.interrupt_calls.append(project)
+        return True
 
     async def start_all(self):
         self.started += 1
@@ -399,6 +404,21 @@ async def test_make_inbound_voice_transcribed_then_delivered():
 
     assert transcriber.calls == [b"OGG"]
     assert sessions.delivered == [("qwing", "tęsk darbą")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_bang_prefix_interrupts_then_delivers_without_prefix():
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(text="! stop and do this"))
+
+    assert sessions.interrupt_calls == ["qwing"]
+    assert sessions.delivered == [("qwing", "stop and do this")]
 
 
 @pytest.mark.asyncio
@@ -656,6 +676,19 @@ async def test_controls_enable_and_deliver_starts_project_then_sends_text():
     snap = {row["project"]: row for row in controls.snapshot()}
     assert snap["othersapp"]["enabled"] is True
     assert snap["othersapp"]["last_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_controls_interrupt_defaults_to_last_active_project():
+    controls, sessions, store, *_ = _make_controls()
+    store._last_active = "qwing"
+    await controls.seed()
+
+    result = await controls.interrupt(None)
+
+    assert result == "qwing: nutraukta."
+    assert sessions.interrupt_calls == ["qwing"]
+    assert store.last_active_calls == ["qwing"]
 
 
 @pytest.mark.asyncio

@@ -194,6 +194,9 @@ def make_inbound(
         if reason == "off":
             await telegram.send_disabled_project_prompt(project, text)
             return
+        urgent, text = _consume_urgent_prefix(text)
+        if urgent and hasattr(sessions, "interrupt"):
+            await sessions.interrupt(project)
         await sessions.deliver(project, text)
 
     return inbound
@@ -236,6 +239,13 @@ async def _append_attachment_transcripts(
         lines.append("Audio transkripcija:")
         lines.extend(transcripts)
     return "\n".join(lines).strip()
+
+
+def _consume_urgent_prefix(text: str) -> tuple[bool, str]:
+    stripped = text.lstrip()
+    if not stripped.startswith("!"):
+        return False, text
+    return True, stripped[1:].lstrip()
 
 
 # --------------------------------------------------------------------------- #
@@ -329,6 +339,20 @@ class _Controls:
         await self._sessions.deliver(project, text)
         await self._store.set_last_active(project)
         self.mark_last_active(project)
+
+    async def interrupt(self, project: str | None) -> str:
+        target = project
+        if target is None:
+            for name, row in self._mirror.items():
+                if row.get("last_active"):
+                    target = name
+                    break
+        if target is None or target not in self._mirror:
+            return "Neradau aktyvaus projekto."
+        stopped = await self._sessions.interrupt(target)
+        await self._store.set_last_active(target)
+        self.mark_last_active(target)
+        return f"{target}: nutraukta." if stopped else f"{target}: perstartuota."
 
     async def set_mode(self, project: str | None, mode: str) -> None:
         targets = [project] if project is not None else list(self._mirror)
@@ -485,6 +509,9 @@ async def build() -> Wiring:
 
         async def set_mode(self, project, mode):
             await sessions_ref["sm"].set_mode(project, mode)
+
+        async def interrupt(self, project):
+            return await sessions_ref["sm"].interrupt(project)
 
         def add_projects(self, projects):
             return sessions_ref["sm"].add_projects(projects)
