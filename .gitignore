@@ -1,12 +1,14 @@
 *.db
 *.egg-info/
 .env
+projects.yaml
 *.pyc
 __pycache__/
 .pytest_cache/
 src/*.egg-info/
 state.db
 .superpowers/
+docs/superpowers/
 .claude/
 /var/
 .venv/

@@ -4,6 +4,7 @@
 ![Telegram](https://img.shields.io/badge/telegram-bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)
 ![Claude](https://img.shields.io/badge/claude-agent_sdk-D97757?style=for-the-badge)
 ![Tests](https://img.shields.io/badge/tests-322_passed-2EA043?style=for-the-badge)
+![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)
 
 Control long-running [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview)
 coding sessions from Telegram with text, voice, files, inline buttons, and per-project
@@ -22,7 +23,7 @@ Claude project session + local IDE history
 Telegram text + optional voice + files + buttons
 ```
 
-Full design: [`docs/superpowers/specs/2026-06-30-voice-bridge-design.md`](docs/superpowers/specs/2026-06-30-voice-bridge-design.md).
+Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ---
 
@@ -49,12 +50,12 @@ Full design: [`docs/superpowers/specs/2026-06-30-voice-bridge-design.md`](docs/s
 
 ```text
 /menu
-├─ 🟢 Aktyvūs      active sessions
-├─ 📚 Visi         all discovered projects
-├─ 🎛 Panelė       mode / voice / engine / on-off controls
+├─ 🟢 Active       active sessions
+├─ 📚 All          all discovered projects
+├─ 🎛 Panel        mode / voice / engine / on-off controls
 ├─ 🧾 Handoff      last-active project transcript
 ├─ ⛔ Stop         interrupt current work
-└─ 🔎 Ieškoti      refresh local projects
+└─ 🔎 Refresh      refresh local projects
 ```
 
 Common patterns:
@@ -173,8 +174,10 @@ source .venv/bin/activate
 pip install -e .
 
 cp .env.example .env
+cp projects.yaml.example projects.yaml
 chmod 600 .env
 $EDITOR .env
+$EDITOR projects.yaml
 
 python -m voice_bridge.bridge
 ```
@@ -300,10 +303,11 @@ All keys and their meaning:
 
 ### 4. `projects.yaml`
 
-Declare the projects you want the bridge to manage. `enabled` is seeded into SQLite on
-first run and persisted thereafter (the `/panel` button or `/on`/`/off` commands
-override it at runtime). All keys except `name` and `cwd` are optional overrides of the
-global config.
+Copy `projects.yaml.example` to `projects.yaml`, then declare the projects you want the
+bridge to manage. `projects.yaml` is git-ignored because it is machine-local.
+`enabled` is seeded into SQLite on first run and persisted thereafter (the `/panel`
+button or `/on`/`/off` commands override it at runtime). All keys except `name` and
+`cwd` are optional overrides of the global config.
 
 If `AUTO_DISCOVER_PROJECTS=true`, the bridge also scans recent local VS Code and Claude
 project history under `~/Projects` at startup. Discovered projects are added to the
@@ -312,17 +316,17 @@ directories overlap.
 
 ```yaml
 projects:
-  - name: qwing
-    cwd: /home/home/Projects/WhisperX
+  - name: app
+    cwd: /home/home/Projects/app
     enabled: true
     autonomy: safe            # optional; overrides global AUTONOMY_MODE
     voice: alloy               # optional; overrides global TTS_VOICE
     model: claude-opus-4-8    # optional Claude model for this project
     system_prompt_extra: ""   # optional extra instructions appended to system prompt
 
-  - name: othersapp
-    display_name: Others App       # optional label shown in Telegram
-    cwd: /home/home/Projects/othersapp
+  - name: api
+    display_name: API              # optional label shown in Telegram
+    cwd: /home/home/Projects/api
     enabled: false
 ```
 
@@ -384,7 +388,7 @@ journalctl --user -u voice-bridge -f
 | 🧾 | `/handoff [project]` | Show the tail of that project's `.claude/voice-bridge-chat.md`; no arg uses last-active |
 | ▶️ | `/on [project]` | Enable one project, or all projects with no arg |
 | ⏸ | `/off [project]` | Disable one project, or all projects with no arg |
-| ⛔ | `/stop [project]` | Interrupt/restart active or named project and clear queued work |
+| ⛔ | `/stop [project]` | Interrupt and restart active or named project, clearing queued work |
 | 📡 | `/status [project]` | Ask a project for a quick status update |
 | 🛡 | `/mode <full\|safe\|ask> [project]` | Set autonomy globally or per project |
 | 🔊 | `/voice list` / `/voice <name> [for <project>]` | List or set TTS voices |
@@ -396,14 +400,14 @@ so the voice/text conversation is visible from the IDE file tree.
 ### Interrupts and queueing
 
 Each project has its own queue. If you send multiple turns while Claude is still
-working, the bridge reports `Eilėje: N.` and processes them in order. To break the
+working, the bridge reports `Queued: N.` and processes them in order. To break the
 current run:
 
 - Send `/stop` to interrupt the last-active project.
-- Send `/stop qwing` to interrupt a specific project.
+- Send `/stop app` to interrupt a specific project.
 - Tap `Stop` in `/menu`.
 - Prefix a message with `!` to interrupt and immediately send the rest of that message,
-  for example `! nebedaryk sito, vietoj to sutvarkyk testus`.
+  for example `! stop that, fix the tests instead`.
 
 ### Attachments and files
 
@@ -457,9 +461,10 @@ Every project session gets an in-process MCP server named `bridge` with these to
 | `safe` | Agent asks for confirmation before flagged risky operations (e.g. `git push`) |
 | `ask` | Agent asks before every tool call |
 
-In `safe` and `ask` modes you receive a voice+text question and reply "taip" (yes) or
-"ne" (no). No reply within `APPROVAL_TIMEOUT` seconds auto-denies the operation and the
-agent is told it was skipped.
+In `safe` and `ask` modes you receive a voice+text question and reply "yes" or
+"no". Lithuanian yes/no words are also accepted by the running bot. No reply within
+`APPROVAL_TIMEOUT` seconds auto-denies the operation and the agent is told it was
+skipped.
 
 ---
 
@@ -472,6 +477,12 @@ Telegram). Run it with:
 source .venv/bin/activate
 python -m pytest -q
 ```
+
+---
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
 
 ---
 
@@ -510,9 +521,9 @@ to a success criterion in §14 of the design spec. Tick every box before declari
 deployment good.
 
 - [ ] **End-to-end text+voice loop (§14.1).** With the service running and at least one
-  enabled project, trigger an outbound update (e.g. `/status qwing`). Confirm you
+  enabled project, trigger an outbound update (e.g. `/status app`). Confirm you
   receive **two** messages: a text message with full detail and a **voice** message
-  with a spoken summary. Reply **by voice** ("kas toliau?") — confirm the agent
+  with a spoken summary. Reply **by voice** ("what is next?") — confirm the agent
   continues. Reply again **by text** — confirm the agent continues. Do this entirely
   from the phone.
 - [ ] **Two projects, routing (§14.2).** Enable two projects. Have both send you a
@@ -523,9 +534,9 @@ deployment good.
   block, a file path, a hex colour (`#fff`), and a unit (`10px`). Listen to the voice
   message: it must speak **none** of those — no code, no `: 10px`-style fragments. (The
   sanitizer is also unit-tested separately; this confirms it end-to-end.)
-- [ ] **Live mode/voice/engine switches (§14.4).** Send `/mode full qwing`, then
-  `/mode safe qwing` — confirm behaviour changes. Send `/voice list`, then
-  `/voice echo for qwing` — confirm the next voice message uses the new voice. Send
+- [ ] **Live mode/voice/engine switches (§14.4).** Send `/mode full app`, then
+  `/mode safe app` — confirm behavior changes. Send `/voice list`, then
+  `/voice echo for app` — confirm the next voice message uses the new voice. Send
   `/engine auto`, `/engine piper`, `/engine together`, then `/engine openai` — confirm the engine switches without a restart.
 - [ ] **Panel toggles + persistence (§14.5).** Send `/panel`. Tap a project's
   **ON/OFF** button — confirm an off project goes silent (no outbound, inbound replies
@@ -533,11 +544,11 @@ deployment good.
   service** (`systemctl --user restart voice-bridge`) and send `/panel` again — confirm
   the on/off state survived the restart and toggled-on projects resume cleanly from
   their saved session.
-- [ ] **Menu + handoff.** Send `/menu`; tap **Aktyvūs**, **Visi**, **Panelė**,
+- [ ] **Menu + handoff.** Send `/menu`; tap **Active**, **All**, **Panel**,
   **Handoff**, and **Stop**. Confirm each button edits the Telegram message with the
-  expected view or status. Send `/handoff qwing` and confirm it shows the tail of
-  `qwing`'s project-local `.claude/voice-bridge-chat.md`.
-- [ ] **Interrupt.** Start a longer task, then send `/stop qwing`; confirm the project
+  expected view or status. Send `/handoff app` and confirm it shows the tail of
+  `app`'s project-local `.claude/voice-bridge-chat.md`.
+- [ ] **Interrupt.** Start a longer task, then send `/stop app`; confirm the project
   reports it was interrupted and accepts a new turn. Start another long task and send a
   message beginning with `!`; confirm the old work is interrupted and the new text is
   delivered without the `!`.
@@ -552,7 +563,7 @@ deployment good.
   value.
 - [ ] **Safe-mode approval, deny, timeout (§14.6).** With a project in `safe` mode, get
   it to attempt a risky op (e.g. `git push`). Confirm you receive a voice+text question
-  ("… wants to run: git push …. Allow?"). (a) Reply **"ne"** — confirm the op is denied
+  ("... wants to run: git push .... Allow?"). (a) Reply **"no"** — confirm the op is denied
   and the agent is told it was skipped. (b) Trigger another risky op and **do not
   reply** for longer than `APPROVAL_TIMEOUT` — confirm it auto-denies and the agent
   moves on.

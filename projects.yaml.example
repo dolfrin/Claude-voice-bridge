@@ -1,0 +1,16 @@
+projects:
+  - name: app
+    display_name: App
+    cwd: /home/home/Projects/app
+    enabled: true
+    autonomy: safe
+    voice: alloy
+    system_prompt_extra: ""
+
+  - name: api
+    display_name: API
+    cwd: /home/home/Projects/api
+    enabled: false
+    autonomy: safe
+    voice: echo
+    system_prompt_extra: ""
