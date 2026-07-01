@@ -97,13 +97,14 @@ def parse_callback(data: str) -> tuple[str, str]:
     return action, index_str
 
 
-def format_projects(snapshot: list[dict]) -> str:
+def format_projects(snapshot: list[dict], show_all: bool = False) -> str:
     """Render /projects as a scannable HTML summary."""
-    if not snapshot:
-        return "no projects"
+    rows = _project_list_rows(snapshot, show_all=show_all)
+    if not rows:
+        return "no active projects\nUse /projects all to show every project."
 
     lines: list[str] = []
-    for _idx, row in _project_list_rows(snapshot):
+    for _idx, row in rows:
         status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
         project = html.escape(row["project"])
@@ -120,23 +121,37 @@ def format_projects(snapshot: list[dict]) -> str:
     return "\n".join(lines).strip()
 
 
-def build_projects_list_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
+def build_projects_list_markup(
+    snapshot: list[dict], show_all: bool = False
+) -> InlineKeyboardMarkup:
     """Compact one-button-per-project picker for /projects."""
     rows: list[list[InlineKeyboardButton]] = []
-    for idx, row in _project_list_rows(snapshot):
+    current_row: list[InlineKeyboardButton] = []
+    for idx, row in _project_list_rows(snapshot, show_all=show_all):
         status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
-        rows.append([
+        current_row.append(
             InlineKeyboardButton(
                 f"{status} {row['project']}{active}",
                 callback_data=f"ptog:{idx}",
             )
-        ])
+        )
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
     return InlineKeyboardMarkup(rows)
 
 
-def _project_list_rows(snapshot: list[dict]) -> list[tuple[int, dict]]:
-    rows = list(enumerate(snapshot))
+def _project_list_rows(
+    snapshot: list[dict], show_all: bool = False
+) -> list[tuple[int, dict]]:
+    rows = [
+        (idx, row)
+        for idx, row in enumerate(snapshot)
+        if show_all or row.get("enabled") or row.get("last_active")
+    ]
     return sorted(rows, key=lambda item: (0 if item[1].get("last_active") else 1, item[0]))
 
 
@@ -429,10 +444,12 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
+        show_all = bool(context.args and context.args[0] == "all")
+        snapshot = self.controls.snapshot()
         await msg.reply_text(
-            format_projects(self.controls.snapshot()),
+            format_projects(snapshot, show_all=show_all),
             parse_mode="HTML",
-            reply_markup=build_projects_list_markup(self.controls.snapshot()),
+            reply_markup=build_projects_list_markup(snapshot, show_all=show_all),
         )
 
     async def _cmd_on(

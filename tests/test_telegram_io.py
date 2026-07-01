@@ -52,6 +52,9 @@ class FakeControls:
 
     async def toggle(self, project, on):
         self.calls.append(("toggle", project, on))
+        for row in self._snapshot:
+            if project is None or row["project"] == project:
+                row["enabled"] = on
 
     async def set_mode(self, project, mode):
         self.calls.append(("set_mode", project, mode))
@@ -286,7 +289,7 @@ def test_format_projects_uses_status_path_and_last_active_first():
          "cwd": "/home/home/Projects/active"},
     ]
 
-    text = format_projects(snap)
+    text = format_projects(snap, show_all=True)
 
     assert text.index("<b>active</b>") < text.index("<b>off</b>")
     assert "\U0001F7E2 <b>active</b> \u2B50" in text
@@ -294,14 +297,33 @@ def test_format_projects_uses_status_path_and_last_active_first():
     assert "\U0001F4C1 ~/Projects/active · ask · echo · openai" in text
 
 
-def test_build_projects_list_markup_uses_compact_toggle_buttons():
-    snap = FakeControls().snapshot()
-    markup = build_projects_list_markup(snap)
-    buttons = [row[0] for row in markup.inline_keyboard]
+def test_format_projects_default_hides_inactive_projects():
+    text = format_projects(FakeControls().snapshot())
 
-    assert [button.callback_data for button in buttons] == ["ptog:0", "ptog:1"]
+    assert "<b>qwing</b>" in text
+    assert "<b>othersapp</b>" not in text
+
+
+def test_format_projects_all_includes_inactive_projects():
+    text = format_projects(FakeControls().snapshot(), show_all=True)
+
+    assert "<b>qwing</b>" in text
+    assert "<b>othersapp</b>" in text
+
+
+def test_build_projects_list_markup_uses_compact_toggle_buttons():
+    snap = FakeControls().snapshot() + [
+        {"project": "third", "enabled": True, "mode": "safe",
+         "voice": "alloy", "engine": "openai", "last_active": False,
+         "cwd": "/home/home/Projects/third"},
+    ]
+    markup = build_projects_list_markup(snap, show_all=True)
+    buttons = [button for row in markup.inline_keyboard for button in row]
+
+    assert [button.callback_data for button in buttons] == ["ptog:0", "ptog:1", "ptog:2"]
     assert buttons[0].text == "\U0001F7E2 qwing \u2B50"
     assert buttons[1].text == "\u26AA othersapp"
+    assert [len(row) for row in markup.inline_keyboard] == [2, 1]
 
 
 def test_build_mode_markup_lists_explicit_modes():
@@ -534,7 +556,7 @@ async def test_callback_projects_picker_toggles_and_redraws_list():
     assert ("toggle", "othersapp", True) in controls.calls
     kwargs = query.edit_message_text.await_args.kwargs
     assert kwargs["parse_mode"] == "HTML"
-    assert kwargs["reply_markup"].inline_keyboard[1][0].callback_data == "ptog:1"
+    assert kwargs["reply_markup"].inline_keyboard[0][1].callback_data == "ptog:1"
 
 
 @pytest.mark.asyncio
@@ -665,11 +687,26 @@ async def test_cmd_projects_lists_snapshot():
 
     sent = upd.message.reply_text.await_args.args[0]
     kwargs = upd.message.reply_text.await_args.kwargs
-    assert "<b>qwing</b>" in sent and "<b>othersapp</b>" in sent
+    assert "<b>qwing</b>" in sent
+    assert "<b>othersapp</b>" not in sent
     assert "safe" in sent and "alloy" in sent
     assert "~/Projects/WhisperX" in sent
     assert kwargs["parse_mode"] == "HTML"
     assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "ptog:0"
+
+
+@pytest.mark.asyncio
+async def test_cmd_projects_all_lists_inactive_projects():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/projects all")
+
+    await io._cmd_projects(upd, make_ctx(["all"]))
+
+    sent = upd.message.reply_text.await_args.args[0]
+    kwargs = upd.message.reply_text.await_args.kwargs
+    assert "<b>qwing</b>" in sent and "<b>othersapp</b>" in sent
+    assert kwargs["reply_markup"].inline_keyboard[0][1].callback_data == "ptog:1"
 
 
 @pytest.mark.asyncio
