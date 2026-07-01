@@ -276,9 +276,6 @@ class _Controls:
     async def select(self, project: str) -> None:
         if project not in self._mirror:
             return
-        if not self._mirror[project]["enabled"]:
-            self._mirror[project]["enabled"] = True
-            await self._sessions.set_enabled(project, True)
         await self._store.set_last_active(project)
         self.mark_last_active(project)
 

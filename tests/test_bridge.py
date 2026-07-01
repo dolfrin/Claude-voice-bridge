@@ -515,16 +515,16 @@ async def test_controls_toggle_all_off_disables_every_project():
 
 
 @pytest.mark.asyncio
-async def test_controls_select_enables_project_and_marks_last_active():
+async def test_controls_select_marks_last_active_without_enabling_project():
     controls, sessions, store, *_ = _make_controls()
     await controls.seed()
 
     await controls.select("othersapp")
 
-    assert sessions.enabled_calls == [("othersapp", True)]
+    assert sessions.enabled_calls == []
     assert store.last_active_calls == ["othersapp"]
     snap = {row["project"]: row for row in controls.snapshot()}
-    assert snap["othersapp"]["enabled"] is True
+    assert snap["othersapp"]["enabled"] is False
     assert snap["othersapp"]["last_active"] is True
     assert snap["qwing"]["last_active"] is False
 

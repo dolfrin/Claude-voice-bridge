@@ -62,7 +62,6 @@ class FakeControls:
         self.calls.append(("select", project))
         for row in self._snapshot:
             if row["project"] == project:
-                row["enabled"] = True
                 row["last_active"] = True
             else:
                 row["last_active"] = False
