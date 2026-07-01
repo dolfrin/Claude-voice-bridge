@@ -1,56 +1,94 @@
 # Claude Voice Bridge
 
+![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Telegram](https://img.shields.io/badge/telegram-bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)
+![Claude](https://img.shields.io/badge/claude-agent_sdk-D97757?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-322_passed-2EA043?style=for-the-badge)
+
 Control long-running [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview)
-sessions hands-free over Telegram. Each project agent sends you a **text** message
-(full detail, code included) and a **voice** message (clean spoken summary, no code).
-You reply by **voice or text**; the agent continues. Multiple projects run at once and
-replies route to the right one.
+coding sessions from Telegram with text, voice, files, inline buttons, and per-project
+session persistence.
+
+Claude writes full technical replies in Telegram, speaks clean summaries back to you,
+accepts voice/text/file input, and keeps each project routed to the right live session.
+
+```text
+Telegram text / voice / files
+        ↓
+Claude Voice Bridge
+        ↓
+Claude project session + local IDE history
+        ↓
+Telegram text + optional voice + files + buttons
+```
 
 Full design: [`docs/superpowers/specs/2026-06-30-voice-bridge-design.md`](docs/superpowers/specs/2026-06-30-voice-bridge-design.md).
 
 ---
 
-## Features
+## Highlights
 
-- **Text and voice control:** send normal Telegram text or voice messages to the
-  selected Claude project.
-- **Project routing:** quote-reply routes to that project; plain messages go to the
-  last-active project.
-- **Inline UI:** `/menu`, `/projects`, `/projects_all`, and `/panel` expose tappable
-  controls for project selection, on/off, mode, voice, engine, refresh, handoff, and
-  stop.
-- **Session persistence:** Claude SDK session IDs are stored in SQLite and resumed;
-  Telegram turns are mirrored to each project's `.claude/voice-bridge-chat.md`.
-- **Message queue + interrupt:** messages queue per project; `/stop`, `/stop <project>`,
-  the `/menu` stop button, or a `!` prefix interrupt/restart the project session.
-- **Attachments:** photos, documents, audio, video, and video notes are saved into
-  `.claude/voice-bridge-inbox/` inside the target project.
-- **Archives:** ZIP/TAR files are extracted safely under the project inbox.
-- **Audio files:** `mp3`, `m4a`, `ogg`, `wav`, and similar files are transcribed with
-  faster-whisper and also passed to Claude as files.
-- **Video preview:** video/video-note uploads try to extract a first frame with
-  `ffmpeg` for quick visual inspection.
-- **MCP tools for Claude:** agents can call `notify_user`, `ask_user` for Telegram
-  buttons, and `send_file` to send project-local files back to Telegram.
-- **TTS routing:** `TTS_BACKEND=auto` uses local Piper for English-looking output and
-  OpenAI for Lithuanian/mixed text; OpenAI, Piper, and Together can also be selected
-  explicitly.
-- **Safe autonomy:** `safe` and `ask` modes use Telegram approvals for risky or all
-  tool calls.
+|  | Feature | What it gives you |
+|---|---|---|
+| 💬 | Text control | Send instructions and replies from Telegram |
+| 🎤 | Voice control | Voice messages are transcribed locally with faster-whisper |
+| 🔊 | Spoken replies | Claude replies with text plus a clean voice summary |
+| 🧭 | Project routing | Quote-reply routes to that project; plain messages use last-active |
+| 🎛 | Inline controls | `/menu`, `/projects`, `/panel`, buttons for mode, voice, on/off, stop |
+| 📎 | File input | Photos, docs, archives, audio, video, and video notes go to the project inbox |
+| 🎵 | Audio files | `mp3`, `m4a`, `ogg`, `wav`, etc. are transcribed and attached |
+| 🎬 | Video preview | Video uploads can get a first-frame preview via `ffmpeg` |
+| 🧾 | Handoff | `/handoff` shows the latest `.claude/voice-bridge-chat.md` history |
+| ⛔ | Interrupt | `/stop`, menu Stop, or `!` prefix interrupts/restarts the session |
+| 🔘 | Claude buttons | Claude can call `ask_user` to show tappable Telegram choices |
+| 📤 | File delivery | Claude can call `send_file` to send project-local files back |
+| 🧠 | Session resume | SDK session IDs persist in SQLite and resume after restart |
+| 🛡 | Safe mode | Risky tool calls ask for Telegram approval before running |
+
+## Telegram UX
+
+```text
+/menu
+├─ 🟢 Aktyvūs      active sessions
+├─ 📚 Visi         all discovered projects
+├─ 🎛 Panelė       mode / voice / engine / on-off controls
+├─ 🧾 Handoff      latest project transcript
+├─ ⛔ Stop         interrupt current work
+└─ 🔎 Ieškoti      refresh local projects
+```
+
+Common patterns:
+
+| Action | Use |
+|---|---|
+| Select project | Tap a project in `/projects` or `/projects_all` |
+| Reply to exact project | Telegram quote-reply any bot message from that project |
+| Send to current project | Send plain text or voice |
+| Interrupt and replace task | Start a message with `!`, e.g. `! stop, fix tests instead` |
+| Resume at PC | Open `.claude/voice-bridge-chat.md` or send `/handoff` |
 
 ---
 
 ## Architecture
 
-One always-on Python service managed by systemd. A `TelegramIO` front-end handles
-inbound/outbound Telegram messages, inline buttons, files, and slash commands;
-`SessionManager` runs one Claude Agent SDK session per project; `Store` (SQLite via
-aiosqlite) maps message IDs to projects for routing; `Transcriber` (faster-whisper)
-converts incoming voice messages and audio files to text; the TTS layer (auto/OpenAI/
-Piper/Together) converts outbound text to OGG/Opus voice messages; `ApprovalManager`
-handles safe/ask-mode confirmation dialogs; `notify_tool` is the in-process MCP server
-that agents use to notify you, ask button-based questions, and send files back to
-Telegram.
+One always-on Python service managed by systemd:
+
+```text
+TelegramIO
+  handles Telegram polling, buttons, commands, files, text, and voice
+
+SessionManager
+  owns one long-lived Claude Agent SDK session per project
+
+Store
+  persists message routing, last-active project, enabled flags, and SDK session ids
+
+Transcriber + TTS
+  local faster-whisper for inbound voice/audio; OpenAI/Piper/Together for outbound voice
+
+Bridge MCP server
+  exposes notify_user, ask_user, and send_file to each Claude project session
+```
 
 Modules in `src/voice_bridge/`:
 
@@ -121,6 +159,34 @@ Set `PIPER_VOICE_PATH=/opt/piper/lt_LT-....onnx` in `.env`.
 first use and caches it under `~/.cache/huggingface/`. The download is several GB — run
 it once before relying on the service. GPU is used automatically if available; CPU works
 but is slower.
+
+---
+
+## Quick Start
+
+```bash
+git clone <this-repo> claude-voice-bridge
+cd claude-voice-bridge
+
+python3.10 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+cp .env.example .env
+chmod 600 .env
+$EDITOR .env
+
+python -m voice_bridge.bridge
+```
+
+Then open Telegram and send:
+
+```text
+/menu
+```
+
+For always-on use, install `systemd/voice-bridge.service` as a user service after the
+foreground run works.
 
 ---
 
@@ -308,20 +374,21 @@ journalctl --user -u voice-bridge -f
 
 ## Telegram controls
 
-| Command | Effect |
-|---|---|
-| `/menu` | Main tappable menu: active/all projects, panel, handoff, refresh, stop |
-| `/panel` | Inline-button control board (per-project on/off, all-on/all-off, mode, voice, engine) |
-| `/projects` | List active/last-active projects with select and on/off buttons |
-| `/projects_all` or `/projects all` | List all known projects, including disabled ones |
-| `/projects_refresh` | Scan local recent VS Code/Claude projects and add new ones disabled |
-| `/handoff [project]` | Show the tail of `.claude/voice-bridge-chat.md` for a project |
-| `/on [project]` / `/off [project]` | Enable/disable a project (no arg = all) |
-| `/stop [project]` | Interrupt/restart the active project or the named project and clear queued work |
-| `/status [project]` | Ask a project for a quick status update |
-| `/mode <full\|safe\|ask> [project]` | Set autonomy globally or per project |
-| `/voice list` / `/voice <name> [for <project>]` | List available voices / set TTS voice |
-| `/engine <auto\|openai\|piper\|together>` | Switch TTS backend live (no restart needed) |
+|  | Command | Effect |
+|---|---|---|
+| 🏠 | `/menu` | Main tappable menu |
+| 🎛 | `/panel` | Full control board: per-project on/off, mode, voice, engine |
+| 🟢 | `/projects` | Active/last-active projects with select and on/off buttons |
+| 📚 | `/projects_all` or `/projects all` | All known projects, including disabled ones |
+| 🔎 | `/projects_refresh` | Scan recent VS Code/Claude projects and add new ones disabled |
+| 🧾 | `/handoff [project]` | Show the tail of `.claude/voice-bridge-chat.md` |
+| ▶️ | `/on [project]` | Enable one project, or all projects with no arg |
+| ⏸ | `/off [project]` | Disable one project, or all projects with no arg |
+| ⛔ | `/stop [project]` | Interrupt/restart active or named project and clear queued work |
+| 📡 | `/status [project]` | Ask a project for a quick status update |
+| 🛡 | `/mode <full\|safe\|ask> [project]` | Set autonomy globally or per project |
+| 🔊 | `/voice list` / `/voice <name> [for <project>]` | List or set TTS voices |
+| 🧠 | `/engine <auto\|openai\|piper\|together>` | Switch TTS backend live |
 
 Telegram turns are mirrored into each project's `.claude/voice-bridge-chat.md`
 so the voice/text conversation is visible from the IDE file tree.
