@@ -2,6 +2,7 @@
 outbound send_update/send_question, /panel control board, slash commands,
 and run()/stop() lifecycle. All telegram network I/O is mocked."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -9,6 +10,7 @@ from telegram.error import BadRequest
 
 from voice_bridge.config import Config
 from voice_bridge.telegram_io import (
+    build_menu_markup,
     TelegramIO,
     build_mode_markup,
     build_panel_markup,
@@ -363,6 +365,38 @@ async def test_send_question_returns_message_id():
     assert "qwing" in sent and "Allow git push?" in sent
 
 
+@pytest.mark.asyncio
+async def test_ask_user_sends_buttons_and_returns_selected_choice():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=320))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    task = asyncio.create_task(io.ask_user("qwing", "Rinktis?", ["A", "B"]))
+    await asyncio.sleep(0)
+
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["text"] == "[qwing] Rinktis?"
+    markup = kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].text == "A"
+    assert markup.inline_keyboard[0][0].callback_data == "ask:1:0"
+    assert markup.inline_keyboard[1][0].callback_data == "ask:1:1"
+
+    query = MagicMock()
+    query.from_user = MagicMock(id=42)
+    query.data = "ask:1:1"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert await task == "B"
+    query.edit_message_text.assert_awaited_once_with("Pasirinkta: B")
+
+
 # --------------------------------------------------------------------------
 # /panel render + callback dispatch
 # --------------------------------------------------------------------------
@@ -380,6 +414,18 @@ def test_build_panel_markup_has_per_project_and_global_rows():
     # global row carries all-on/all-off/engine (no colon suffix)
     last = kb[-1]
     assert [b.callback_data for b in last] == ["allon", "alloff", "engine"]
+
+
+def test_build_menu_markup_has_primary_actions():
+    markup = build_menu_markup()
+    callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert callbacks == [
+        "menu:projects",
+        "menu:projects_all",
+        "menu:panel",
+        "menu:handoff",
+        "menu:refresh",
+    ]
 
 
 def test_build_panel_markup_reflects_enabled_mode_voice_engine():
@@ -849,6 +895,40 @@ async def test_cmd_panel_replies_with_markup():
     assert len(markup.inline_keyboard) == 3
 
 
+@pytest.mark.asyncio
+async def test_cmd_menu_replies_with_main_menu():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/menu")
+
+    await io._cmd_menu(upd, MagicMock())
+
+    sent = upd.message.reply_text.await_args.args[0]
+    markup = upd.message.reply_text.await_args.kwargs["reply_markup"]
+    assert "Alex for Claude" in sent
+    assert markup.inline_keyboard[0][0].callback_data == "menu:projects"
+
+
+@pytest.mark.asyncio
+async def test_menu_projects_callback_edits_to_projects_list():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = MagicMock()
+    query.from_user = MagicMock(id=42)
+    query.data = "menu:projects"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    kwargs = query.edit_message_text.await_args.kwargs
+    assert "<b>qwing</b>" in kwargs["text"]
+    assert "<b>othersapp</b>" not in kwargs["text"]
+    assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "sel:0"
+
+
 # --------------------------------------------------------------------------
 # text slash commands
 # --------------------------------------------------------------------------
@@ -1121,21 +1201,21 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.bot.set_my_commands.assert_awaited_once()
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
-    # at least: panel, projects, projects_all, projects_refresh, handoff, on, off,
+    # at least: menu, panel, projects, projects_all, projects_refresh, handoff, on, off,
     # mode, voice, engine, status, callback, text msg, voice msg, attachments.
-    assert len(added) >= 15
+    assert len(added) >= 16
 
     cmd_names = set()
     for h in added:
         cmds = getattr(h, "commands", None)
         if cmds:
             cmd_names |= set(cmds)
-    assert {"panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off",
+    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off",
             "mode", "voice", "engine", "status"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off",
+    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off",
             "mode", "voice", "engine"} == registered_names
 
 

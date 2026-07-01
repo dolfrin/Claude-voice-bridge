@@ -14,6 +14,7 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 # Server name "bridge" + tool name "notify_user" => SDK fully-qualified name.
 NOTIFY_TOOL_NAME = "mcp__bridge__notify_user"
 SEND_FILE_TOOL_NAME = "mcp__bridge__send_file"
+ASK_USER_TOOL_NAME = "mcp__bridge__ask_user"
 
 
 def _build_notify_tool(on_notify: Callable[[str, str], Awaitable[None]]):
@@ -54,9 +55,28 @@ def _build_send_file_tool(on_send_file: Callable[[str, str], Awaitable[str]]):
     return send_file
 
 
+def _build_ask_user_tool(on_ask_user: Callable[[str, list[str]], Awaitable[str]]):
+    """Build the ``ask_user`` tool bound to *on_ask_user*."""
+
+    @tool(
+        "ask_user",
+        "Ask the user a question on Telegram with tappable choices. 'choices' must be a short list of button labels.",
+        {"question": str, "choices": list},
+    )
+    async def ask_user(args: dict) -> dict:
+        question = args.get("question", "")
+        raw_choices = args.get("choices", [])
+        choices = [str(choice) for choice in raw_choices] if isinstance(raw_choices, list) else []
+        result = await on_ask_user(str(question), choices)
+        return {"content": [{"type": "text", "text": result}]}
+
+    return ask_user
+
+
 def make_notify_server(
     on_notify: Callable[[str, str], Awaitable[None]],
     on_send_file: Callable[[str, str], Awaitable[str]] | None = None,
+    on_ask_user: Callable[[str, list[str]], Awaitable[str]] | None = None,
 ):
     """Build the in-process MCP server exposing bridge tools.
 
@@ -64,6 +84,7 @@ def make_notify_server(
         on_notify: async callback invoked as ``on_notify(summary, detail)`` each
             time the agent calls the tool.
         on_send_file: async callback invoked as ``on_send_file(path, caption)``.
+        on_ask_user: async callback invoked as ``on_ask_user(question, choices)``.
 
     Returns:
         The SDK MCP server config (from ``create_sdk_mcp_server``) for use in
@@ -72,4 +93,6 @@ def make_notify_server(
     tools = [_build_notify_tool(on_notify)]
     if on_send_file is not None:
         tools.append(_build_send_file_tool(on_send_file))
+    if on_ask_user is not None:
+        tools.append(_build_ask_user_tool(on_ask_user))
     return create_sdk_mcp_server("bridge", tools=tools)

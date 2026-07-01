@@ -225,16 +225,40 @@ async def test_deliver_drains_turn_captures_session_id_and_emits_outbound():
 
     await sm.deliver("qwing", "build the thing")
 
-    assert await _wait_for(lambda: bool(outbound))
+    assert await _wait_for(lambda: len(outbound) >= 2)
 
     assert client.queries == ["build the thing"]
     assert store._session_ids["qwing"] == "sess-123"
-    assert len(outbound) == 1
-    assert isinstance(outbound[0], Outbound)
-    assert outbound[0].project == "qwing"
-    assert "Done." in outbound[0].text
-    assert "diff here" in outbound[0].text
-    assert outbound[0].spoken == ""
+    assert outbound[0].text == "Vykdau."
+    assert outbound[0].spoken == " "
+    final = outbound[-1]
+    assert isinstance(final, Outbound)
+    assert final.project == "qwing"
+    assert "Done." in final.text
+    assert "diff here" in final.text
+    assert final.spoken == ""
+
+    await sm.stop_all()
+
+
+async def test_deliver_reports_queue_position_when_busy():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    await sm.deliver("qwing", "first")
+    await sm.deliver("qwing", "second")
+
+    assert await _wait_for(lambda: any(o.text.startswith("Eilėje:") for o in outbound))
+    queued = [o for o in outbound if o.text.startswith("Eilėje:")][0]
+    assert queued.text == "Eilėje: 2."
+    assert queued.spoken == " "
 
     await sm.stop_all()
 
@@ -590,9 +614,10 @@ async def test_notify_callback_emits_outbound_with_detail_and_summary(monkeypatc
 
     captured = {}
 
-    def fake_make_notify_server(on_notify, on_send_file=None):
+    def fake_make_notify_server(on_notify, on_send_file=None, on_ask_user=None):
         captured["on_notify"] = on_notify
         captured["on_send_file"] = on_send_file
+        captured["on_ask_user"] = on_ask_user
         return object()
 
     monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
@@ -629,7 +654,7 @@ async def test_send_file_callback_emits_project_file_outbound(tmp_path, monkeypa
 
     captured = {}
 
-    def fake_make_notify_server(on_notify, on_send_file=None):
+    def fake_make_notify_server(on_notify, on_send_file=None, on_ask_user=None):
         captured["on_send_file"] = on_send_file
         return object()
 
@@ -662,7 +687,7 @@ async def test_send_file_callback_denies_path_outside_project(tmp_path, monkeypa
 
     captured = {}
 
-    def fake_make_notify_server(on_notify, on_send_file=None):
+    def fake_make_notify_server(on_notify, on_send_file=None, on_ask_user=None):
         captured["on_send_file"] = on_send_file
         return object()
 
@@ -679,6 +704,44 @@ async def test_send_file_callback_denies_path_outside_project(tmp_path, monkeypa
     await sm.stop_all()
 
 
+async def test_ask_user_callback_routes_to_injected_callback(monkeypatch):
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    calls = []
+
+    async def on_outbound(o):
+        pass
+
+    async def ask_user(project_name, question, choices):
+        calls.append((project_name, question, choices))
+        return "B"
+
+    captured = {}
+
+    def fake_make_notify_server(on_notify, on_send_file=None, on_ask_user=None):
+        captured["on_ask_user"] = on_ask_user
+        return object()
+
+    monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
+
+    sm = SessionManager(
+        [project],
+        make_cfg(),
+        store,
+        on_outbound,
+        FakeApprovals(),
+        ask_user,
+    )
+    await sm.start_all()
+
+    result = await captured["on_ask_user"]("Rinktis?", ["A", "B"])
+
+    assert result == "B"
+    assert calls == [("qwing", "Rinktis?", ["A", "B"])]
+
+    await sm.stop_all()
+
+
 async def test_each_project_gets_its_own_notify_server(monkeypatch):
     projects = [make_project("qwing"), make_project("beta", cwd="/tmp/beta")]
     store = FakeStore(enabled={"qwing": True, "beta": True})
@@ -689,7 +752,7 @@ async def test_each_project_gets_its_own_notify_server(monkeypatch):
 
     notifies = {}
 
-    def fake_make_notify_server(on_notify, on_send_file=None):
+    def fake_make_notify_server(on_notify, on_send_file=None, on_ask_user=None):
         # bind by identity; collect them in order
         notifies[len(notifies)] = on_notify
         return object()

@@ -566,6 +566,38 @@ async def test_make_inbound_attachment_is_saved_and_added_to_prompt(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_make_inbound_audio_attachment_is_transcribed_and_saved(tmp_path):
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber(text="čia garso tekstas")
+    sessions = FakeSessions([FakeProject("qwing", cwd=str(tmp_path))])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound({
+        "message_id": 78,
+        "reply_to": None,
+        "text": "",
+        "is_voice": False,
+        "audio": None,
+        "attachments": [{
+            "kind": "audio",
+            "file_name": "note.mp3",
+            "mime_type": "audio/mpeg",
+            "data": b"MP3",
+        }],
+    })
+
+    assert transcriber.calls == [b"MP3"]
+    project, prompt = sessions.delivered[0]
+    assert project == "qwing"
+    assert "Audio transkripcija" in prompt
+    assert "čia garso tekstas" in prompt
+    assert "note.mp3" in prompt
+    assert ".claude/voice-bridge-inbox/" in prompt
+
+
+@pytest.mark.asyncio
 async def test_controls_snapshot_sync_exact_keys():
     controls, *_ = _make_controls()
     await controls.seed()

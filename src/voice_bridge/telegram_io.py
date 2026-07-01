@@ -18,6 +18,7 @@ run-forever wait. ``stop()`` shuts the Application down.
 
 from __future__ import annotations
 
+import asyncio
 import html
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
@@ -71,6 +72,7 @@ _PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 _AUDIO_SUFFIXES = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 _BOT_COMMANDS = [
+    BotCommand("menu", "🏠 Pagrindinis meniu"),
     BotCommand("panel", "🎛 Valdymo panelė"),
     BotCommand("projects", "🟢 Aktyvūs projektai"),
     BotCommand("projects_all", "📚 Visi projektai"),
@@ -152,6 +154,20 @@ def build_projects_list_markup(
     return InlineKeyboardMarkup(rows)
 
 
+def build_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🟢 Aktyvūs", callback_data="menu:projects"),
+            InlineKeyboardButton("📚 Visi", callback_data="menu:projects_all"),
+        ],
+        [
+            InlineKeyboardButton("🎛 Panelė", callback_data="menu:panel"),
+            InlineKeyboardButton("🧾 Handoff", callback_data="menu:handoff"),
+        ],
+        [InlineKeyboardButton("🔎 Ieškoti naujų", callback_data="menu:refresh")],
+    ])
+
+
 def _project_list_rows(
     snapshot: list[dict], show_all: bool = False
 ) -> list[tuple[int, dict]]:
@@ -185,6 +201,18 @@ def _tail_for_telegram(text: str, limit: int = 3500) -> str:
     if len(text) <= limit:
         return text
     return "...\n" + text[-limit:]
+
+
+def _clean_choices(choices: list[str], limit: int = 6) -> list[str]:
+    cleaned: list[str] = []
+    for choice in choices:
+        value = " ".join(str(choice).split())
+        if not value:
+            continue
+        cleaned.append(value[:48])
+        if len(cleaned) >= limit:
+            break
+    return cleaned
 
 
 def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
@@ -273,6 +301,8 @@ class TelegramIO:
         self.app: Application | None = None
         self._pending_off_sends: dict[str, tuple[str, str]] = {}
         self._pending_off_seq = 0
+        self._pending_asks: dict[str, tuple[asyncio.Future[str], list[str]]] = {}
+        self._pending_ask_seq = 0
 
     # --- whitelist -------------------------------------------------------
     def _allowed(self, user_id: int | None) -> bool:
@@ -373,6 +403,31 @@ class TelegramIO:
         )
         return msg.message_id
 
+    async def ask_user(self, project: str, question: str, choices: list[str]) -> str:
+        clean_choices = _clean_choices(choices)
+        if not clean_choices:
+            clean_choices = ["Taip", "Ne"]
+        self._pending_ask_seq += 1
+        token = str(self._pending_ask_seq)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_asks[token] = (future, clean_choices)
+        rows = [
+            [InlineKeyboardButton(choice, callback_data=f"ask:{token}:{idx}")]
+            for idx, choice in enumerate(clean_choices)
+        ]
+        await self.app.bot.send_message(
+            chat_id=self._chat_id,
+            text=f"[{project}] {question}",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        try:
+            return await asyncio.wait_for(future, timeout=self.cfg.approval_timeout)
+        except asyncio.TimeoutError:
+            return ""
+        finally:
+            self._pending_asks.pop(token, None)
+
     async def send_file(
         self,
         project: str,
@@ -458,6 +513,14 @@ class TelegramIO:
         markup = build_panel_markup(self.controls.snapshot())
         await msg.reply_text("Control panel", reply_markup=markup)
 
+    async def _cmd_menu(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        await msg.reply_text("🏠 Alex for Claude", reply_markup=build_menu_markup())
+
     async def _handle_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -490,6 +553,27 @@ class TelegramIO:
                 return
             await self.controls.enable_and_deliver(project, text)
             await query.edit_message_text(f"Įjungta ir išsiųsta į {project}.")
+            return
+        if action == "menu":
+            await self._handle_menu_callback(query, index_str)
+            return
+        if action == "ask":
+            try:
+                token, choice_idx = index_str.split(":", 1)
+                idx = int(choice_idx)
+            except (ValueError, TypeError):
+                return
+            pending = self._pending_asks.get(token)
+            if pending is None:
+                await query.edit_message_text("Šitas pasirinkimas nebegalioja.")
+                return
+            future, choices = pending
+            if idx < 0 or idx >= len(choices):
+                return
+            choice = choices[idx]
+            if not future.done():
+                future.set_result(choice)
+            await query.edit_message_text(f"Pasirinkta: {choice}")
             return
 
         # Global actions do not need a project index.
@@ -558,6 +642,38 @@ class TelegramIO:
 
         new_markup = build_panel_markup(self.controls.snapshot())
         await self._edit_callback_markup(query, new_markup)
+
+    async def _handle_menu_callback(self, query, action: str) -> None:
+        snapshot = self.controls.snapshot()
+        if action == "projects":
+            await self._edit_callback_text(
+                query,
+                format_projects(snapshot),
+                build_projects_list_markup(snapshot),
+            )
+        elif action == "projects_all":
+            await self._edit_callback_text(
+                query,
+                format_projects(snapshot, show_all=True),
+                build_projects_list_markup(snapshot, show_all=True),
+            )
+        elif action == "panel":
+            await self._edit_callback_text(query, "Control panel", build_panel_markup(snapshot))
+        elif action == "refresh":
+            added = await self.controls.refresh_projects()
+            snapshot = self.controls.snapshot()
+            await self._edit_callback_text(
+                query,
+                f"Pridėta naujų projektų: {added}\n\n"
+                + format_projects(snapshot, show_all=True),
+                build_projects_list_markup(snapshot, show_all=True),
+            )
+        elif action == "handoff":
+            await self._edit_callback_text(
+                query,
+                self._format_handoff_text(""),
+                build_menu_markup(),
+            )
 
     async def _edit_callback_markup(self, query, new_markup: InlineKeyboardMarkup) -> None:
         try:
@@ -711,24 +827,21 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        project = context.args[0] if context.args else ""
+        await msg.reply_text(self._format_handoff_text(context.args[0] if context.args else ""))
+
+    def _format_handoff_text(self, project: str) -> str:
         row = _find_project_row(self.controls.snapshot(), project)
         if row is None:
-            await msg.reply_text("Neradau projekto. Naudok /projects_all.")
-            return
+            return "Neradau projekto. Naudok /projects_all."
         path = transcript_path(row.get("cwd") or "")
         label = row.get("display_name") or row["project"]
         if not path.exists():
-            await msg.reply_text(f"{label}: istorijos dar nėra.")
-            return
+            return f"{label}: istorijos dar nėra."
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if not text:
-            await msg.reply_text(f"{label}: istorija tuščia.")
-            return
+            return f"{label}: istorija tuščia."
         tail = _tail_for_telegram(text)
-        await msg.reply_text(
-            f"{label} handoff\n{_friendly_path(str(path))}\n\n{tail}"
-        )
+        return f"{label} handoff\n{_friendly_path(str(path))}\n\n{tail}"
 
     # --- lifecycle -------------------------------------------------------
     async def run(self) -> None:
@@ -742,6 +855,8 @@ class TelegramIO:
 
         only_me = filters.User(user_id=self.cfg.telegram_allowed_user_id)
 
+        app.add_handler(
+            CommandHandler("menu", self._cmd_menu, filters=only_me))
         app.add_handler(
             CommandHandler("panel", self._cmd_panel, filters=only_me))
         app.add_handler(

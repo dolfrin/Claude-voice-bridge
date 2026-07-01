@@ -43,7 +43,12 @@ from claude_agent_sdk import (
 
 from .approvals import ApprovalManager, make_can_use_tool
 from .config import Config, ProjectConfig, effective_autonomy
-from .notify_tool import NOTIFY_TOOL_NAME, SEND_FILE_TOOL_NAME, make_notify_server
+from .notify_tool import (
+    ASK_USER_TOOL_NAME,
+    NOTIFY_TOOL_NAME,
+    SEND_FILE_TOOL_NAME,
+    make_notify_server,
+)
 from .routing import Store
 from .transcript import append_transcript
 from .types import Outbound
@@ -57,13 +62,15 @@ _VOICE_SPLIT_INSTRUCTION = (
     "When you send a user-facing message, make the FIRST line a short, "
     "spoken-friendly summary or question with NO code, paths, or commands. "
     "Then a line that is exactly '---'. Then put any code, diffs, paths, or "
-    "commands below it."
+    "commands below it. When you need the user to choose between options, use "
+    "the bridge ask_user tool with short button labels."
 )
 
 # Sentinel pushed onto a session queue to ask its loop to exit cleanly.
 _SHUTDOWN = None
 
 _ERROR_SPOKEN = "Sesija krito, žiūrėk tekstą."
+_SILENT_SPOKEN = " "
 
 
 class _Session:
@@ -86,12 +93,14 @@ class SessionManager:
         store: Store,
         on_outbound: Callable[[Outbound], Awaitable[None]],
         approvals: ApprovalManager,
+        ask_user: Callable[[str, str, list[str]], Awaitable[str]] | None = None,
     ) -> None:
         self._projects: dict[str, ProjectConfig] = {p.name: p for p in projects}
         self._cfg = cfg
         self._store = store
         self._on_outbound = on_outbound
         self._approvals = approvals
+        self._ask_user = ask_user
         self._sessions: dict[str, _Session] = {}
 
     # ------------------------------------------------------------------ #
@@ -135,7 +144,10 @@ class SessionManager:
         sess = self._sessions.get(project)
         if sess is None:
             return
+        position = sess.queue.qsize() + 1
         await sess.queue.put(text)
+        if position > 1:
+            await self._emit_status(project, f"Eilėje: {position}.")
 
     async def set_enabled(self, project: str, enabled: bool) -> None:
         """Persist the enabled flag and start (resume) or stop the session."""
@@ -198,7 +210,7 @@ class SessionManager:
             permission_mode=permission_mode,
             can_use_tool=can_use_tool,
             mcp_servers={"bridge": notify_server},
-            allowed_tools=[NOTIFY_TOOL_NAME, SEND_FILE_TOOL_NAME],
+            allowed_tools=[NOTIFY_TOOL_NAME, SEND_FILE_TOOL_NAME, ASK_USER_TOOL_NAME],
             resume=resume,
         )
 
@@ -242,6 +254,17 @@ class SessionManager:
 
         return on_send_file
 
+    def _make_on_ask_user(
+        self, project_name: str
+    ) -> Callable[[str, list[str]], Awaitable[str]]:
+
+        async def on_ask_user(question: str, choices: list[str]) -> str:
+            if self._ask_user is None:
+                return ""
+            return await self._ask_user(project_name, question, choices)
+
+        return on_ask_user
+
     async def _start(self, name: str) -> None:
         if name in self._sessions:
             return
@@ -251,6 +274,7 @@ class SessionManager:
         notify_server = make_notify_server(
             self._make_on_notify(name),
             self._make_on_send_file(name),
+            self._make_on_ask_user(name),
         )
         resume = await self._store.get_session_id(name)
         options = self._build_options(project, resume, notify_server)
@@ -354,6 +378,7 @@ class SessionManager:
             if text is _SHUTDOWN:
                 return
             try:
+                await self._emit_status(name, "Vykdau.")
                 await append_transcript(sess.project.cwd, "user", text)
                 await client.query(text)
                 parts: list[str] = []
@@ -399,6 +424,11 @@ class SessionManager:
             )
         except Exception:  # pragma: no cover - defensive
             logger.exception("failed to emit crash Outbound for %s", name)
+
+    async def _emit_status(self, project: str, text: str) -> None:
+        await self._on_outbound(
+            Outbound(project=project, text=text, spoken=_SILENT_SPOKEN)
+        )
 
 
 def _resolve_project_file(cwd: str, requested: str) -> Path | None:

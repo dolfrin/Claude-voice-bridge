@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
+import subprocess
 import tarfile
 import zipfile
 from dataclasses import dataclass
@@ -35,7 +37,12 @@ def format_attachment_prompt(text: str, saved: list[SavedAttachment]) -> str:
     for item in saved:
         lines.append(f"- {item.kind}: {item.path}")
         if item.extracted_to:
-            lines.append(f"  išskleista į: {item.extracted_to}")
+            label = "video kadrai" if item.kind in {"video", "video_note"} else "išskleista į"
+            lines.append(f"  {label}: {item.extracted_to}")
+    if any(item.kind == "photo" for item in saved):
+        lines.append("Jei tai screenshotas ar nuotrauka, analizuok matomą UI/tekstą.")
+    if any(item.kind in {"video", "video_note"} for item in saved):
+        lines.append("Jei pridėti video kadrai, naudok juos greitai peržiūrai; prireikus analizuok ir pilną video failą.")
     lines.append("Peržiūrėk šiuos failus ir tęsk pagal mano žinutę.")
     return "\n".join(lines).strip()
 
@@ -57,7 +64,7 @@ def _save_sync(cwd: str, attachments: list[dict]) -> list[SavedAttachment]:
         path = root / filename
         path.write_bytes(bytes(item.get("data") or b""))
 
-        extracted_to = _extract_archive(path)
+        extracted_to = _extract_archive(path) or _extract_video_frame(path, kind)
         saved.append(
             SavedAttachment(
                 kind=kind,
@@ -101,6 +108,31 @@ def _extract_archive(path: Path) -> Path | None:
     return None
 
 
+def _extract_video_frame(path: Path, kind: str) -> Path | None:
+    if kind not in {"video", "video_note"} or shutil.which("ffmpeg") is None:
+        return None
+    target = path.with_suffix(path.suffix + ".frames")
+    target.mkdir(exist_ok=True)
+    frame = target / "frame-0001.jpg"
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            str(frame),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode == 0 and frame.exists():
+        return target
+    return None
+
+
 def _safe_extract_path(root: Path, member_name: str) -> Path | None:
     dest = (root / member_name).resolve()
     try:
@@ -121,4 +153,3 @@ def _project_relative(path: Path, cwd: str) -> str:
         return str(path.relative_to(Path(cwd)))
     except ValueError:
         return str(path)
-

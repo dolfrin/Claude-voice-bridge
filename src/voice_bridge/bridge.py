@@ -189,6 +189,7 @@ def make_inbound(
             names = ", ".join(sessions.names()) if hasattr(sessions, "names") else ""
             await telegram.send_question("bridge", f"Į kurį projektą? {names}".strip())
             return
+        text = await _append_attachment_transcripts(text, msg, transcriber)
         text = await _attach_files_to_prompt(project, text, msg, sessions)
         if reason == "off":
             await telegram.send_disabled_project_prompt(project, text)
@@ -212,6 +213,29 @@ async def _attach_files_to_prompt(
         return text
     saved = await save_attachments(proj.cwd, attachments)
     return format_attachment_prompt(text, saved)
+
+
+async def _append_attachment_transcripts(
+    text: str,
+    msg: dict,
+    transcriber: Transcriber,
+) -> str:
+    lines = [text.strip()] if text.strip() else []
+    transcripts: list[str] = []
+    for item in msg.get("attachments") or []:
+        if item.get("kind") != "audio":
+            continue
+        data = item.get("data")
+        if not data:
+            continue
+        transcript = await transcriber.transcribe(bytes(data))
+        if transcript.strip():
+            name = item.get("file_name") or "audio"
+            transcripts.append(f"- {name}: {transcript.strip()}")
+    if transcripts:
+        lines.append("Audio transkripcija:")
+        lines.extend(transcripts)
+    return "\n".join(lines).strip()
 
 
 # --------------------------------------------------------------------------- #
@@ -437,6 +461,9 @@ async def build() -> Wiring:
         async def send_disabled_project_prompt(self, project, text):
             return await telegram_ref["io"].send_disabled_project_prompt(project, text)
 
+        async def ask_user(self, project, question, choices):
+            return await telegram_ref["io"].ask_user(project, question, choices)
+
     lazy_telegram = _LazyTelegram()
 
     sessions_ref: dict = {}
@@ -470,7 +497,9 @@ async def build() -> Wiring:
         tts_holder, lazy_telegram, store, cfg, lazy_sessions, controls
     )
 
-    sessions = SessionManager(projects, cfg, store, outbound, approvals)
+    sessions = SessionManager(
+        projects, cfg, store, outbound, approvals, lazy_telegram.ask_user
+    )
     sessions_ref["sm"] = sessions
 
     inbound = make_inbound(transcriber, store, approvals, lazy_sessions, lazy_telegram)

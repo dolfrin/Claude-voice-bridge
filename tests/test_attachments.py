@@ -1,8 +1,10 @@
 import io
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
+import voice_bridge.attachments as attachments_mod
 from voice_bridge.attachments import format_attachment_prompt, save_attachments
 
 
@@ -43,3 +45,43 @@ async def test_save_attachments_extracts_zip_safely(tmp_path):
     assert (extracted / "inside" / "readme.txt").read_text() == "ok"
     assert not (tmp_path / "evil.txt").exists()
 
+
+@pytest.mark.asyncio
+async def test_save_attachments_extracts_first_video_frame(tmp_path, monkeypatch):
+    monkeypatch.setattr(attachments_mod.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+    def fake_run(args, **kwargs):
+        frame = tmp_path / ".claude" / "voice-bridge-inbox"
+        matches = list(frame.glob("*.mp4.frames"))
+        assert matches
+        (matches[0] / "frame-0001.jpg").write_bytes(b"JPG")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(attachments_mod.subprocess, "run", fake_run)
+
+    saved = await save_attachments(str(tmp_path), [{
+        "kind": "video",
+        "file_name": "demo.mp4",
+        "data": b"MP4",
+    }])
+
+    assert saved[0].extracted_to is not None
+    frames = tmp_path / saved[0].extracted_to
+    assert (frames / "frame-0001.jpg").read_bytes() == b"JPG"
+
+
+def test_format_attachment_prompt_adds_visual_guidance():
+    prompt = format_attachment_prompt(
+        "",
+        [
+            attachments_mod.SavedAttachment("photo", ".claude/voice-bridge-inbox/shot.jpg"),
+            attachments_mod.SavedAttachment(
+                "video",
+                ".claude/voice-bridge-inbox/demo.mp4",
+                ".claude/voice-bridge-inbox/demo.mp4.frames",
+            ),
+        ],
+    )
+
+    assert "analizuok matomą UI" in prompt
+    assert "video kadrai" in prompt
