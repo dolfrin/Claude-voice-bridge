@@ -239,6 +239,9 @@ class _Controls:
             mode = effective_autonomy(proj, self._cfg) if proj is not None else self._cfg.autonomy_mode
             voice = effective_voice(proj, self._cfg) if proj is not None else self._cfg.tts_voice
             self._mirror[name] = {
+                "display_name": (
+                    getattr(proj, "display_name", None) or name
+                ) if proj is not None else name,
                 "enabled": enabled.get(name, True),
                 "mode": mode,
                 "voice": voice,
@@ -252,6 +255,7 @@ class _Controls:
         return [
             {
                 "project": name,
+                "display_name": row["display_name"],
                 "enabled": row["enabled"],
                 "mode": row["mode"],
                 "voice": row["voice"],

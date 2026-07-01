@@ -46,7 +46,7 @@ def discover_projects(
 
         seen_cwds.add(cwd)
         name = _unique_name(_project_name(resolved), seen_names)
-        found.append(ProjectConfig(name=name, cwd=cwd, enabled=False))
+        found.append(ProjectConfig(name=name, cwd=cwd, display_name=path.name, enabled=False))
 
     return found
 

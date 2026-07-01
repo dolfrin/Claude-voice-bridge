@@ -36,6 +36,7 @@ class Config:
 class ProjectConfig:
     name: str
     cwd: str
+    display_name: str | None = None
     enabled: bool = True
     autonomy: str | None = None
     voice: str | None = None
@@ -157,6 +158,7 @@ def load_projects(path: str = "projects.yaml") -> list[ProjectConfig]:
             ProjectConfig(
                 name=name,
                 cwd=cwd,
+                display_name=raw.get("display_name"),
                 enabled=True if enabled is None else bool(enabled),
                 autonomy=raw.get("autonomy"),
                 voice=raw.get("voice"),

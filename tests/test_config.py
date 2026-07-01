@@ -155,6 +155,7 @@ def test_load_projects_parses_fields_and_defaults(tmp_path):
             model: claude-opus-4-8
             system_prompt_extra: "be terse"
           - name: bridge
+            display_name: Valdyti Claude balsui
             cwd: /home/home/Projects/claude-voice-bridge
         """
     )
@@ -174,6 +175,7 @@ def test_load_projects_parses_fields_and_defaults(tmp_path):
     assert qwing.system_prompt_extra == "be terse"
 
     bridge = projects[1]
+    assert bridge.display_name == "Valdyti Claude balsui"
     assert bridge.enabled is True
     assert bridge.autonomy is None
     assert bridge.voice is None

@@ -107,7 +107,7 @@ def format_projects(snapshot: list[dict], show_all: bool = False) -> str:
     for _idx, row in rows:
         status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
-        project = html.escape(row["project"])
+        project = html.escape(row.get("display_name") or row["project"])
         cwd = _friendly_path(row.get("cwd") or "")
         path_part = html.escape(cwd) if cwd else "-"
         settings = html.escape(
@@ -132,7 +132,7 @@ def build_projects_list_markup(
         active = " \u2B50" if row.get("last_active") else ""
         current_row.append(
             InlineKeyboardButton(
-                f"{status} {row['project']}{active}",
+                f"{status} {row.get('display_name') or row['project']}{active}",
                 callback_data=f"ptog:{idx}",
             )
         )
@@ -174,7 +174,7 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
     """
     rows: list[list[InlineKeyboardButton]] = []
     for i, row in enumerate(snapshot):
-        proj = row["project"]
+        proj = row.get("display_name") or row["project"]
         dot = "\U0001F7E2" if row["enabled"] else "\U0001F534"  # green/red
         on_label = "ON" if row["enabled"] else "OFF"
         rows.append([
@@ -208,7 +208,7 @@ def build_mode_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
         for mode in _MODES
     ]
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{row['project']} mode", callback_data=f"noop:{idx}")],
+        [InlineKeyboardButton(f"{row.get('display_name') or row['project']} mode", callback_data=f"noop:{idx}")],
         buttons,
         [InlineKeyboardButton("back", callback_data="back")],
     ])
@@ -219,7 +219,7 @@ def build_voice_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
     row = snapshot[idx]
     voices = available_voices(row.get("engine", "openai"))
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(f"{row['project']} voice", callback_data=f"noop:{idx}")]
+        [InlineKeyboardButton(f"{row.get('display_name') or row['project']} voice", callback_data=f"noop:{idx}")]
     ]
     for start in range(0, len(voices), 2):
         pair = voices[start:start + 2]

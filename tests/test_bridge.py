@@ -490,10 +490,11 @@ async def test_controls_snapshot_sync_exact_keys():
     for row in snap:
         assert set(row.keys()) == {
             "project", "enabled", "mode", "voice", "engine", "last_active",
-            "cwd",
+            "cwd", "display_name",
         }
     by_name = {r["project"]: r for r in snap}
     assert by_name["qwing"]["enabled"] is True
+    assert by_name["qwing"]["display_name"] == "qwing"
     assert by_name["qwing"]["mode"] == "full"
     assert by_name["qwing"]["voice"] == "echo"
     assert by_name["othersapp"]["enabled"] is False

@@ -219,6 +219,7 @@ projects:
     system_prompt_extra: ""   # optional extra instructions appended to system prompt
 
   - name: othersapp
+    display_name: Others App       # optional label shown in Telegram
     cwd: /home/home/Projects/othersapp
     enabled: false
 ```

@@ -6,6 +6,7 @@ projects:
     voice: marin
     system_prompt_extra: ""
   - name: bridge
+    display_name: Valdyti Claude balsui
     cwd: /home/home/Projects/claude-voice-bridge
     enabled: false
     voice: echo
