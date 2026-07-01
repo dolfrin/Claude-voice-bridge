@@ -73,19 +73,19 @@ _PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 _AUDIO_SUFFIXES = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 _BOT_COMMANDS = [
-    BotCommand("menu", "🏠 Pagrindinis meniu"),
-    BotCommand("panel", "🎛 Valdymo panelė"),
-    BotCommand("projects", "🟢 Aktyvūs projektai"),
-    BotCommand("projects_all", "📚 Visi projektai"),
-    BotCommand("projects_refresh", "🔎 Ieškoti naujų projektų"),
-    BotCommand("handoff", "🧾 Paskutinė projekto istorija"),
-    BotCommand("status", "📡 Paklausti projekto statuso"),
-    BotCommand("on", "▶️ Įjungti projektą arba visus"),
-    BotCommand("off", "⏸ Išjungti projektą arba visus"),
-    BotCommand("stop", "⛔ Nutraukti einamą darbą"),
-    BotCommand("mode", "🛡 Keisti safe/full/ask režimą"),
-    BotCommand("voice", "🔊 Balsai ir TTS balsas"),
-    BotCommand("engine", "🧠 Keisti TTS variklį"),
+    BotCommand("menu", "🏠 Main menu"),
+    BotCommand("panel", "🎛 Control panel"),
+    BotCommand("projects", "🟢 Active projects"),
+    BotCommand("projects_all", "📚 All projects"),
+    BotCommand("projects_refresh", "🔎 Discover new projects"),
+    BotCommand("handoff", "🧾 Latest project handoff"),
+    BotCommand("status", "📡 Ask project status"),
+    BotCommand("on", "▶️ Enable one project or all"),
+    BotCommand("off", "⏸ Disable one project or all"),
+    BotCommand("stop", "⛔ Interrupt current work"),
+    BotCommand("mode", "🛡 Change safe/full/ask mode"),
+    BotCommand("voice", "🔊 List or set TTS voice"),
+    BotCommand("engine", "🧠 Change TTS backend"),
 ]
 
 
@@ -159,16 +159,16 @@ def build_projects_list_markup(
 def build_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🟢 Aktyvūs", callback_data="menu:projects"),
-            InlineKeyboardButton("📚 Visi", callback_data="menu:projects_all"),
+            InlineKeyboardButton("🟢 Active", callback_data="menu:projects"),
+            InlineKeyboardButton("📚 All", callback_data="menu:projects_all"),
         ],
         [
-            InlineKeyboardButton("🎛 Panelė", callback_data="menu:panel"),
+            InlineKeyboardButton("🎛 Panel", callback_data="menu:panel"),
             InlineKeyboardButton("🧾 Handoff", callback_data="menu:handoff"),
         ],
         [
             InlineKeyboardButton("⛔ Stop", callback_data="menu:stop"),
-            InlineKeyboardButton("🔎 Ieškoti naujų", callback_data="menu:refresh"),
+            InlineKeyboardButton("🔎 Refresh", callback_data="menu:refresh"),
         ],
     ])
 
@@ -411,7 +411,7 @@ class TelegramIO:
     async def ask_user(self, project: str, question: str, choices: list[str]) -> str:
         clean_choices = _clean_choices(choices)
         if not clean_choices:
-            clean_choices = ["Taip", "Ne"]
+            clean_choices = ["Yes", "No"]
         self._pending_ask_seq += 1
         token = str(self._pending_ask_seq)
         loop = asyncio.get_running_loop()
@@ -493,16 +493,16 @@ class TelegramIO:
         markup = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "Įjungti ir siųsti", callback_data=f"offsend:{token}"
+                    "Enable and send", callback_data=f"offsend:{token}"
                 )
             ],
-            [InlineKeyboardButton("Atšaukti", callback_data=f"offcancel:{token}")],
+            [InlineKeyboardButton("Cancel", callback_data=f"offcancel:{token}")],
         ])
         msg = await self.app.bot.send_message(
             chat_id=self._chat_id,
             text=(
-                f"[bridge] {project} išjungtas.\n"
-                "Įjungti projektą ir išsiųsti paskutinę žinutę?"
+                f"[bridge] {project} is disabled.\n"
+                "Enable the project and send the last message?"
             ),
             reply_markup=markup,
         )
@@ -550,14 +550,14 @@ class TelegramIO:
         if action in {"offsend", "offcancel"}:
             pending = self._pending_off_sends.pop(index_str, None)
             if pending is None:
-                await query.edit_message_text("Šita užklausa nebegalioja.")
+                await query.edit_message_text("This request has expired.")
                 return
             project, text = pending
             if action == "offcancel":
-                await query.edit_message_text(f"Atšaukta: {project}")
+                await query.edit_message_text(f"Cancelled: {project}")
                 return
             await self.controls.enable_and_deliver(project, text)
-            await query.edit_message_text(f"Įjungta ir išsiųsta į {project}.")
+            await query.edit_message_text(f"Enabled and sent to {project}.")
             return
         if action == "menu":
             await self._handle_menu_callback(query, index_str)
@@ -570,7 +570,7 @@ class TelegramIO:
                 return
             pending = self._pending_asks.get(token)
             if pending is None:
-                await query.edit_message_text("Šitas pasirinkimas nebegalioja.")
+                await query.edit_message_text("This choice has expired.")
                 return
             future, choices = pending
             if idx < 0 or idx >= len(choices):
@@ -578,7 +578,7 @@ class TelegramIO:
             choice = choices[idx]
             if not future.done():
                 future.set_result(choice)
-            await query.edit_message_text(f"Pasirinkta: {choice}")
+            await query.edit_message_text(f"Selected: {choice}")
             return
 
         # Global actions do not need a project index.
@@ -669,7 +669,7 @@ class TelegramIO:
             snapshot = self.controls.snapshot()
             await self._edit_callback_text(
                 query,
-                f"Pridėta naujų projektų: {added}\n\n"
+                f"New projects added: {added}\n\n"
                 + format_projects(snapshot, show_all=True),
                 build_projects_list_markup(snapshot, show_all=True),
             )
@@ -743,7 +743,7 @@ class TelegramIO:
         added = await self.controls.refresh_projects()
         snapshot = self.controls.snapshot()
         await msg.reply_text(
-            f"Pridėta naujų projektų: {added}\n\n"
+            f"New projects added: {added}\n\n"
             + format_projects(snapshot, show_all=True),
             parse_mode="HTML",
             reply_markup=build_projects_list_markup(snapshot, show_all=True),
@@ -853,14 +853,14 @@ class TelegramIO:
     def _format_handoff_text(self, project: str) -> str:
         row = _find_project_row(self.controls.snapshot(), project)
         if row is None:
-            return "Neradau projekto. Naudok /projects_all."
+            return "Project not found. Use /projects_all."
         path = transcript_path(row.get("cwd") or "")
         label = row.get("display_name") or row["project"]
         if not path.exists():
-            return f"{label}: istorijos dar nėra."
+            return f"{label}: no handoff history yet."
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if not text:
-            return f"{label}: istorija tuščia."
+            return f"{label}: handoff history is empty."
         tail = _tail_for_telegram(text)
         return f"{label} handoff\n{_friendly_path(str(path))}\n\n{tail}"
 

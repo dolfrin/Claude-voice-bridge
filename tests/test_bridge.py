@@ -434,7 +434,7 @@ async def test_make_inbound_empty_transcript_asks_repeat_no_deliver():
 
     assert sessions.delivered == []
     assert len(telegram.questions) == 1
-    assert "Nesupratau" in telegram.questions[0][1]
+    assert "did not understand" in telegram.questions[0][1]
 
 
 @pytest.mark.asyncio
@@ -451,7 +451,7 @@ async def test_make_inbound_voice_without_audio_asks_repeat_no_transcribe():
     assert transcriber.calls == []
     assert sessions.delivered == []
     assert len(telegram.questions) == 1
-    assert "Nesupratau" in telegram.questions[0][1]
+    assert "did not understand" in telegram.questions[0][1]
 
 
 @pytest.mark.asyncio
@@ -463,7 +463,7 @@ async def test_make_inbound_pending_approval_resolves_yes_no_deliver():
     telegram = FakeTelegram()
 
     inbound = _inbound(transcriber, store, approvals, sessions, telegram)
-    await inbound(_msg(reply_to=55, text="taip"))
+    await inbound(_msg(reply_to=55, text="yes"))
 
     assert approvals.resolved == [(55, True)]
     assert sessions.delivered == []
@@ -478,7 +478,7 @@ async def test_make_inbound_pending_approval_resolves_no():
     telegram = FakeTelegram()
 
     inbound = _inbound(transcriber, store, approvals, sessions, telegram)
-    await inbound(_msg(reply_to=55, text="ne"))
+    await inbound(_msg(reply_to=55, text="no"))
 
     assert approvals.resolved == [(55, False)]
     assert sessions.delivered == []
@@ -498,7 +498,7 @@ async def test_make_inbound_pending_approval_unparseable_asks_again():
     assert approvals.resolved == []
     assert sessions.delivered == []
     assert len(telegram.questions) == 1
-    assert "taip" in telegram.questions[0][1].lower()
+    assert "yes" in telegram.questions[0][1].lower()
 
 
 @pytest.mark.asyncio
@@ -686,7 +686,7 @@ async def test_controls_interrupt_defaults_to_last_active_project():
 
     result = await controls.interrupt(None)
 
-    assert result == "qwing: nutraukta."
+    assert result == "qwing: interrupted."
     assert sessions.interrupt_calls == ["qwing"]
     assert store.last_active_calls == ["qwing"]
 

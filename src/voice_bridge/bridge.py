@@ -46,9 +46,9 @@ from .types import Outbound
 
 logger = logging.getLogger(__name__)
 
-# User-facing Lithuanian micro-copy.
-_MSG_NOT_UNDERSTOOD = "Nesupratau, pakartok."
-_MSG_YES_OR_NO = "Atsakyk taip arba ne."
+# User-facing micro-copy.
+_MSG_NOT_UNDERSTOOD = "I did not understand. Please repeat."
+_MSG_YES_OR_NO = "Answer yes or no."
 
 
 # --------------------------------------------------------------------------- #
@@ -187,7 +187,7 @@ def make_inbound(
         project, reason = await resolve_target(msg, store)
         if reason == "none":
             names = ", ".join(sessions.names()) if hasattr(sessions, "names") else ""
-            await telegram.send_question("bridge", f"Į kurį projektą? {names}".strip())
+            await telegram.send_question("bridge", f"Which project? {names}".strip())
             return
         text = await _append_attachment_transcripts(text, msg, transcriber)
         text = await _attach_files_to_prompt(project, text, msg, sessions)
@@ -348,11 +348,11 @@ class _Controls:
                     target = name
                     break
         if target is None or target not in self._mirror:
-            return "Neradau aktyvaus projekto."
+            return "No active project found."
         stopped = await self._sessions.interrupt(target)
         await self._store.set_last_active(target)
         self.mark_last_active(target)
-        return f"{target}: nutraukta." if stopped else f"{target}: perstartuota."
+        return f"{target}: interrupted." if stopped else f"{target}: restarted."
 
     async def set_mode(self, project: str | None, mode: str) -> None:
         targets = [project] if project is not None else list(self._mirror)
@@ -366,8 +366,8 @@ class _Controls:
             label = project or "visi"
             await self._telegram.send_question(
                 "bridge",
-                f"Režimas pakeistas į {mode} ({label}). "
-                "Jei buvo vykdoma užduotis, pakartok.",
+                f"Mode changed to {mode} ({label}). "
+                "If a task was running, send it again.",
             )
 
     async def set_voice(self, project: str | None, voice: str) -> None:
@@ -456,7 +456,7 @@ async def build() -> Wiring:
     await store.seed(projects)
 
     tts_holder = {"backend": get_tts(cfg)}
-    transcriber = Transcriber(cfg.whisper_model, language="lt")
+    transcriber = Transcriber(cfg.whisper_model)
 
     # Telegram is constructed last (it needs the controls + inbound closure),
     # but ApprovalManager.send_question and the controls notices need it. Use a

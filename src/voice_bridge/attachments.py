@@ -33,17 +33,17 @@ def format_attachment_prompt(text: str, saved: list[SavedAttachment]) -> str:
         return text
 
     lines = [text.strip()] if text.strip() else []
-    lines.append("Telegram attachmentai išsaugoti projekte:")
+    lines.append("Telegram attachments saved in this project:")
     for item in saved:
         lines.append(f"- {item.kind}: {item.path}")
         if item.extracted_to:
-            label = "video kadrai" if item.kind in {"video", "video_note"} else "išskleista į"
+            label = "video frames" if item.kind in {"video", "video_note"} else "extracted to"
             lines.append(f"  {label}: {item.extracted_to}")
     if any(item.kind == "photo" for item in saved):
-        lines.append("Jei tai screenshotas ar nuotrauka, analizuok matomą UI/tekstą.")
+        lines.append("If this is a screenshot or photo, inspect the visible UI/text.")
     if any(item.kind in {"video", "video_note"} for item in saved):
-        lines.append("Jei pridėti video kadrai, naudok juos greitai peržiūrai; prireikus analizuok ir pilną video failą.")
-    lines.append("Peržiūrėk šiuos failus ir tęsk pagal mano žinutę.")
+        lines.append("If video frames are attached, use them for a quick review; inspect the full video if needed.")
+    lines.append("Review these files and continue according to my message.")
     return "\n".join(lines).strip()
 
 

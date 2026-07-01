@@ -398,7 +398,7 @@ async def test_ask_user_sends_buttons_and_returns_selected_choice():
     await io._handle_callback(update, MagicMock())
 
     assert await task == "B"
-    query.edit_message_text.assert_awaited_once_with("Pasirinkta: B")
+    query.edit_message_text.assert_awaited_once_with("Selected: B")
 
 
 # --------------------------------------------------------------------------
@@ -778,7 +778,7 @@ async def test_callback_disabled_project_prompt_enables_and_sends():
 
     assert ("enable_and_deliver", "othersapp", "go") in controls.calls
     query.edit_message_text.assert_awaited_once_with(
-        "Įjungta ir išsiųsta į othersapp."
+        "Enabled and sent to othersapp."
     )
     assert io._pending_off_sends == {}
 
@@ -799,7 +799,7 @@ async def test_callback_disabled_project_prompt_can_cancel():
     await io._handle_callback(update, MagicMock())
 
     assert controls.calls == []
-    query.edit_message_text.assert_awaited_once_with("Atšaukta: othersapp")
+    query.edit_message_text.assert_awaited_once_with("Cancelled: othersapp")
     assert io._pending_off_sends == {}
 
 
@@ -1034,7 +1034,7 @@ async def test_cmd_projects_refresh_scans_and_lists_all_projects():
     assert ("refresh_projects",) in controls.calls
     sent = upd.message.reply_text.await_args.args[0]
     kwargs = upd.message.reply_text.await_args.kwargs
-    assert "Pridėta naujų projektų: 1" in sent
+    assert "New projects added: 1" in sent
     assert "<b>fresh</b>" in sent
     assert kwargs["reply_markup"].inline_keyboard[2][0].callback_data == "sel:2"
 
@@ -1172,7 +1172,7 @@ async def test_cmd_handoff_unknown_project_replies_help():
     await io._cmd_handoff(upd, make_ctx(["nope"]))
 
     sent = upd.message.reply_text.await_args.args[0]
-    assert "Neradau projekto" in sent
+    assert "Project not found" in sent
 
 
 @pytest.mark.asyncio

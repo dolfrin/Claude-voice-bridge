@@ -86,7 +86,7 @@ def _optional_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
 def _together_language(env: Mapping[str, str]) -> str:
     raw = env.get("TOGETHER_TTS_LANGUAGE")
     if raw is None:
-        return "lt"
+        return ""
     if raw.strip().lower() == "auto":
         return ""
     return raw

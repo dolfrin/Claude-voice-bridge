@@ -17,7 +17,7 @@ class TogetherTTS:
         self,
         api_key: str,
         model: str = "cartesia/sonic",
-        language: str = "lt",
+        language: str = "",
     ) -> None:
         self._api_key = api_key
         self._model = model

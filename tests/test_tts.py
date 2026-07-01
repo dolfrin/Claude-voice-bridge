@@ -22,7 +22,7 @@ def _cfg(**overrides) -> Config:
         together_tts_language="lt",
         tts_backend="openai",
         tts_voice="alloy",
-        piper_voice_path="/opt/piper/lt_LT.onnx",
+        piper_voice_path="/opt/piper/en_US.onnx",
         whisper_model="large-v3",
         autonomy_mode="safe",
         approval_timeout=300,
@@ -66,7 +66,7 @@ def test_available_voices_unknown_backend_returns_empty():
 def test_ttsbackend_is_runtime_checkable_protocol():
     assert isinstance(AutoTTS("sk-test", "/opt/piper/en.onnx"), TTSBackend)
     assert isinstance(OpenAITTS("sk-test"), TTSBackend)
-    assert isinstance(PiperTTS("/opt/piper/lt_LT.onnx"), TTSBackend)
+    assert isinstance(PiperTTS("/opt/piper/en_US.onnx"), TTSBackend)
     assert isinstance(TogetherTTS("tk-test"), TTSBackend)
     assert not isinstance(object(), TTSBackend)
 
@@ -140,9 +140,9 @@ async def test_openai_synthesize_requests_opus_and_returns_bytes():
         voice="alloy",
         input="Sveiki, viskas gerai.",
         instructions=(
-            "Speak Lithuanian naturally, like a calm human assistant in a private voice "
-            "message. Avoid announcer, robotic, overly formal, or synthetic intonation. "
-            "Use natural pacing, warm tone, and clear articulation."
+            "Speak in the same language as the input text, like a calm human assistant "
+            "in a private voice message. Avoid announcer, robotic, overly formal, or "
+            "synthetic intonation. Use natural pacing, warm tone, and clear articulation."
         ),
         response_format="opus",
     )
@@ -315,13 +315,13 @@ async def test_piper_synthesize_pipes_pcm_through_ffmpeg_to_opus():
         "voice_bridge.tts.piper_tts.asyncio.create_subprocess_exec",
         side_effect=fake_exec,
     ):
-        backend = PiperTTS("/opt/piper/lt_LT.onnx")
+        backend = PiperTTS("/opt/piper/en_US.onnx")
         out = await backend.synthesize("Sveiki", "default")
 
     assert out == b"OggS-piper-opus"
     # piper invoked with the configured model path
     assert created[0][0] == "piper"
-    assert "/opt/piper/lt_LT.onnx" in created[0]
+    assert "/opt/piper/en_US.onnx" in created[0]
     assert "--output-raw" in created[0]
     # ffmpeg invoked to encode opus in an ogg container
     assert created[1][0] == "ffmpeg"
@@ -360,6 +360,6 @@ async def test_piper_synthesize_raises_when_ffmpeg_fails():
         "voice_bridge.tts.piper_tts.asyncio.create_subprocess_exec",
         side_effect=fake_exec,
     ):
-        backend = PiperTTS("/opt/piper/lt_LT.onnx")
+        backend = PiperTTS("/opt/piper/en_US.onnx")
         with pytest.raises(RuntimeError, match="ffmpeg failed"):
             await backend.synthesize("x", "default")

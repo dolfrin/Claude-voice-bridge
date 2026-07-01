@@ -69,7 +69,7 @@ _VOICE_SPLIT_INSTRUCTION = (
 # Sentinel pushed onto a session queue to ask its loop to exit cleanly.
 _SHUTDOWN = None
 
-_ERROR_SPOKEN = "Sesija krito, žiūrėk tekstą."
+_ERROR_SPOKEN = "The session crashed. Check the text."
 _SILENT_SPOKEN = " "
 
 
@@ -147,7 +147,7 @@ class SessionManager:
         position = sess.queue.qsize() + 1
         await sess.queue.put(text)
         if position > 1:
-            await self._emit_status(project, f"Eilėje: {position}.")
+            await self._emit_status(project, f"Queued: {position}.")
 
     async def interrupt(self, project: str) -> bool:
         """Cancel the running session, drop queued turns, and restart if enabled."""
@@ -157,7 +157,7 @@ class SessionManager:
         await self._stop(project)
         if await self._store.is_enabled(project):
             await self._start(project)
-        await self._emit_status(project, "Nutraukta.")
+        await self._emit_status(project, "Interrupted.")
         return was_running
 
     async def set_enabled(self, project: str, enabled: bool) -> None:
@@ -389,7 +389,7 @@ class SessionManager:
             if text is _SHUTDOWN:
                 return
             try:
-                await self._emit_status(name, "Vykdau.")
+                await self._emit_status(name, "Working.")
                 await append_transcript(sess.project.cwd, "user", text)
                 await client.query(text)
                 parts: list[str] = []

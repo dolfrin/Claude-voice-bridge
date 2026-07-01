@@ -39,13 +39,13 @@ async def test_transcribe_joins_segments_and_strips():
 
 
 @pytest.mark.asyncio
-async def test_transcribe_passes_language_lt_by_default():
+async def test_transcribe_auto_detects_language_by_default():
     captured = {}
     model_cls = _fake_model_factory(captured)
     with patch("faster_whisper.WhisperModel", model_cls):
         t = Transcriber("large-v3")
         await t.transcribe(b"OggS-fake")
-    assert captured["kwargs"]["language"] == "lt"
+    assert "language" not in captured["kwargs"]
 
 
 @pytest.mark.asyncio

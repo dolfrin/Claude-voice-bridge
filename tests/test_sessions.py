@@ -229,7 +229,7 @@ async def test_deliver_drains_turn_captures_session_id_and_emits_outbound():
 
     assert client.queries == ["build the thing"]
     assert store._session_ids["qwing"] == "sess-123"
-    assert outbound[0].text == "Vykdau."
+    assert outbound[0].text == "Working."
     assert outbound[0].spoken == " "
     final = outbound[-1]
     assert isinstance(final, Outbound)
@@ -255,9 +255,9 @@ async def test_deliver_reports_queue_position_when_busy():
     await sm.deliver("qwing", "first")
     await sm.deliver("qwing", "second")
 
-    assert await _wait_for(lambda: any(o.text.startswith("Eilėje:") for o in outbound))
-    queued = [o for o in outbound if o.text.startswith("Eilėje:")][0]
-    assert queued.text == "Eilėje: 2."
+    assert await _wait_for(lambda: any(o.text.startswith("Queued:") for o in outbound))
+    queued = [o for o in outbound if o.text.startswith("Queued:")][0]
+    assert queued.text == "Queued: 2."
     assert queued.spoken == " "
 
     await sm.stop_all()
@@ -280,7 +280,7 @@ async def test_interrupt_restarts_enabled_session_and_emits_status():
     assert stopped is True
     assert first.disconnected is True
     assert len(FakeClaudeSDKClient.instances) == 2
-    assert outbound[-1].text == "Nutraukta."
+    assert outbound[-1].text == "Interrupted."
     assert outbound[-1].spoken == " "
 
     await sm.stop_all()
@@ -823,7 +823,7 @@ async def test_receive_response_error_emits_error_outbound_and_keeps_other_sessi
 
     texts = {o.project: o for o in outbound}
     assert "Sesija krito" in texts["qwing"].text
-    assert texts["qwing"].spoken == "Sesija krito, žiūrėk tekstą."
+    assert texts["qwing"].spoken == "The session crashed. Check the text."
     assert "beta" in texts and "hi from beta" in texts["beta"].text
 
     # The crashed session is marked stopped; beta keeps running.

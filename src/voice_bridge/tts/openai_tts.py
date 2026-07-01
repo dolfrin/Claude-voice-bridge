@@ -7,9 +7,9 @@ from openai import OpenAI
 
 _MODEL = "gpt-4o-mini-tts-2025-12-15"
 _INSTRUCTIONS = (
-    "Speak Lithuanian naturally, like a calm human assistant in a private voice "
-    "message. Avoid announcer, robotic, overly formal, or synthetic intonation. "
-    "Use natural pacing, warm tone, and clear articulation."
+    "Speak in the same language as the input text, like a calm human assistant "
+    "in a private voice message. Avoid announcer, robotic, overly formal, or "
+    "synthetic intonation. Use natural pacing, warm tone, and clear articulation."
 )
 
 

@@ -183,15 +183,15 @@ def test_to_spoken_collapses_whitespace():
 def test_to_spoken_truncates_and_appends_marker():
     text = "žodis " * 300  # ~1800 chars of clean prose
     out = to_spoken(text, max_chars=100)
-    assert len(out) <= 100 + len(" Detalės tekste.")
-    assert out.endswith(" Detalės tekste.")
+    assert len(out) <= 100 + len(" Details in text.")
+    assert out.endswith(" Details in text.")
 
 
 def test_to_spoken_no_marker_when_under_cap():
     text = "Trumpa žinutė."
     out = to_spoken(text, max_chars=600)
     assert out == "Trumpa žinutė."
-    assert "Detalės tekste." not in out
+    assert "Details in text." not in out
 
 
 def test_to_spoken_empty_after_stripping():

@@ -92,7 +92,7 @@ def test_is_risky_false(tool_name, tool_input):
 
 @pytest.mark.parametrize(
     "text",
-    ["taip", "Taip!", "  jo ", "davai", "gerai", "ok", "okay", "yes", "yep", "y", "sure", "varom"],
+    ["ok", "okay", "yes", "yep", "yeah", "y", "sure", "go", "allow", "approve", "approved"],
 )
 def test_parse_yes_no_true(text):
     assert parse_yes_no(text) is True
@@ -100,7 +100,7 @@ def test_parse_yes_no_true(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["ne", "Ne.", "stop", "no", "nope", "n", "atšauk", "neleisk"],
+    ["stop", "no", "nope", "n", "cancel", "deny", "denied"],
 )
 def test_parse_yes_no_false(text):
     assert parse_yes_no(text) is False
@@ -108,7 +108,7 @@ def test_parse_yes_no_false(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["", "   ", "gal but", "what do you mean", "kažkas neaiškaus", "run the tests first"],
+    ["", "   ", "maybe", "what do you mean", "unclear answer", "run the tests first"],
 )
 def test_parse_yes_no_none(text):
     assert parse_yes_no(text) is None

@@ -1,7 +1,7 @@
 """Language-aware TTS router.
 
-English-looking text goes to local Piper to save OpenAI credits. Lithuanian or
-mixed Lithuanian text goes to OpenAI for better pronunciation.
+English-looking text goes to local Piper to save OpenAI credits. Non-English or
+uncertain text goes to OpenAI for better pronunciation.
 """
 from __future__ import annotations
 
@@ -10,35 +10,61 @@ import re
 from voice_bridge.tts.openai_tts import OpenAITTS
 from voice_bridge.tts.piper_tts import PiperTTS
 
-_LT_CHARS = set("ąčęėįšųūžĄČĘĖĮŠŲŪŽ")
-_LT_WORDS = {
-    "aš",
-    "ar",
-    "bet",
-    "čia",
-    "dar",
-    "dabar",
-    "dėl",
-    "gerai",
-    "gali",
-    "jei",
-    "kad",
-    "kaip",
-    "ką",
-    "kur",
-    "labai",
-    "man",
-    "ne",
-    "nes",
-    "nu",
-    "reikia",
-    "su",
-    "tai",
-    "taip",
-    "tavo",
-    "tu",
-    "už",
-    "veikia",
+_EN_WORDS = {
+    "a",
+    "about",
+    "again",
+    "all",
+    "and",
+    "are",
+    "as",
+    "back",
+    "build",
+    "can",
+    "check",
+    "complete",
+    "completed",
+    "done",
+    "error",
+    "failed",
+    "file",
+    "fix",
+    "fixed",
+    "for",
+    "from",
+    "go",
+    "has",
+    "have",
+    "hello",
+    "in",
+    "is",
+    "it",
+    "next",
+    "no",
+    "now",
+    "ok",
+    "okay",
+    "passed",
+    "please",
+    "project",
+    "ready",
+    "run",
+    "status",
+    "stop",
+    "test",
+    "tests",
+    "that",
+    "the",
+    "this",
+    "to",
+    "updated",
+    "was",
+    "what",
+    "with",
+    "work",
+    "working",
+    "yes",
+    "you",
 }
 
 
@@ -59,14 +85,16 @@ class AutoTTS:
 
 
 def _looks_english(text: str) -> bool:
-    if any(ch in _LT_CHARS for ch in text):
+    if any(ch.isalpha() and not ch.isascii() for ch in text):
         return False
 
-    words = re.findall(r"[A-Za-zĄČĘĖĮŠŲŪŽąčęėįšųūž']+", text.lower())
+    words = re.findall(r"[A-Za-z']+", text.lower())
     if not words:
         return False
 
-    lt_hits = sum(1 for word in words if word in _LT_WORDS)
-    ascii_words = sum(1 for word in words if word.isascii())
-    return lt_hits == 0 and ascii_words / len(words) >= 0.85
-
+    hits = sum(1 for word in words if word in _EN_WORDS)
+    if len(words) == 1:
+        return hits >= 1
+    if len(words) <= 4:
+        return hits / len(words) >= 0.5
+    return hits / len(words) >= 0.25

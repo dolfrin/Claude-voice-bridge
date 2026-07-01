@@ -86,24 +86,22 @@ def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Yes/No parsing (Lithuanian + English)
+# Yes/No parsing
 # ---------------------------------------------------------------------------
 
 _YES_WORDS = {
-    "taip", "jo", "davai", "gerai", "ok", "okay", "yes", "yep", "yeah",
-    "y", "sure", "varom", "leisk", "tikrai", "aha", "go",
-    "leidžiu",
+    "ok", "okay", "yes", "yep", "yeah", "y", "sure", "go", "allow",
+    "approve", "approved",
 }
 _NO_WORDS = {
-    "ne", "stop", "no", "nope", "n", "atšauk", "atsauk", "neleisk",
-    "neleidžiu", "nereikia", "cancel", "neik",
+    "stop", "no", "nope", "n", "cancel", "deny", "denied",
 }
 
-_TOKEN_RE = re.compile(r"[a-ząčęėįšųūž]+", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"[a-z]+", re.IGNORECASE)
 
 
 def parse_yes_no(text: str) -> bool | None:
-    """Return True for yes, False for no, None if undecidable. Supports lt + en."""
+    """Return True for yes, False for no, None if undecidable."""
     if not text or not text.strip():
         return None
     tokens = _TOKEN_RE.findall(text.lower())

@@ -3,8 +3,8 @@
 ![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Telegram](https://img.shields.io/badge/telegram-bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)
 ![Claude](https://img.shields.io/badge/claude-agent_sdk-D97757?style=for-the-badge)
-![Tests](https://img.shields.io/badge/tests-322_passed-2EA043?style=for-the-badge)
-![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-320_passed-2EA043?style=for-the-badge)
+![License](https://img.shields.io/badge/license-PolyForm_Noncommercial-blue?style=for-the-badge)
 
 Control long-running [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview)
 coding sessions from Telegram with text, voice, files, inline buttons, and per-project
@@ -12,6 +12,9 @@ session persistence.
 
 Claude writes full technical replies in Telegram, speaks clean summaries back to you,
 accepts voice/text/file input, and keeps each project routed to the right live session.
+
+> Free for personal and non-commercial self-hosted use. Commercial use requires
+> written permission.
 
 ```text
 Telegram text / voice / files
@@ -112,6 +115,11 @@ Modules in `src/voice_bridge/`:
 
 ## Requirements
 
+### Platform support
+
+Claude Voice Bridge currently works on Linux. macOS and Windows support are planned and
+will be added soon.
+
 ### System packages
 
 - Python **3.10**
@@ -143,16 +151,16 @@ These are declared in `pyproject.toml` and installed automatically by `pip insta
 
 ### For Piper TTS (optional)
 
-Download a Piper voice model (e.g. a Lithuanian voice from the
+Download a Piper voice model (for example, an English voice from the
 [Piper voices repository](https://github.com/rhasspy/piper/blob/master/VOICES.md)).
 You need both the `.onnx` file and its `.onnx.json` config side-by-side:
 
 ```bash
 sudo mkdir -p /opt/piper
-# Download lt_LT-*.onnx and lt_LT-*.onnx.json into /opt/piper/
+# Download en_US-*.onnx and en_US-*.onnx.json into /opt/piper/
 ```
 
-Set `PIPER_VOICE_PATH=/opt/piper/lt_LT-....onnx` in `.env`.
+Set `PIPER_VOICE_PATH=/opt/piper/en_US-....onnx` in `.env`.
 
 ### Whisper model
 
@@ -250,7 +258,7 @@ TELEGRAM_BOT_TOKEN=123456789:AA...
 TELEGRAM_ALLOWED_USER_ID=11223344
 
 # TTS: choose auto, openai, piper, or together
-# auto uses Piper for English and OpenAI for Lithuanian.
+# auto uses Piper only for English-looking text and OpenAI for everything else.
 TTS_BACKEND=auto
 TTS_VOICE=alloy
 OPENAI_API_KEY=sk-...         # only needed if TTS_BACKEND=openai or auto
@@ -263,7 +271,7 @@ TOGETHER_TTS_LANGUAGE=auto
 # ANTHROPIC_API_KEY=sk-ant-...
 
 # Piper (needed if TTS_BACKEND=piper, or for English voice in auto)
-PIPER_VOICE_PATH=/opt/piper/lt_LT-....onnx
+PIPER_VOICE_PATH=/opt/piper/en_US-....onnx
 
 # STT
 WHISPER_MODEL=large-v3        # downloads on first run
@@ -286,7 +294,7 @@ All keys and their meaning:
 | `OPENAI_API_KEY` | — | OpenAI key; required only for `TTS_BACKEND=openai` or `auto` |
 | `TOGETHER_API_KEY` | — | Together AI key; required only for `TTS_BACKEND=together` |
 | `TOGETHER_TTS_MODEL` | `cartesia/sonic` | Together TTS model |
-| `TOGETHER_TTS_LANGUAGE` | `lt` | Together TTS language hint; use `auto` to omit it |
+| `TOGETHER_TTS_LANGUAGE` | `auto` | Together TTS language hint; `auto` omits the provider hint |
 | `TTS_BACKEND` | `openai` | `auto`, `openai`, `piper`, or `together` |
 | `TTS_VOICE` | `alloy` | Voice name; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |
 | `PIPER_VOICE_PATH` | — | Absolute path to `.onnx` model; required for `piper` and English auto TTS |
@@ -432,15 +440,15 @@ project-local path. Paths outside the project directory are denied.
 
 ### Voice vs text
 
-- Voice messages you send are transcribed by local faster-whisper (Lithuanian by
-  default). This does not use OpenAI credits.
+- Voice messages you send are transcribed by local faster-whisper with language
+  auto-detection. This does not use OpenAI credits.
 - Audio files you send are also transcribed by faster-whisper before they are passed to
   Claude.
 - Outbound voice messages from the bridge **never contain code**, file paths, hex
   colours, or unit values — the sanitizer strips them before TTS. The text version of
   the same message retains full detail.
 - With `TTS_BACKEND=auto`, English-looking output uses local Piper when
-  `PIPER_VOICE_PATH` is configured; Lithuanian/mixed output uses OpenAI TTS. Set
+  `PIPER_VOICE_PATH` is configured; non-English or uncertain output uses OpenAI TTS. Set
   `/engine openai`, `/engine piper`, or `/engine together` to force a backend.
 
 ### Claude MCP tools
@@ -462,7 +470,7 @@ Every project session gets an in-process MCP server named `bridge` with these to
 | `ask` | Agent asks before every tool call |
 
 In `safe` and `ask` modes you receive a voice+text question and reply "yes" or
-"no". Lithuanian yes/no words are also accepted by the running bot. No reply within
+"no". No reply within
 `APPROVAL_TIMEOUT` seconds auto-denies the operation and the agent is told it was
 skipped.
 
@@ -480,9 +488,33 @@ python -m pytest -q
 
 ---
 
+## Donations
+
+If this project saves you time and you want to support development:
+
+| Network | Address |
+|---|---|
+| EVM chains | `0xfE9FD04e7fcc8188A4D7103C9cEA83a096bC3DC1` |
+| Solana | `8gXiJm91Y3s7Fr9encnoD5aCgnGAX59fsfy8K5VKMPHq` |
+
+EVM address works for EVM-compatible currencies and networks.
+
+---
+
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+Claude Voice Bridge is released under the PolyForm Noncommercial License 1.0.0.
+
+You may use, modify, and self-host this project for personal, educational, research,
+and other non-commercial purposes.
+
+You may not sell this software, offer it as a hosted service, include it in a paid
+product, use it inside a commercial product, or otherwise use it commercially without
+prior written permission from the author.
+
+For commercial licensing, contact the repository owner or open a GitHub issue.
+
+See [`LICENSE`](LICENSE) and [`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md).
 
 ---
 

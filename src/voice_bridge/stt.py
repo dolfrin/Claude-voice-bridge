@@ -2,8 +2,8 @@
 
 Accepts Telegram OGG/Opus voice bytes and returns a transcript. The blocking
 faster-whisper model load and inference run off the event loop in a worker
-thread so the single asyncio loop is never blocked. Default language is
-Lithuanian (``lt``).
+thread so the single asyncio loop is never blocked. Language is auto-detected
+by default.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import tempfile
 class Transcriber:
     """Wraps a faster-whisper model for OGG/Opus -> text transcription."""
 
-    def __init__(self, model_name: str, language: str = "lt") -> None:
+    def __init__(self, model_name: str, language: str | None = None) -> None:
         self.model_name = model_name
         self.language = language
         self._model: object | None = None
@@ -33,9 +33,8 @@ class Transcriber:
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(audio)
-            segments, _info = self._get_model().transcribe(
-                path, language=self.language
-            )
+            kwargs = {"language": self.language} if self.language else {}
+            segments, _info = self._get_model().transcribe(path, **kwargs)
             text = "".join(segment.text for segment in segments)
             return text.strip()
         finally:

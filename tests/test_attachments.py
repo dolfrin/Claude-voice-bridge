@@ -83,5 +83,5 @@ def test_format_attachment_prompt_adds_visual_guidance():
         ],
     )
 
-    assert "analizuok matomą UI" in prompt
-    assert "video kadrai" in prompt
+    assert "inspect the visible UI" in prompt
+    assert "video frames" in prompt

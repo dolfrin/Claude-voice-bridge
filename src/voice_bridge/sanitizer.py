@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-TRUNCATION_MARKER = " Detalės tekste."
+TRUNCATION_MARKER = " Details in text."
 
 # Fenced code blocks: ``` ... ``` (any/no language tag), across lines.
 _FENCED = re.compile(r"```.*?```", re.DOTALL)

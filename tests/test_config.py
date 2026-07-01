@@ -21,10 +21,10 @@ def _full_env() -> dict[str, str]:
         "OPENAI_API_KEY": "sk-openai-test",
         "TOGETHER_API_KEY": "tk-test",
         "TOGETHER_TTS_MODEL": "cartesia/sonic",
-        "TOGETHER_TTS_LANGUAGE": "lt",
+        "TOGETHER_TTS_LANGUAGE": "auto",
         "TTS_BACKEND": "openai",
         "TTS_VOICE": "alloy",
-        "PIPER_VOICE_PATH": "/opt/piper/lt.onnx",
+        "PIPER_VOICE_PATH": "/opt/piper/en_US.onnx",
         "WHISPER_MODEL": "large-v3",
         "AUTONOMY_MODE": "safe",
         "APPROVAL_TIMEOUT": "300",
@@ -46,10 +46,10 @@ def test_load_config_parses_all_fields_with_correct_types():
     assert cfg.openai_api_key == "sk-openai-test"
     assert cfg.together_api_key == "tk-test"
     assert cfg.together_tts_model == "cartesia/sonic"
-    assert cfg.together_tts_language == "lt"
+    assert cfg.together_tts_language == ""
     assert cfg.tts_backend == "openai"
     assert cfg.tts_voice == "alloy"
-    assert cfg.piper_voice_path == "/opt/piper/lt.onnx"
+    assert cfg.piper_voice_path == "/opt/piper/en_US.onnx"
     assert cfg.whisper_model == "large-v3"
     assert cfg.autonomy_mode == "safe"
     assert cfg.approval_timeout == 300
@@ -71,7 +71,7 @@ def test_load_config_applies_defaults_for_optional_keys():
     assert cfg.anthropic_api_key == ""
     assert cfg.together_api_key == ""
     assert cfg.together_tts_model == "cartesia/sonic"
-    assert cfg.together_tts_language == "lt"
+    assert cfg.together_tts_language == ""
     assert cfg.tts_backend == "openai"
     assert cfg.tts_voice == "alloy"
     assert cfg.piper_voice_path == ""
