@@ -55,6 +55,7 @@ class Controls(Protocol):
         ...
 
     async def toggle(self, project: str | None, on: bool) -> None: ...
+    async def select(self, project: str) -> None: ...
     async def set_mode(self, project: str | None, mode: str) -> None: ...
     async def set_voice(self, project: str | None, voice: str) -> None: ...
     async def set_engine(self, name: str) -> None: ...
@@ -89,7 +90,7 @@ def parse_callback(data: str) -> tuple[str, str]:
     Returns ``(action, index_str)`` where ``index_str`` is the project index
     (as a string) for per-project actions, or ``""`` for global actions.
     Global actions: ``allon``, ``alloff``, ``engine``.
-    Per-project actions: ``tog``, ``mode``, ``voice``, ``noop``.
+    Per-project actions: ``tog``, ``sel``, ``mode``, ``voice``, ``noop``.
     """
     parts = data.split(":", 1)
     action = parts[0]
@@ -133,7 +134,7 @@ def build_projects_list_markup(
         current_row.append(
             InlineKeyboardButton(
                 f"{status} {row.get('display_name') or row['project']}{active}",
-                callback_data=f"ptog:{idx}",
+                callback_data=f"sel:{idx}",
             )
         )
         if len(current_row) == 2:
@@ -388,8 +389,8 @@ class TelegramIO:
 
             if action == "tog":
                 await self.controls.toggle(project, not row["enabled"])
-            elif action == "ptog":
-                await self.controls.toggle(project, not row["enabled"])
+            elif action in {"sel", "ptog"}:
+                await self.controls.select(project)
                 snap = self.controls.snapshot()
                 await self._edit_callback_text(
                     query,
