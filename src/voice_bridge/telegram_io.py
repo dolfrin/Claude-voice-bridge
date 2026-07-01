@@ -90,7 +90,7 @@ def parse_callback(data: str) -> tuple[str, str]:
     Returns ``(action, index_str)`` where ``index_str`` is the project index
     (as a string) for per-project actions, or ``""`` for global actions.
     Global actions: ``allon``, ``alloff``, ``engine``.
-    Per-project actions: ``tog``, ``sel``, ``mode``, ``voice``, ``noop``.
+    Per-project actions: ``tog``, ``sel``, ``ptgl``, ``mode``, ``voice``, ``noop``.
     """
     parts = data.split(":", 1)
     action = parts[0]
@@ -125,23 +125,20 @@ def format_projects(snapshot: list[dict], show_all: bool = False) -> str:
 def build_projects_list_markup(
     snapshot: list[dict], show_all: bool = False
 ) -> InlineKeyboardMarkup:
-    """Compact one-button-per-project picker for /projects."""
+    """Project picker with separate select-target and on/off controls."""
     rows: list[list[InlineKeyboardButton]] = []
-    current_row: list[InlineKeyboardButton] = []
     for idx, row in _project_list_rows(snapshot, show_all=show_all):
         status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
-        current_row.append(
+        name = row.get("display_name") or row["project"]
+        toggle_label = "ON" if row["enabled"] else "OFF"
+        rows.append([
             InlineKeyboardButton(
-                f"{status} {row.get('display_name') or row['project']}{active}",
+                f"\u270D {status} {name}{active}",
                 callback_data=f"sel:{idx}",
-            )
-        )
-        if len(current_row) == 2:
-            rows.append(current_row)
-            current_row = []
-    if current_row:
-        rows.append(current_row)
+            ),
+            InlineKeyboardButton(toggle_label, callback_data=f"ptgl:{idx}"),
+        ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -391,6 +388,15 @@ class TelegramIO:
                 await self.controls.toggle(project, not row["enabled"])
             elif action in {"sel", "ptog"}:
                 await self.controls.select(project)
+                snap = self.controls.snapshot()
+                await self._edit_callback_text(
+                    query,
+                    format_projects(snap),
+                    build_projects_list_markup(snap),
+                )
+                return
+            elif action == "ptgl":
+                await self.controls.toggle(project, not row["enabled"])
                 snap = self.controls.snapshot()
                 await self._edit_callback_text(
                     query,

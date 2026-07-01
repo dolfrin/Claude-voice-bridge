@@ -321,7 +321,7 @@ def test_format_projects_all_includes_inactive_projects():
     assert "<b>othersapp</b>" in text
 
 
-def test_build_projects_list_markup_uses_compact_select_buttons():
+def test_build_projects_list_markup_uses_select_and_toggle_buttons():
     snap = FakeControls().snapshot() + [
         {"project": "third", "enabled": True, "mode": "safe",
          "voice": "alloy", "engine": "openai", "last_active": False,
@@ -330,10 +330,14 @@ def test_build_projects_list_markup_uses_compact_select_buttons():
     markup = build_projects_list_markup(snap, show_all=True)
     buttons = [button for row in markup.inline_keyboard for button in row]
 
-    assert [button.callback_data for button in buttons] == ["sel:0", "sel:1", "sel:2"]
-    assert buttons[0].text == "\U0001F7E2 qwing \u2B50"
-    assert buttons[1].text == "\u26AA othersapp"
-    assert [len(row) for row in markup.inline_keyboard] == [2, 1]
+    assert [button.callback_data for button in buttons] == [
+        "sel:0", "ptgl:0", "sel:1", "ptgl:1", "sel:2", "ptgl:2",
+    ]
+    assert buttons[0].text == "\u270D \U0001F7E2 qwing \u2B50"
+    assert buttons[2].text == "\u270D \u26AA othersapp"
+    assert buttons[1].text == "ON"
+    assert buttons[3].text == "OFF"
+    assert [len(row) for row in markup.inline_keyboard] == [2, 2, 2]
 
 
 def test_build_mode_markup_lists_explicit_modes():
@@ -570,6 +574,26 @@ async def test_callback_projects_picker_selects_and_redraws_list():
 
 
 @pytest.mark.asyncio
+async def test_callback_projects_picker_toggle_redraws_list():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "ptgl:1"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("toggle", "othersapp", True) in controls.calls
+    kwargs = query.edit_message_text.await_args.kwargs
+    assert kwargs["parse_mode"] == "HTML"
+    assert kwargs["reply_markup"].inline_keyboard[1][1].callback_data == "ptgl:1"
+
+
+@pytest.mark.asyncio
 async def test_callback_from_non_whitelisted_user_is_ignored():
     controls = FakeControls()
     io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
@@ -703,6 +727,7 @@ async def test_cmd_projects_lists_snapshot():
     assert "~/Projects/WhisperX" in sent
     assert kwargs["parse_mode"] == "HTML"
     assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "sel:0"
+    assert kwargs["reply_markup"].inline_keyboard[0][1].callback_data == "ptgl:0"
 
 
 @pytest.mark.asyncio
@@ -716,7 +741,8 @@ async def test_cmd_projects_all_lists_inactive_projects():
     sent = upd.message.reply_text.await_args.args[0]
     kwargs = upd.message.reply_text.await_args.kwargs
     assert "<b>qwing</b>" in sent and "<b>othersapp</b>" in sent
-    assert kwargs["reply_markup"].inline_keyboard[0][1].callback_data == "sel:1"
+    assert kwargs["reply_markup"].inline_keyboard[1][0].callback_data == "sel:1"
+    assert kwargs["reply_markup"].inline_keyboard[1][1].callback_data == "ptgl:1"
 
 
 @pytest.mark.asyncio
