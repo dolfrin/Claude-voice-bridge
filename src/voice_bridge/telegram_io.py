@@ -39,6 +39,7 @@ from telegram.ext import (
 )
 
 from .config import Config
+from .transcript import transcript_path
 from .tts import available_voices
 
 
@@ -74,6 +75,7 @@ _BOT_COMMANDS = [
     BotCommand("projects", "🟢 Aktyvūs projektai"),
     BotCommand("projects_all", "📚 Visi projektai"),
     BotCommand("projects_refresh", "🔎 Ieškoti naujų projektų"),
+    BotCommand("handoff", "🧾 Paskutinė projekto istorija"),
     BotCommand("status", "📡 Paklausti projekto statuso"),
     BotCommand("on", "▶️ Įjungti projektą arba visus"),
     BotCommand("off", "⏸ Išjungti projektą arba visus"),
@@ -165,6 +167,24 @@ def _friendly_path(path: str) -> str:
     if path.startswith("/home/home/"):
         return "~/" + path[len("/home/home/"):]
     return path
+
+
+def _find_project_row(snapshot: list[dict], project: str) -> dict | None:
+    if project:
+        for row in snapshot:
+            if row["project"] == project or row.get("display_name") == project:
+                return row
+        return None
+    for row in snapshot:
+        if row.get("last_active"):
+            return row
+    return snapshot[0] if snapshot else None
+
+
+def _tail_for_telegram(text: str, limit: int = 3500) -> str:
+    if len(text) <= limit:
+        return text
+    return "...\n" + text[-limit:]
 
 
 def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
@@ -685,6 +705,31 @@ class TelegramIO:
             "audio": None,
         })
 
+    async def _cmd_handoff(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        project = context.args[0] if context.args else ""
+        row = _find_project_row(self.controls.snapshot(), project)
+        if row is None:
+            await msg.reply_text("Neradau projekto. Naudok /projects_all.")
+            return
+        path = transcript_path(row.get("cwd") or "")
+        label = row.get("display_name") or row["project"]
+        if not path.exists():
+            await msg.reply_text(f"{label}: istorijos dar nėra.")
+            return
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            await msg.reply_text(f"{label}: istorija tuščia.")
+            return
+        tail = _tail_for_telegram(text)
+        await msg.reply_text(
+            f"{label} handoff\n{_friendly_path(str(path))}\n\n{tail}"
+        )
+
     # --- lifecycle -------------------------------------------------------
     async def run(self) -> None:
         """Build the Application, register handlers, start polling, RETURN.
@@ -705,6 +750,8 @@ class TelegramIO:
             CommandHandler("projects_all", self._cmd_projects_all, filters=only_me))
         app.add_handler(
             CommandHandler("projects_refresh", self._cmd_projects_refresh, filters=only_me))
+        app.add_handler(
+            CommandHandler("handoff", self._cmd_handoff, filters=only_me))
         app.add_handler(
             CommandHandler("on", self._cmd_on, filters=only_me))
         app.add_handler(

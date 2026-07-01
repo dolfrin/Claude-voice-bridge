@@ -17,6 +17,7 @@ from voice_bridge.telegram_io import (
     format_projects,
     parse_callback,
 )
+from voice_bridge.transcript import transcript_path
 
 
 def make_cfg(allowed_id=42):
@@ -1026,6 +1027,37 @@ async def test_cmd_engine_rejects_invalid():
 
 
 @pytest.mark.asyncio
+async def test_cmd_handoff_replies_with_active_project_transcript(tmp_path):
+    controls = FakeControls()
+    controls._snapshot[0]["cwd"] = str(tmp_path)
+    path = transcript_path(str(tmp_path))
+    path.parent.mkdir(parents=True)
+    path.write_text("## user\nlabas\n\n## assistant\npadariau", encoding="utf-8")
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/handoff")
+
+    await io._cmd_handoff(upd, make_ctx([]))
+
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "qwing handoff" in sent
+    assert "voice-bridge-chat.md" in sent
+    assert "labas" in sent
+    assert "padariau" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_handoff_unknown_project_replies_help():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/handoff nope")
+
+    await io._cmd_handoff(upd, make_ctx(["nope"]))
+
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "Neradau projekto" in sent
+
+
+@pytest.mark.asyncio
 async def test_cmd_status_routes_into_on_user_message():
     received = []
 
@@ -1089,21 +1121,21 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.bot.set_my_commands.assert_awaited_once()
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
-    # at least: panel, projects, projects_all, projects_refresh, on, off,
-    # mode, voice, engine, status, callback, text msg, voice msg == 13 handlers
-    assert len(added) >= 13
+    # at least: panel, projects, projects_all, projects_refresh, handoff, on, off,
+    # mode, voice, engine, status, callback, text msg, voice msg, attachments.
+    assert len(added) >= 15
 
     cmd_names = set()
     for h in added:
         cmds = getattr(h, "commands", None)
         if cmds:
             cmd_names |= set(cmds)
-    assert {"panel", "projects", "projects_all", "projects_refresh", "on", "off",
+    assert {"panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off",
             "mode", "voice", "engine", "status"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"panel", "projects", "projects_all", "projects_refresh", "status", "on", "off",
+    assert {"panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off",
             "mode", "voice", "engine"} == registered_names
 
 
