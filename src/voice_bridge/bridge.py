@@ -57,11 +57,15 @@ _MSG_YES_OR_NO = "Answer yes or no."
 _RECAP_MAX_LINES = 20
 
 # Separator between a name-prefix token ("qwing" / "Qwing") and the rest of
-# the message: an optional ":" or "-" followed by at least one whitespace
-# char. Matched against the remainder of the text AFTER the literal name is
-# stripped off (see parse_name_prefix), so it never needs to know what a
-# "name" character is.
-_NAME_PREFIX_SEP_RE = re.compile(r"^\s*[:\-]?\s+(.*)$", re.DOTALL)
+# the message: EITHER a ":" or "-" followed by zero or more whitespace chars
+# (so "qwing:build", with no trailing space, matches), OR one or more
+# whitespace chars with no separator character at all. Either way the char
+# immediately after the name can never be a bare word char, so "qwingbuild"
+# (no separator) and "qwinger: x" (extra letters before the colon) still do
+# NOT match. Matched against the remainder of the text AFTER the literal
+# name is stripped off (see parse_name_prefix), so it never needs to know
+# what a "name" character is.
+_NAME_PREFIX_SEP_RE = re.compile(r"^\s*(?:[:\-]\s*|\s+)(.*)$", re.DOTALL)
 
 
 # --------------------------------------------------------------------------- #
@@ -93,13 +97,14 @@ async def resolve_target(msg: dict, store: Store) -> tuple[str | None, str]:
     return project, "ok"
 
 
-def parse_name_prefix(text: str, names: list[str]) -> tuple[str | None, str]:
+def parse_name_prefix(text: str | None, names: list[str]) -> tuple[str | None, str]:
     """Parse a leading ``"<project>: ..."`` / ``"<project> ..."`` token.
 
     Case-insensitive EXACT match against a project in *names*: the first
     token of *text* must equal a known project name in full — not merely be
-    prefixed by one — and must be followed by an optional ``:``/``-``
-    separator plus at least one whitespace char before the remainder.
+    prefixed by one — and must be followed by a ``:``/``-`` separator (with
+    or without trailing whitespace, e.g. ``"qwing:build"`` needs no space)
+    OR at least one whitespace char with no separator before the remainder.
     Longer names are tried first so a name that is itself a prefix of
     another known name (``"qwing"`` vs. ``"qwingtest"``) cannot shadow the
     longer, more specific match.
@@ -108,8 +113,10 @@ def parse_name_prefix(text: str, names: list[str]) -> tuple[str | None, str]:
     entry from *names*, not the casing typed by the user), otherwise
     ``(None, text)`` UNCHANGED — including when *text* merely contains a
     colon later on (``"just a colon: here"`` does not match unless "just"
-    is itself a known project name).
+    is itself a known project name). ``text=None`` is treated as ``""`` (so
+    the call cannot raise) and returns ``(None, "")``.
     """
+    text = text or ""
     stripped = text.lstrip()
     lower = stripped.lower()
     for name in sorted(names, key=len, reverse=True):
@@ -205,8 +212,11 @@ def make_outbound(
     text-only (no voice). Maps every returned message id to the project and
     marks it last-active (also updating the Controls mirror). On a successful
     send, also appends a one-line recap summary to the project's recap
-    buffer (B3b's ``/recap``) — guarded so a recap-tracking failure can never
-    break the never-raises send path.
+    buffer (B3b's ``/recap``) — skipped entirely when ``o.transient`` is True
+    (NOISE like the per-turn "Working." status, the heartbeat, and verbose
+    tool-activity flushes should not inflate the recap's update count) —
+    guarded so a recap-tracking failure can never break the never-raises send
+    path.
     """
 
     async def outbound(o: Outbound) -> None:
@@ -253,7 +263,8 @@ def make_outbound(
         await store.set_last_active(o.project)
         controls.mark_last_active(o.project)
         try:
-            controls.record_recap(o.project, _recap_summary_line(spoken, full_text))
+            if not o.transient:
+                controls.record_recap(o.project, _recap_summary_line(spoken, full_text))
         except Exception:  # noqa: BLE001 - recap tracking must never break a send
             logger.exception("recap record failed for %s", o.project)
 

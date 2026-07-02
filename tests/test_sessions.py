@@ -278,6 +278,7 @@ async def test_deliver_drains_turn_captures_session_id_and_emits_outbound():
     assert store._session_ids["qwing"] == "sess-123"
     assert outbound[0].text == "Working."
     assert outbound[0].spoken == " "
+    assert outbound[0].transient is True  # NOISE: must not inflate /recap
     final = outbound[-1]
     assert isinstance(final, Outbound)
     assert final.project == "qwing"
@@ -306,6 +307,9 @@ async def test_deliver_reports_queue_position_when_busy():
     queued = [o for o in outbound if o.text.startswith("Queued:")][0]
     assert queued.text == "Queued: 2."
     assert queued.spoken == " "
+    # Not marked transient: only the "Working." status, the heartbeat, and
+    # verbose flushes are NOISE for /recap purposes.
+    assert queued.transient is False
 
     await sm.stop_all()
 
@@ -329,6 +333,7 @@ async def test_interrupt_restarts_enabled_session_and_emits_status():
     assert len(FakeClaudeSDKClient.instances) == 2
     assert outbound[-1].text == "Interrupted."
     assert outbound[-1].spoken == " "
+    assert outbound[-1].transient is False
 
     await sm.stop_all()
 
@@ -1350,6 +1355,9 @@ async def test_heartbeat_emits_during_long_silent_turn():
         lambda: any("dirbu" in o.text.lower() for o in outbound)
     ), "expected at least one 'still working' heartbeat during the silent turn"
 
+    heartbeat = next(o for o in outbound if "dirbu" in o.text.lower())
+    assert heartbeat.transient is True  # NOISE: must not inflate /recap
+
     await sm.stop_all()
 
 
@@ -1586,6 +1594,9 @@ async def test_verbose_streams_coalesced_tool_activity_then_final_text():
     assert all(a.spoken and to_spoken(a.spoken) == "" for a in acts), (
         "silent sentinel must yield no TTS downstream"
     )
+    assert all(a.transient is True for a in acts), (
+        "verbose tool-activity flushes are NOISE and must not inflate /recap"
+    )
 
     first_lines = acts[0].text.split("\n")
     assert first_lines == [
@@ -1601,6 +1612,7 @@ async def test_verbose_streams_coalesced_tool_activity_then_final_text():
     final = outbound[-1]
     assert final.text == "All done."
     assert final.spoken == ""
+    assert final.transient is False  # substantive assistant text: never NOISE
 
     # activity is emitted BEFORE the final text
     assert outbound.index(acts[-1]) < outbound.index(final)

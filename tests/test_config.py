@@ -3,8 +3,12 @@ import textwrap
 import pytest
 
 from voice_bridge.config import (
+    AUTONOMY_MODES,
     Config,
     ProjectConfig,
+    TTS_BACKENDS,
+    _VALID_AUTONOMY_MODES,
+    _VALID_TTS_BACKENDS,
     effective_autonomy,
     effective_voice,
     load_config,
@@ -286,3 +290,15 @@ def test_effective_voice_falls_back_to_global():
 def test_outbound_fields():
     o = Outbound(project="qwing", text="full", spoken="say")
     assert (o.project, o.text, o.spoken) == ("qwing", "full", "say")
+
+
+def test_autonomy_modes_and_tts_backends_are_canonical_ordered_tuples():
+    # Order matters: telegram_io's panel cycles through these in this exact
+    # preferred order (safe -> full -> ask; auto -> openai -> piper -> together).
+    assert AUTONOMY_MODES == ("safe", "full", "ask")
+    assert TTS_BACKENDS == ("auto", "openai", "piper", "together")
+
+
+def test_validation_sets_derive_from_canonical_tuples():
+    assert _VALID_AUTONOMY_MODES == set(AUTONOMY_MODES)
+    assert _VALID_TTS_BACKENDS == set(TTS_BACKENDS)

@@ -8,8 +8,14 @@ from dataclasses import dataclass
 
 import yaml
 
-_VALID_TTS_BACKENDS = {"auto", "openai", "piper", "together"}
-_VALID_AUTONOMY_MODES = {"full", "safe", "ask"}
+# Canonical, ORDERED source of truth for these two small enums. Order
+# matters here: telegram_io's /panel cycles the engine button and mode
+# picker through these tuples in this exact preferred order. Validation
+# sets are derived below so accepted values stay in sync automatically.
+AUTONOMY_MODES = ("safe", "full", "ask")
+TTS_BACKENDS = ("auto", "openai", "piper", "together")
+_VALID_TTS_BACKENDS = set(TTS_BACKENDS)
+_VALID_AUTONOMY_MODES = set(AUTONOMY_MODES)
 
 
 @dataclass

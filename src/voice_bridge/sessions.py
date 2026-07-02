@@ -614,7 +614,7 @@ class SessionManager:
             if text is _SHUTDOWN:
                 return
             try:
-                await self._emit_status(name, "Working.")
+                await self._emit_status(name, "Working.", transient=True)
                 await append_transcript(sess.project.cwd, "user", text)
                 await client.query(text)
                 parts: list[str] = []
@@ -752,7 +752,10 @@ class SessionManager:
         buffer.clear()
         try:
             await self._on_outbound(
-                Outbound(project=name, text=text, spoken=_SILENT_SPOKEN)
+                Outbound(
+                    project=name, text=text, spoken=_SILENT_SPOKEN,
+                    transient=True,
+                )
             )
         except Exception:  # noqa: BLE001 - a verbose flush must never crash the turn
             logger.exception("verbose activity flush failed for %s", name)
@@ -780,6 +783,7 @@ class SessionManager:
                         project=name,
                         text=_HEARTBEAT_TEXT,
                         spoken=_HEARTBEAT_SPOKEN,
+                        transient=True,
                     )
                 )
             except asyncio.CancelledError:
@@ -897,9 +901,14 @@ class SessionManager:
         except Exception:  # pragma: no cover - defensive
             logger.exception("failed to emit give-up Outbound for %s", name)
 
-    async def _emit_status(self, project: str, text: str) -> None:
+    async def _emit_status(
+        self, project: str, text: str, *, transient: bool = False
+    ) -> None:
         await self._on_outbound(
-            Outbound(project=project, text=text, spoken=_SILENT_SPOKEN)
+            Outbound(
+                project=project, text=text, spoken=_SILENT_SPOKEN,
+                transient=transient,
+            )
         )
 
 

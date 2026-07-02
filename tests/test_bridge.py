@@ -744,6 +744,38 @@ def test_parse_name_prefix_no_names_returns_none_unchanged():
     assert parse_name_prefix(text, []) == (None, text)
 
 
+def test_parse_name_prefix_colon_with_no_trailing_space():
+    # B3b Minor: users type "qwing:build" with no space after the colon.
+    assert parse_name_prefix("qwing:build", ["qwing", "othersapp"]) == (
+        "qwing",
+        "build",
+    )
+
+
+def test_parse_name_prefix_dash_with_no_trailing_space():
+    assert parse_name_prefix("qwing-build", ["qwing", "othersapp"]) == (
+        "qwing",
+        "build",
+    )
+
+
+def test_parse_name_prefix_no_separator_at_all_does_not_match():
+    # Exact-token guarantee preserved: no ":"/"-"/whitespace right after the
+    # name means it is not a routing prefix at all.
+    text = "qwingbuild"
+    assert parse_name_prefix(text, ["qwing", "othersapp"]) == (None, text)
+
+
+def test_parse_name_prefix_extra_letters_before_colon_does_not_match():
+    # "qwinger" is not the token "qwing" even though it starts with it.
+    text = "qwinger: x"
+    assert parse_name_prefix(text, ["qwing", "othersapp"]) == (None, text)
+
+
+def test_parse_name_prefix_none_text_returns_none_and_empty_string():
+    assert parse_name_prefix(None, ["qwing", "othersapp"]) == (None, "")
+
+
 # --------------------------------------------------------------------------- #
 # make_inbound: name-prefix routing precedence
 # --------------------------------------------------------------------------- #
@@ -820,13 +852,54 @@ async def test_recap_lists_project_with_update_count_and_latest_line():
     outbound = make_outbound(tts_holder, telegram, store, cfg, sessions, controls)
 
     controls.mark_recap_boundary()
-    await outbound(Outbound(project="qwing", text="Working.", spoken=" "))
+    await outbound(Outbound(project="qwing", text="Started.", spoken="Started."))
     await outbound(Outbound(project="qwing", text="Done.\n---\ncode", spoken=""))
 
     text = controls.recap()
     assert "qwing" in text
     assert "2 atnaujinimai" in text
     assert "Done." in text  # latest line, spoken empty -> falls back to first line
+
+
+@pytest.mark.asyncio
+async def test_recap_ignores_transient_status_and_heartbeat_noise():
+    # B3b Minor: a turn that emits the "Working." status, a "still working"
+    # heartbeat, and one real reply must show 1 update in /recap, not 3.
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    telegram = FakeTelegram()
+    outbound = make_outbound(tts_holder, telegram, store, cfg, sessions, controls)
+
+    controls.mark_recap_boundary()
+    await outbound(
+        Outbound(project="qwing", text="Working.", spoken=" ", transient=True)
+    )
+    await outbound(
+        Outbound(
+            project="qwing", text="Vis dar dirbu…", spoken="Vis dar dirbu…",
+            transient=True,
+        )
+    )
+    await outbound(Outbound(project="qwing", text="Done.", spoken="Done."))
+
+    text = controls.recap()
+    assert "qwing" in text
+    assert "1 atnaujinimai" in text
+    assert "Done." in text
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_transient_skips_record_recap():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    telegram = FakeTelegram()
+    outbound = make_outbound(tts_holder, telegram, store, cfg, sessions, controls)
+
+    controls.mark_recap_boundary()
+    await outbound(
+        Outbound(project="qwing", text="Working.", spoken=" ", transient=True)
+    )
+
+    assert controls._recap_lines.get("qwing", []) == []
+    assert controls.recap() == "Nieko naujo."
 
 
 @pytest.mark.asyncio

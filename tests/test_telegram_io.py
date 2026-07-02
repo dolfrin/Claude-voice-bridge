@@ -4,17 +4,21 @@ and run()/stop() lifecycle. All telegram network I/O is mocked."""
 
 import asyncio
 import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
-from voice_bridge.config import Config
+from voice_bridge.config import AUTONOMY_MODES, Config, TTS_BACKENDS
 from voice_bridge.telegram_io import (
     build_menu_markup,
     TelegramIO,
     _CAPTION_LIMIT,
     _chunk_text,
+    _ENGINES,
+    _friendly_path,
+    _MODES,
     _send_with_retry,
     build_mode_markup,
     build_panel_markup,
@@ -596,6 +600,36 @@ async def test_ask_user_sends_buttons_and_returns_selected_choice():
 
     assert await task == "B"
     query.edit_message_text.assert_awaited_once_with("Selected: B")
+
+
+# --------------------------------------------------------------------------
+# _MODES / _ENGINES sourced from config.py (single source of truth)
+# --------------------------------------------------------------------------
+def test_modes_and_engines_mirror_config_canonical_ordered_tuples():
+    assert _MODES == list(AUTONOMY_MODES)
+    assert _ENGINES == list(TTS_BACKENDS)
+    # Panel cycle order is preserved exactly.
+    assert _MODES == ["safe", "full", "ask"]
+    assert _ENGINES == ["auto", "openai", "piper", "together"]
+
+
+# --------------------------------------------------------------------------
+# _friendly_path (portable home-dir shortening)
+# --------------------------------------------------------------------------
+def test_friendly_path_shortens_real_home_prefix():
+    home = str(Path.home())
+    assert _friendly_path(f"{home}/Projects/x") == "~/Projects/x"
+
+
+def test_friendly_path_leaves_non_home_path_unchanged():
+    assert _friendly_path("/var/other/proj") == "/var/other/proj"
+
+
+def test_friendly_path_uses_path_home_not_a_hardcoded_host_path(monkeypatch):
+    fake_home = "/srv/someuser"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path(fake_home)))
+    assert _friendly_path(f"{fake_home}/proj") == "~/proj"
+    assert _friendly_path("/home/home/Projects/x") == "/home/home/Projects/x"
 
 
 # --------------------------------------------------------------------------

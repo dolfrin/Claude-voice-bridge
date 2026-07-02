@@ -11,7 +11,8 @@ The LOGIC here is structured to be unit-testable with a mocked Bot:
   test can inject an ``AsyncMock`` bot.
 
 C2: ``controls.snapshot()`` is SYNCHRONOUS and each dict is keyed exactly
-``{"project", "enabled", "mode", "voice", "engine", "last_active"}``.
+``{"project", "display_name", "enabled", "mode", "voice", "engine",
+"last_active", "cwd", "verbose"}`` (see ``bridge._Controls.snapshot()``).
 C3: ``run()`` starts polling and RETURNS; ``bridge.main()`` owns the
 run-forever wait. ``stop()`` shuts the Application down.
 """
@@ -42,7 +43,7 @@ from telegram.ext import (
     filters,
 )
 
-from .config import Config
+from .config import AUTONOMY_MODES, Config, TTS_BACKENDS
 from .transcript import transcript_path
 from .tts import available_voices
 
@@ -60,8 +61,9 @@ class Controls(Protocol):
 
     def snapshot(self) -> list[dict]:
         # each dict keyed EXACTLY:
-        # {"project": str, "enabled": bool, "mode": str, "voice": str,
-        #  "engine": str, "last_active": bool}
+        # {"project": str, "display_name": str, "enabled": bool,
+        #  "mode": str, "voice": str, "engine": str, "last_active": bool,
+        #  "cwd": str, "verbose": bool}
         ...
 
     async def toggle(self, project: str | None, on: bool) -> None: ...
@@ -77,8 +79,10 @@ class Controls(Protocol):
     async def cost_summary(self) -> str: ...
 
 
-_MODES = ["safe", "full", "ask"]
-_ENGINES = ["auto", "openai", "piper", "together"]
+# Local aliases (list, not tuple) kept for minimal churn at call sites below;
+# config.py is the single source of truth for the order and the members.
+_MODES = list(AUTONOMY_MODES)
+_ENGINES = list(TTS_BACKENDS)
 _PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 _AUDIO_SUFFIXES = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
@@ -279,8 +283,15 @@ def _project_list_rows(
 
 
 def _friendly_path(path: str) -> str:
-    if path.startswith("/home/home/"):
-        return "~/" + path[len("/home/home/"):]
+    """Shorten a path under the current user's home dir to a ``~/`` prefix.
+
+    Portable across hosts: reads ``Path.home()`` at call time rather than
+    hardcoding a dev-machine path. Trailing-sep-safe (works whether
+    ``Path.home()`` itself ends in ``/`` or not).
+    """
+    home = str(Path.home()).rstrip("/") + "/"
+    if path.startswith(home):
+        return "~/" + path[len(home):]
     return path
 
 
@@ -799,7 +810,7 @@ class TelegramIO:
 
             if action == "tog":
                 await self.controls.toggle(project, not row["enabled"])
-            elif action in {"sel", "ptog"}:
+            elif action in {"sel"}:
                 await self.controls.select(project)
                 snap = self.controls.snapshot()
                 await self._edit_callback_text(
