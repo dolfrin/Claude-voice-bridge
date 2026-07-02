@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 import zipfile
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -82,40 +83,52 @@ def _save_sync(cwd: str, attachments: list[dict]) -> list[SavedAttachment]:
 
     for index, item in enumerate(attachments, start=1):
         kind = str(item.get("kind") or "file")
-        raw_name = str(item.get("file_name") or f"{kind}-{index}.bin")
-        data = bytes(item.get("data") or b"")
+        try:
+            raw_name = str(item.get("file_name") or f"{kind}-{index}.bin")
+            data = bytes(item.get("data") or b"")
 
-        if len(data) > _MAX_SAVED_BYTES:
-            logger.warning(
-                "attachment %r (%d bytes) exceeds max saved size of %d bytes; refusing to save",
-                raw_name,
-                len(data),
-                _MAX_SAVED_BYTES,
+            if len(data) > _MAX_SAVED_BYTES:
+                logger.warning(
+                    "attachment %r (%d bytes) exceeds max saved size of %d bytes; refusing to save",
+                    raw_name,
+                    len(data),
+                    _MAX_SAVED_BYTES,
+                )
+                saved.append(
+                    SavedAttachment(
+                        kind=kind,
+                        path=None,
+                        note=f"skipped: {len(data)} bytes exceeds {_MAX_SAVED_BYTES} byte save limit",
+                    )
+                )
+                continue
+
+            filename = f"{stamp}-{index:02d}-{_safe_filename(raw_name)}"
+            path = root / filename
+            path.write_bytes(data)
+
+            archive_target, archive_note = _extract_archive(path)
+            extracted_to = archive_target or _extract_video_frame(path, kind)
+
+            saved.append(
+                SavedAttachment(
+                    kind=kind,
+                    path=_project_relative(path, cwd),
+                    extracted_to=_project_relative(extracted_to, cwd) if extracted_to else None,
+                    note=archive_note,
+                )
             )
+        except Exception:
+            # One malformed/unexpected attachment must never drop the rest of
+            # the batch -- log it and keep processing the remaining items.
+            logger.exception("attachment %d (kind=%r) failed to process; skipping", index, kind)
             saved.append(
                 SavedAttachment(
                     kind=kind,
                     path=None,
-                    note=f"skipped: {len(data)} bytes exceeds {_MAX_SAVED_BYTES} byte save limit",
+                    note="skipped: failed to process attachment (unexpected error)",
                 )
             )
-            continue
-
-        filename = f"{stamp}-{index:02d}-{_safe_filename(raw_name)}"
-        path = root / filename
-        path.write_bytes(data)
-
-        archive_target, archive_note = _extract_archive(path)
-        extracted_to = archive_target or _extract_video_frame(path, kind)
-
-        saved.append(
-            SavedAttachment(
-                kind=kind,
-                path=_project_relative(path, cwd),
-                extracted_to=_project_relative(extracted_to, cwd) if extracted_to else None,
-                note=archive_note,
-            )
-        )
     return saved
 
 
@@ -185,8 +198,8 @@ def _extract_zip(path: Path) -> tuple[Path | None, str | None]:
 
                 dest.write_bytes(member_bytes)
                 total_bytes += len(member_bytes)
-    except zipfile.BadZipFile:
-        logger.warning("%s: not a valid zip archive; skipping extraction", path)
+    except (zipfile.BadZipFile, EOFError, OSError, zlib.error) as exc:
+        logger.warning("%s: not a valid zip archive (%s); skipping extraction", path, exc)
         return None, "archive extraction failed: invalid zip file"
 
     return target, note
@@ -203,7 +216,18 @@ def _extract_tar(path: Path) -> tuple[Path | None, str | None]:
 
     try:
         with tarfile.open(path) as archive:
-            for member in archive.getmembers():
+            # Iterate the archive LAZILY (the TarFile object itself is an
+            # iterator that yields one member header at a time) instead of
+            # calling archive.getmembers(), which forces tarfile to read
+            # through -- and for compressed streams, fully decompress -- the
+            # ENTIRE archive up front just to build the member list, before
+            # any of the caps below are ever consulted. A ~50 MB crafted
+            # .tar.gz can expand at up to ~1000:1, so getmembers() alone can
+            # block this thread for a long time on a hostile input. Lazy
+            # iteration lets every cap below take effect member-by-member,
+            # so the loop stops as soon as a cap trips without paying to
+            # enumerate (or decompress) anything after that point.
+            for member in archive:
                 # isfile() excludes directories, symlinks, hardlinks, devices,
                 # and fifos -- only plain regular files are ever extracted.
                 if not member.isfile():
@@ -215,6 +239,10 @@ def _extract_tar(path: Path) -> tuple[Path | None, str | None]:
                     logger.warning("%s: %s", path, note)
                     break
 
+                # Consult the header-declared size BEFORE calling
+                # extractfile()/reading any payload bytes -- this is what
+                # lets an oversized (or bomb) member be rejected purely from
+                # its header, without paying to decompress its content.
                 if member.size > _ARCHIVE_MAX_MEMBER_BYTES:
                     logger.warning(
                         "%s: skipping member %r (%d bytes exceeds %d byte per-member cap)",
@@ -251,8 +279,8 @@ def _extract_tar(path: Path) -> tuple[Path | None, str | None]:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(member_bytes)
                 total_bytes += len(member_bytes)
-    except tarfile.TarError:
-        logger.warning("%s: not a valid tar archive; skipping extraction", path)
+    except (tarfile.TarError, EOFError, OSError, zlib.error) as exc:
+        logger.warning("%s: not a valid tar archive (%s); skipping extraction", path, exc)
         return None, "archive extraction failed: invalid tar file"
 
     return target, note
