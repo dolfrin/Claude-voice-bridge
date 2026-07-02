@@ -406,6 +406,29 @@ def test_symlink_staying_inside_cwd_is_safe(tmp_path):
     assert is_risky("Read", {"file_path": "link.txt"}, str(project_dir)) is False
 
 
+def test_symlink_loop_does_not_raise_and_fails_closed(tmp_path):
+    """A cyclic symlink inside cwd must not crash the gate: resolution failure
+    fails closed (flagged risky) instead of propagating a RuntimeError."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    a = project_dir / "a"
+    b = project_dir / "b"
+    os.symlink(a, b)
+    os.symlink(b, a)  # a -> b -> a loop
+
+    assert is_risky("Read", {"file_path": "a"}, str(project_dir)) is True
+
+
+def test_env_example_template_read_is_safe(tmp_path):
+    """Reading a committed .env.example/.sample template is safe; a real .env
+    (or .env.local) still asks."""
+    cwd = str(tmp_path)
+    assert is_risky("Bash", {"command": "cat .env.example"}, cwd) is False
+    assert is_risky("Bash", {"command": "cat .env.sample"}, cwd) is False
+    assert is_risky("Bash", {"command": "cat .env"}, cwd) is True
+    assert is_risky("Bash", {"command": "cat .env.local"}, cwd) is True
+
+
 def test_write_to_new_nonexistent_file_inside_cwd_stays_safe(tmp_path):
     """A Write to a brand-new file (doesn't exist yet) inside cwd must stay
     SAFE — realpath resolution must not require the path to exist."""

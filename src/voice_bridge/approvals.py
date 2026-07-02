@@ -79,8 +79,11 @@ _EXFIL_SHORT_FLAG_RE = re.compile(
 # Reader/dump commands that, combined with a sensitive-looking path, should
 # be flagged even though the bare command (e.g. `cat README.md`) is safe.
 _SENSITIVE_TOKEN_RE = (
-    r"(?:\.env\b|\.pem\b|id_rsa|id_ed25519|\.ssh/|\.aws/|\.gnupg|credentials|"
-    r"\.netrc|\.git-credentials|secret|token|password|\.key\b)"
+    # `.env` (and `.env.local` etc.) is sensitive, but the committed
+    # `.env.example`/`.sample`/`.template`/`.dist` templates are not.
+    r"(?:\.env(?!\.(?:example|sample|template|dist))\b|\.pem\b|id_rsa|id_ed25519|"
+    r"\.ssh/|\.aws/|\.gnupg|credentials|\.netrc|\.git-credentials|secret|token|"
+    r"password|\.key\b)"
 )
 _READER_CMD_RE = r"\b(?:cat|less|more|head|tail|xxd|od|base64|strings|grep|awk|sed|cp|mv)\b"
 
@@ -133,8 +136,14 @@ def _resolve(path: str, cwd: str) -> str:
 
 
 def _inside_cwd(path: str, cwd: str) -> bool:
-    base = str(Path(cwd).resolve())
-    target = _resolve(path, base)
+    try:
+        base = str(Path(cwd).resolve())
+        target = _resolve(path, base)
+    except (OSError, RuntimeError, ValueError):
+        # Can't prove containment (symlink loop, unreadable link, bad path).
+        # Fail closed: treat as outside cwd so the action is flagged risky
+        # (asked in safe mode) rather than letting the exception break the turn.
+        return False
     return target == base or target.startswith(base + os.sep)
 
 
