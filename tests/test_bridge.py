@@ -14,6 +14,7 @@ from voice_bridge.bridge import (
     build,
     make_inbound,
     make_outbound,
+    parse_name_prefix,
     resolve_target,
     run_until_stopped,
 )
@@ -520,8 +521,10 @@ async def test_make_outbound_recovers_after_a_previous_send_failure():
 # --------------------------------------------------------------------------- #
 
 
-def _inbound(transcriber, store, approvals, sessions, telegram):
-    return make_inbound(transcriber, store, approvals, sessions, telegram)
+def _inbound(transcriber, store, approvals, sessions, telegram, controls=None):
+    if controls is None:
+        controls = _Controls(sessions, store, FakeCfg(), {"backend": FakeTTS()})
+    return make_inbound(transcriber, store, approvals, sessions, telegram, controls)
 
 
 @pytest.mark.asyncio
@@ -681,6 +684,198 @@ async def test_make_inbound_disabled_target_asks_to_enable_and_send():
     assert sessions.delivered == []
     assert telegram.questions == []
     assert telegram.disabled_prompts == [("qwing", "go")]
+
+
+# --------------------------------------------------------------------------- #
+# parse_name_prefix (pure)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_name_prefix_colon_separator():
+    assert parse_name_prefix("qwing: run tests", ["qwing", "othersapp"]) == (
+        "qwing",
+        "run tests",
+    )
+
+
+def test_parse_name_prefix_whitespace_only_separator():
+    assert parse_name_prefix("qwing run tests", ["qwing", "othersapp"]) == (
+        "qwing",
+        "run tests",
+    )
+
+
+def test_parse_name_prefix_case_insensitive_returns_canonical_name():
+    assert parse_name_prefix("Qwing: x", ["qwing", "othersapp"]) == ("qwing", "x")
+
+
+def test_parse_name_prefix_unknown_name_returns_none_unchanged():
+    text = "unknown: x"
+    assert parse_name_prefix(text, ["qwing", "othersapp"]) == (None, text)
+
+
+def test_parse_name_prefix_colon_with_no_matching_name_returns_none_unchanged():
+    text = "just a colon: here"
+    assert parse_name_prefix(text, ["qwing", "othersapp"]) == (None, text)
+
+
+def test_parse_name_prefix_plain_message_returns_none_unchanged():
+    text = "hello there, how are you"
+    assert parse_name_prefix(text, ["qwing", "othersapp"]) == (None, text)
+
+
+def test_parse_name_prefix_prefers_longer_name_over_shorter_prefix_match():
+    assert parse_name_prefix("qwingtest: hi", ["qwing", "qwingtest"]) == (
+        "qwingtest",
+        "hi",
+    )
+
+
+def test_parse_name_prefix_no_names_returns_none_unchanged():
+    text = "qwing: x"
+    assert parse_name_prefix(text, []) == (None, text)
+
+
+# --------------------------------------------------------------------------- #
+# make_inbound: name-prefix routing precedence
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_name_prefix_routes_to_named_project_no_reply():
+    store = FakeStore(last_active="othersapp", enabled={"qwing": True, "othersapp": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, text="qwing: build"))
+
+    assert sessions.delivered == [("qwing", "build")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_name_prefix_routes_voice_after_transcription():
+    store = FakeStore(last_active="othersapp", enabled={"qwing": True, "othersapp": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber(text="qwing: paleisk testus")
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, is_voice=True, audio=b"OGG"))
+
+    assert sessions.delivered == [("qwing", "paleisk testus")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_reply_to_wins_over_name_prefix():
+    store = FakeStore(by_message={42: "othersapp"}, enabled={"qwing": True, "othersapp": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=42, text="qwing: build"))
+
+    # the quote-reply target (othersapp) wins outright; the leading
+    # "qwing:" is not treated as a routing prefix at all.
+    assert sessions.delivered == [("othersapp", "qwing: build")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_name_prefix_to_disabled_project_sends_off_notice():
+    store = FakeStore(last_active="othersapp", enabled={"qwing": False, "othersapp": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, text="qwing: build"))
+
+    assert sessions.delivered == []
+    assert telegram.disabled_prompts == [("qwing", "build")]
+
+
+# --------------------------------------------------------------------------- #
+# Recap
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_recap_lists_project_with_update_count_and_latest_line():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    telegram = FakeTelegram()
+    outbound = make_outbound(tts_holder, telegram, store, cfg, sessions, controls)
+
+    controls.mark_recap_boundary()
+    await outbound(Outbound(project="qwing", text="Working.", spoken=" "))
+    await outbound(Outbound(project="qwing", text="Done.\n---\ncode", spoken=""))
+
+    text = controls.recap()
+    assert "qwing" in text
+    assert "2 atnaujinimai" in text
+    assert "Done." in text  # latest line, spoken empty -> falls back to first line
+
+
+@pytest.mark.asyncio
+async def test_recap_omits_projects_with_no_activity():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    telegram = FakeTelegram()
+    outbound = make_outbound(tts_holder, telegram, store, cfg, sessions, controls)
+
+    controls.mark_recap_boundary()
+    await outbound(Outbound(project="qwing", text="Done.", spoken="Done."))
+
+    text = controls.recap()
+    assert "qwing" in text
+    assert "othersapp" not in text
+
+
+def test_recap_nothing_new_message_when_no_activity():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    controls.mark_recap_boundary()
+    assert controls.recap() == "Nieko naujo."
+
+
+@pytest.mark.asyncio
+async def test_recap_new_inbound_resets_buffers():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    telegram = FakeTelegram()
+    outbound = make_outbound(tts_holder, telegram, store, cfg, sessions, controls)
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    store._last_active = "qwing"
+    inbound = make_inbound(transcriber, store, approvals, sessions, telegram, controls)
+
+    await outbound(Outbound(project="qwing", text="Done.", spoken="Done."))
+    assert controls.recap() != "Nieko naujo."
+
+    await inbound(_msg(text="hi"))
+    assert controls.recap() == "Nieko naujo."
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_recap_append_never_raises_when_controls_broken():
+    # B1b: recap tracking must never break the never-raises outbound guard.
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"V")}
+    telegram = FakeTelegram(ids=[701])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+
+    class BoomControls(_Controls):
+        def record_recap(self, project, line):
+            raise RuntimeError("boom")
+
+    controls = BoomControls(sessions, store, FakeCfg(), tts_holder)
+    outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
+
+    # Must not raise despite record_recap blowing up.
+    await outbound(Outbound(project="qwing", text="Done.", spoken="Done."))
+    assert telegram.updates  # the send itself still happened
 
 
 # --------------------------------------------------------------------------- #

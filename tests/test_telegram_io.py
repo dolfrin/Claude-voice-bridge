@@ -50,6 +50,7 @@ def make_cfg(allowed_id=42):
 class FakeControls:
     def __init__(self):
         self.calls = []
+        self.recap_text = "Nieko naujo."
         self._snapshot = [
             {"project": "qwing", "enabled": True, "mode": "safe",
              "voice": "alloy", "engine": "openai", "last_active": True,
@@ -103,6 +104,10 @@ class FakeControls:
     async def interrupt(self, project):
         self.calls.append(("interrupt", project))
         return f"{project or 'active'}: nutraukta."
+
+    def recap(self):
+        self.calls.append(("recap",))
+        return self.recap_text
 
     def snapshot(self):
         return self._snapshot
@@ -1596,6 +1601,32 @@ async def test_cmd_rejects_non_whitelisted():
     assert controls.calls == []
 
 
+@pytest.mark.asyncio
+async def test_cmd_recap_replies_with_controls_recap():
+    controls = FakeControls()
+    controls.recap_text = "qwing — 2 atnaujinimai per 1 min: Done."
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/recap")
+
+    await io._cmd_recap(upd, make_ctx([]))
+
+    assert ("recap",) in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    assert sent == "qwing — 2 atnaujinimai per 1 min: Done."
+
+
+@pytest.mark.asyncio
+async def test_cmd_recap_rejects_non_whitelisted():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    upd = make_cmd_update("/recap", user_id=999)
+
+    await io._cmd_recap(upd, make_ctx([]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_not_awaited()
+
+
 # --------------------------------------------------------------------------
 # run() / stop() lifecycle
 # --------------------------------------------------------------------------
@@ -1632,8 +1663,9 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
     # at least: menu, panel, projects, projects_all, projects_refresh, handoff,
-    # on, off, stop, mode, voice, engine, status, callback, text, voice, attachments.
-    assert len(added) >= 17
+    # on, off, stop, mode, voice, engine, status, recap, callback, text, voice,
+    # attachments.
+    assert len(added) >= 18
 
     cmd_names = set()
     for h in added:
@@ -1641,12 +1673,12 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
         if cmds:
             cmd_names |= set(cmds)
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off", "stop",
-            "mode", "voice", "engine", "status"} <= cmd_names
+            "mode", "voice", "engine", "status", "recap"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off", "stop",
-            "mode", "voice", "engine"} == registered_names
+            "mode", "voice", "engine", "recap"} == registered_names
 
 
 @pytest.mark.asyncio

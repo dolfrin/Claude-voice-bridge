@@ -72,6 +72,7 @@ class Controls(Protocol):
     async def set_voice(self, project: str | None, voice: str) -> None: ...
     async def set_engine(self, name: str) -> None: ...
     async def interrupt(self, project: str | None) -> str: ...
+    def recap(self) -> str: ...
 
 
 _MODES = ["safe", "full", "ask"]
@@ -93,6 +94,7 @@ _BOT_COMMANDS = [
     BotCommand("mode", "🛡 Change safe/full/ask mode"),
     BotCommand("voice", "🔊 List or set TTS voice"),
     BotCommand("engine", "🧠 Change TTS backend"),
+    BotCommand("recap", "🗒 What happened while away"),
 ]
 
 # Telegram hard limits: a text message tops out at 4096 chars, a media
@@ -1065,6 +1067,15 @@ class TelegramIO:
             "audio": None,
         })
 
+    async def _cmd_recap(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """B3b: "what changed while I was gone" — cheap, synchronous, no LLM."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        await msg.reply_text(self.controls.recap())
+
     async def _cmd_handoff(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1136,6 +1147,8 @@ class TelegramIO:
             CommandHandler("engine", self._cmd_engine, filters=only_me))
         app.add_handler(
             CommandHandler("status", self._cmd_status, filters=only_me))
+        app.add_handler(
+            CommandHandler("recap", self._cmd_recap, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(
             only_me & filters.VOICE, self._handle_voice))

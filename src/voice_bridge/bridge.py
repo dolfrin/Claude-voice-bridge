@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import signal
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -49,6 +51,17 @@ logger = logging.getLogger(__name__)
 # User-facing micro-copy.
 _MSG_NOT_UNDERSTOOD = "I did not understand. Please repeat."
 _MSG_YES_OR_NO = "Answer yes or no."
+
+# Recap (B3b): bounded per-project buffer of outbound status lines kept in
+# _Controls, rendered synchronously by /recap with no LLM call.
+_RECAP_MAX_LINES = 20
+
+# Separator between a name-prefix token ("qwing" / "Qwing") and the rest of
+# the message: an optional ":" or "-" followed by at least one whitespace
+# char. Matched against the remainder of the text AFTER the literal name is
+# stripped off (see parse_name_prefix), so it never needs to know what a
+# "name" character is.
+_NAME_PREFIX_SEP_RE = re.compile(r"^\s*[:\-]?\s+(.*)$", re.DOTALL)
 
 
 # --------------------------------------------------------------------------- #
@@ -80,6 +93,35 @@ async def resolve_target(msg: dict, store: Store) -> tuple[str | None, str]:
     return project, "ok"
 
 
+def parse_name_prefix(text: str, names: list[str]) -> tuple[str | None, str]:
+    """Parse a leading ``"<project>: ..."`` / ``"<project> ..."`` token.
+
+    Case-insensitive EXACT match against a project in *names*: the first
+    token of *text* must equal a known project name in full — not merely be
+    prefixed by one — and must be followed by an optional ``:``/``-``
+    separator plus at least one whitespace char before the remainder.
+    Longer names are tried first so a name that is itself a prefix of
+    another known name (``"qwing"`` vs. ``"qwingtest"``) cannot shadow the
+    longer, more specific match.
+
+    Returns ``(name, remainder)`` on a match (``name`` is the CANONICAL
+    entry from *names*, not the casing typed by the user), otherwise
+    ``(None, text)`` UNCHANGED — including when *text* merely contains a
+    colon later on (``"just a colon: here"`` does not match unless "just"
+    is itself a known project name).
+    """
+    stripped = text.lstrip()
+    lower = stripped.lower()
+    for name in sorted(names, key=len, reverse=True):
+        if not lower.startswith(name.lower()):
+            continue
+        rest = stripped[len(name):]
+        m = _NAME_PREFIX_SEP_RE.match(rest)
+        if m:
+            return name, m.group(1)
+    return None, text
+
+
 # --------------------------------------------------------------------------- #
 # TTS helpers (shared by the outbound closure and the approval question path)
 # --------------------------------------------------------------------------- #
@@ -92,6 +134,33 @@ def _resolve_voice(cfg: Config, proj, alert: bool) -> str:
     if alert and getattr(cfg, "tts_alert_voice", ""):
         return cfg.tts_alert_voice
     return base
+
+
+def _recap_summary_line(spoken: str, full_text: str) -> str:
+    """One-line recap summary for an Outbound: the spoken line, trimmed, or
+    (when spoken is empty) the first non-blank line of the full text."""
+    spoken = (spoken or "").strip()
+    if spoken:
+        return spoken
+    for line in (full_text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Render an elapsed duration as a short human string (s / min / val)."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total} s"
+    minutes, _ = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, rem_minutes = divmod(minutes, 60)
+    if rem_minutes:
+        return f"{hours} val {rem_minutes} min"
+    return f"{hours} val"
 
 
 async def _synthesize(tts_holder: dict, spoken: str, voice: str, project: str) -> bytes | None:
@@ -134,7 +203,10 @@ def make_outbound(
     Synthesizes with the project's effective voice; reads the live TTS backend
     from ``tts_holder`` AT SEND TIME (C4). Empty/whitespace spoken text ->
     text-only (no voice). Maps every returned message id to the project and
-    marks it last-active (also updating the Controls mirror).
+    marks it last-active (also updating the Controls mirror). On a successful
+    send, also appends a one-line recap summary to the project's recap
+    buffer (B3b's ``/recap``) — guarded so a recap-tracking failure can never
+    break the never-raises send path.
     """
 
     async def outbound(o: Outbound) -> None:
@@ -180,6 +252,10 @@ def make_outbound(
             await store.map_message(mid, o.project)
         await store.set_last_active(o.project)
         controls.mark_last_active(o.project)
+        try:
+            controls.record_recap(o.project, _recap_summary_line(spoken, full_text))
+        except Exception:  # noqa: BLE001 - recap tracking must never break a send
+            logger.exception("recap record failed for %s", o.project)
 
     return outbound
 
@@ -195,19 +271,34 @@ def make_inbound(
     approvals: ApprovalManager,
     sessions: SessionManager,
     telegram: TelegramIO,
+    controls: "_Controls",
 ) -> Callable[[dict], Awaitable[None]]:
     """Build the inbound closure.
 
-    Flow (system-prompt C7):
+    Flow (system-prompt C7, extended by B3b for recap + name-prefix routing):
 
+    0. EVERY call marks the recap boundary (``controls.mark_recap_boundary``)
+       — any inbound user turn means subsequent outbounds are "new since
+       last seen", regardless of how this turn itself resolves.
     1. Voice -> transcribe; empty transcript -> ask to repeat and stop.
     2. If ``reply_to`` has a pending approval -> parse yes/no; unparseable ->
        ask again; otherwise resolve. Never delivered as a turn.
-    3. Otherwise route via :func:`resolve_target`; ``none`` -> ask which
-       project; ``off`` -> tell the user it is disabled; ``ok`` -> deliver.
+    3. Routing precedence:
+       * an explicit ``reply_to`` that resolves to a KNOWN project wins
+         outright (a quote-reply is unambiguous) — routed via
+         :func:`resolve_target`, unchanged from before;
+       * otherwise a leading ``"<project>: ..."`` / ``"<project> ..."``
+         name-prefix (case-insensitive exact match against
+         ``sessions.names()``, see :func:`parse_name_prefix`) wins, with the
+         prefix stripped from the delivered text;
+       * otherwise fall back to :func:`resolve_target` (last_active/off/none).
+       ``none`` -> ask which project; ``off`` -> tell the user it is
+       disabled; ``ok`` -> deliver.
     """
 
     async def inbound(msg: dict) -> None:
+        controls.mark_recap_boundary()
+
         if msg.get("is_voice"):
             audio = msg.get("audio")
             if audio is None:
@@ -229,7 +320,21 @@ def make_inbound(
             approvals.resolve(rid, ans)
             return
 
-        project, reason = await resolve_target(msg, store)
+        reply_project = await store.project_for_message(rid) if rid is not None else None
+        if reply_project is not None:
+            # A quote-reply that resolves to a known project is unambiguous
+            # and wins outright, exactly like before name-prefix routing
+            # existed.
+            project, reason = await resolve_target(msg, store)
+        else:
+            names = sessions.names() if hasattr(sessions, "names") else []
+            prefix_project, prefix_text = parse_name_prefix(text, names)
+            if prefix_project is not None:
+                project, text = prefix_project, prefix_text
+                reason = "ok" if await store.is_enabled(project) else "off"
+            else:
+                project, reason = await resolve_target(msg, store)
+
         if reason == "none":
             names = ", ".join(sessions.names()) if hasattr(sessions, "names") else ""
             await telegram.send_question("bridge", f"Which project? {names}".strip())
@@ -304,6 +409,12 @@ class _Controls:
     Keeps a mirror ``dict[str, dict]`` seeded from ``store.enabled_map()`` +
     each project's effective mode/voice + ``cfg.tts_backend``. ``snapshot()`` is
     SYNC and reads the mirror so the panel never awaits.
+
+    Also owns the B3b recap state: a per-project bounded buffer of recent
+    outbound one-liners plus a single "since" boundary shared by every
+    project, both in-memory only. ``make_outbound`` appends to the buffer on
+    every successful send; ``make_inbound`` resets the boundary on every
+    inbound user turn; ``/recap`` renders it synchronously with no LLM call.
     """
 
     def __init__(
@@ -319,10 +430,53 @@ class _Controls:
         self._tts_holder = tts_holder
         self._telegram: TelegramIO | None = None
         self._mirror: dict[str, dict] = {}
+        self._recap_lines: dict[str, list[str]] = {}
+        self._recap_since: float = time.monotonic()
 
     def attach_telegram(self, telegram: TelegramIO) -> None:
         """Wire the telegram instance used for set_mode user notices."""
         self._telegram = telegram
+
+    # -- Recap (B3b) -------------------------------------------------------
+
+    def record_recap(self, project: str, line: str) -> None:
+        """Append a one-line summary to *project*'s recap buffer.
+
+        Blank lines are skipped. Bounded to the last ``_RECAP_MAX_LINES``
+        entries per project (oldest dropped first)."""
+        line = (line or "").strip()
+        if not line:
+            return
+        buf = self._recap_lines.setdefault(project, [])
+        buf.append(line)
+        if len(buf) > _RECAP_MAX_LINES:
+            del buf[: len(buf) - _RECAP_MAX_LINES]
+
+    def mark_recap_boundary(self) -> None:
+        """Reset every project's recap buffer and stamp a fresh "since" time.
+
+        Called on every inbound user turn: subsequent outbounds become "new
+        since last seen" for the NEXT ``/recap``."""
+        self._recap_lines = {}
+        self._recap_since = time.monotonic()
+
+    def recap(self) -> str:
+        """SYNC, no LLM call: render what happened since the recap boundary.
+
+        One line per project with activity: "{display} — {N} atnaujinimai
+        per {elapsed}: {latest line}". Projects with no activity since the
+        boundary are omitted entirely. ``"Nieko naujo."`` when nothing at
+        all happened."""
+        elapsed = _format_elapsed(time.monotonic() - self._recap_since)
+        parts: list[str] = []
+        for name, lines in self._recap_lines.items():
+            if not lines:
+                continue
+            display = self._mirror.get(name, {}).get("display_name", name)
+            parts.append(
+                f"{display} — {len(lines)} atnaujinimai per {elapsed}: {lines[-1]}"
+            )
+        return "\n".join(parts) if parts else "Nieko naujo."
 
     def mark_last_active(self, project: str) -> None:
         """Flip last_active on for *project* and off for every other in the mirror."""
@@ -592,7 +746,9 @@ async def build() -> Wiring:
     )
     sessions_ref["sm"] = sessions
 
-    inbound = make_inbound(transcriber, store, approvals, lazy_sessions, lazy_telegram)
+    inbound = make_inbound(
+        transcriber, store, approvals, lazy_sessions, lazy_telegram, controls
+    )
 
     telegram = TelegramIO(
         cfg, inbound, controls, on_approval=approvals.resolve_token
