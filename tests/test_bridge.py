@@ -86,6 +86,7 @@ class FakeTelegram:
         self.updates: list[tuple] = []
         self.files: list[tuple] = []
         self.questions: list[tuple[str, str]] = []
+        self.question_kwargs: list[dict] = []
         self.disabled_prompts: list[tuple[str, str]] = []
         self.ran = 0
         self.stopped = 0
@@ -98,8 +99,9 @@ class FakeTelegram:
         self.files.append((project, voice_label, text, voice_bytes, file_path))
         return list(self.ids)
 
-    async def send_question(self, project, text):
+    async def send_question(self, project, text, **kwargs):
         self.questions.append((project, text))
+        self.question_kwargs.append(kwargs)
         return 999
 
     async def send_disabled_project_prompt(self, project, text):
@@ -172,12 +174,17 @@ class FakeApprovals:
     def __init__(self, pending=None):
         self._pending = set(pending or [])
         self.resolved: list[tuple[int, bool]] = []
+        self.token_resolved: list[tuple[int, bool]] = []
 
     def has_pending(self, message_id):
         return message_id in self._pending
 
     def resolve(self, message_id, approved):
         self.resolved.append((message_id, approved))
+        return True
+
+    def resolve_token(self, token, approved):
+        self.token_resolved.append((token, approved))
         return True
 
 
@@ -193,6 +200,7 @@ class FakeTranscriber:
 
 class FakeCfg:
     tts_voice = "alloy"
+    tts_alert_voice = ""
     tts_backend = "openai"
     autonomy_mode = "safe"
     db_path = "/tmp/ignored.db"
@@ -336,6 +344,45 @@ async def test_make_outbound_unknown_project_uses_default_voice():
     await outbound(Outbound(project="ghost", text="Hi there", spoken="Hi there"))
 
     assert tts_holder["backend"].calls == [("Hi there", "alloy")]  # cfg.tts_voice
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_alert_uses_alert_voice_when_set():
+    store = FakeStore()
+    tts = FakeTTS(out=b"V")
+    tts_holder = {"backend": tts}
+    telegram = FakeTelegram(ids=[601])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+
+    class AlertCfg(FakeCfg):
+        tts_alert_voice = "shimmer"
+
+    cfg = AlertCfg()
+    controls = _Controls(sessions, store, cfg, tts_holder)
+    outbound = make_outbound(tts_holder, telegram, store, cfg, sessions, controls)
+
+    # an ALERT Outbound synthesizes with the distinct alert voice ...
+    await outbound(Outbound(project="qwing", text="Crashed.", spoken="Crashed.", alert=True))
+    # ... while a normal Outbound stays on the per-project voice.
+    await outbound(Outbound(project="qwing", text="Done.", spoken="Done."))
+
+    assert tts.calls == [("Crashed.", "shimmer"), ("Done.", "echo")]
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_alert_falls_back_to_project_voice_when_unset():
+    store = FakeStore()
+    tts = FakeTTS(out=b"V")
+    tts_holder = {"backend": tts}
+    telegram = FakeTelegram(ids=[602])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    cfg = FakeCfg()  # tts_alert_voice == ""
+    controls = _Controls(sessions, store, cfg, tts_holder)
+    outbound = make_outbound(tts_holder, telegram, store, cfg, sessions, controls)
+
+    await outbound(Outbound(project="qwing", text="Crashed.", spoken="Crashed.", alert=True))
+
+    assert tts.calls == [("Crashed.", "echo")]  # no alert voice -> project voice
 
 
 @pytest.mark.asyncio
@@ -898,7 +945,7 @@ async def test_build_wires_and_run_loop(monkeypatch):
     monkeypatch.setattr(bridge_mod, "SessionManager",
                         lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda cfg, on_user_message, controls: telegram)
+                        lambda cfg, on_user_message, controls, on_approval=None: telegram)
 
     wired = await build()
     assert store.inited == 1
@@ -940,7 +987,9 @@ async def test_build_inbound_forwards_disabled_project_prompt(monkeypatch):
     )
     monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
     monkeypatch.setattr(
-        bridge_mod, "TelegramIO", lambda cfg, on_user_message, controls: telegram
+        bridge_mod,
+        "TelegramIO",
+        lambda cfg, on_user_message, controls, on_approval=None: telegram,
     )
 
     wired = await build()
@@ -948,3 +997,64 @@ async def test_build_inbound_forwards_disabled_project_prompt(monkeypatch):
 
     assert telegram.disabled_prompts == [("qwing", "go")]
     assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_build_approval_send_uses_alert_voice_and_token(monkeypatch):
+    """The send_question closure wired into ApprovalManager synthesizes the
+    spoken approval line with the ALERT voice and forwards the token so the
+    inline buttons can be attached. It also wires on_approval to resolve_token.
+    """
+    import voice_bridge.bridge as bridge_mod
+
+    class AlertCfg(FakeCfg):
+        tts_alert_voice = "shimmer"
+
+    cfg = AlertCfg()
+    projects = [FakeProject("qwing", voice="echo")]
+    store = FakeStore(enabled={"qwing": True})
+    telegram = FakeTelegram()
+    sessions = FakeSessions(projects)
+    tts = FakeTTS(out=b"ALERT")
+    approvals = FakeApprovals()
+
+    captured: dict = {}
+
+    def capture_am(send_question, timeout):
+        captured["send_question"] = send_question
+        return approvals
+
+    def capture_tg(cfg_, on_user_message, controls, on_approval=None):
+        captured["on_approval"] = on_approval
+        return telegram
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda path="projects.yaml": projects)
+    monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
+    monkeypatch.setattr(
+        bridge_mod, "Transcriber", lambda model_name, language="lt": FakeTranscriber()
+    )
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: tts)
+    monkeypatch.setattr(bridge_mod, "ApprovalManager", capture_am)
+    monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
+    monkeypatch.setattr(bridge_mod, "TelegramIO", capture_tg)
+
+    await build()
+
+    # on_approval is wired to the approvals' token resolver
+    assert captured["on_approval"] == approvals.resolve_token
+
+    send_question = captured["send_question"]
+    mid = await send_question(
+        "qwing", "qwing — approval reikalingas:\n\n```\ngit push\n```",
+        "qwing nori paleisti komandą — leidžiu?", 3,
+    )
+
+    assert mid == 999
+    # the spoken line was synthesized with the alert voice
+    assert tts.calls and tts.calls[-1][1] == "shimmer"
+    # the buttoned text + token + voice reached telegram.send_question
+    kwargs = telegram.question_kwargs[-1]
+    assert kwargs["approval_token"] == 3
+    assert kwargs["voice_label"] == "shimmer"
+    assert kwargs["voice_bytes"] == b"ALERT"

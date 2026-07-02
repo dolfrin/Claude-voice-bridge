@@ -8,6 +8,8 @@ import pytest
 
 from voice_bridge.approvals import (
     ApprovalManager,
+    format_approval_preview,
+    format_approval_spoken,
     is_risky,
     make_can_use_tool,
     parse_yes_no,
@@ -121,10 +123,10 @@ def test_parse_yes_no_none(text):
 
 @pytest.mark.asyncio
 async def test_approval_manager_approve():
-    sent: list[tuple[str, str]] = []
+    sent: list[tuple[str, str, str, int]] = []
 
-    async def send_question(project: str, text: str) -> int:
-        sent.append((project, text))
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
+        sent.append((project, text, spoken, token))
         return 42
 
     mgr = ApprovalManager(send_question, timeout=5)
@@ -146,7 +148,7 @@ async def test_approval_manager_approve():
 
 @pytest.mark.asyncio
 async def test_approval_manager_deny():
-    async def send_question(project: str, text: str) -> int:
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
         return 7
 
     mgr = ApprovalManager(send_question, timeout=5)
@@ -162,7 +164,7 @@ async def test_approval_manager_deny():
 
 @pytest.mark.asyncio
 async def test_approval_manager_timeout_denies():
-    async def send_question(project: str, text: str) -> int:
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
         return 99
 
     mgr = ApprovalManager(send_question, timeout=0.05)
@@ -173,12 +175,207 @@ async def test_approval_manager_timeout_denies():
 
 @pytest.mark.asyncio
 async def test_resolve_unknown_returns_false():
-    async def send_question(project: str, text: str) -> int:
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
         return 1
 
     mgr = ApprovalManager(send_question, timeout=5)
     assert mgr.resolve(123456, True) is False
     assert mgr.has_pending(123456) is False
+
+
+# ---------------------------------------------------------------------------
+# ApprovalManager — token flow (inline Allow/Deny buttons)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_request_registers_under_token_and_message_id():
+    captured: dict = {}
+
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
+        captured["token"] = token
+        return 500
+
+    mgr = ApprovalManager(send_question, timeout=5)
+
+    async def approve_via_token():
+        await asyncio.sleep(0)
+        # both keys address the same pending future
+        assert mgr.has_pending(500) is True
+        assert mgr.resolve_token(captured["token"], True) is True
+
+    approver = asyncio.create_task(approve_via_token())
+    result = await mgr.request("qwing", "Bash", {"command": "git push"})
+    await approver
+
+    assert result is True
+    # token starts at 1 (deterministic per-manager counter, not random)
+    assert captured["token"] == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_token_and_resolve_message_are_idempotent():
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
+        return 77
+
+    mgr = ApprovalManager(send_question, timeout=5)
+
+    async def resolve_twice():
+        await asyncio.sleep(0)
+        assert mgr.resolve_token(1, True) is True
+        # second resolve via token -> no-op
+        assert mgr.resolve_token(1, True) is False
+        # resolving the same future via message_id is also a no-op now
+        assert mgr.resolve(77, False) is False
+
+    task = asyncio.create_task(resolve_twice())
+    result = await mgr.request("qwing", "Bash", {"command": "rm x"})
+    await task
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_message_then_token_is_noop():
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
+        return 88
+
+    mgr = ApprovalManager(send_question, timeout=5)
+
+    async def resolve_by_message():
+        await asyncio.sleep(0)
+        assert mgr.resolve(88, True) is True
+        # the token now points at an already-resolved future
+        assert mgr.resolve_token(1, False) is False
+
+    task = asyncio.create_task(resolve_by_message())
+    result = await mgr.request("qwing", "Bash", {"command": "rm x"})
+    await task
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_token_unknown_returns_false():
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
+        return 1
+
+    mgr = ApprovalManager(send_question, timeout=5)
+    assert mgr.resolve_token(999, True) is False
+
+
+@pytest.mark.asyncio
+async def test_token_counter_increments_per_request():
+    tokens: list[int] = []
+
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
+        tokens.append(token)
+        # resolve immediately so request returns
+        mgr.resolve_token(token, True)
+        return 1000 + token
+
+    mgr = ApprovalManager(send_question, timeout=5)
+    await mgr.request("qwing", "Bash", {"command": "a"})
+    await mgr.request("qwing", "Bash", {"command": "b"})
+    assert tokens == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_request_spoken_line_is_code_free():
+    captured: dict = {}
+
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
+        captured["text"] = text
+        captured["spoken"] = spoken
+        mgr.resolve_token(token, True)
+        return 5
+
+    mgr = ApprovalManager(send_question, timeout=5)
+    await mgr.request(
+        "qwing", "Bash", {"command": "git push origin main && rm -rf /etc"}
+    )
+
+    spoken = captured["spoken"]
+    # the spoken line must NOT leak the command or paths
+    assert "git push" not in spoken
+    assert "rm -rf" not in spoken
+    assert "/etc" not in spoken
+    # but the full text (buttoned message) DOES carry the command for the user
+    assert "git push" in captured["text"]
+
+
+# ---------------------------------------------------------------------------
+# format_approval_preview
+# ---------------------------------------------------------------------------
+
+
+def test_format_approval_preview_bash_shows_command():
+    preview = format_approval_preview("Bash", {"command": "git push origin main"})
+    assert "git push origin main" in preview
+    assert "```" in preview  # rendered as a code block
+
+
+def test_format_approval_preview_write_shows_path_and_snippet():
+    preview = format_approval_preview(
+        "Write", {"file_path": "src/app.py", "content": "print('hello world')"}
+    )
+    assert "src/app.py" in preview
+    assert "print('hello world')" in preview
+
+
+def test_format_approval_preview_write_truncates_long_content():
+    content = "x" * 5000
+    preview = format_approval_preview(
+        "Write", {"file_path": "big.txt", "content": content}
+    )
+    # snippet is bounded (~400 chars) and marked as truncated
+    assert preview.count("x") <= 450
+    assert "…" in preview
+
+
+def test_format_approval_preview_edit_shows_old_to_new():
+    preview = format_approval_preview(
+        "Edit",
+        {"file_path": "a.py", "old_string": "foo = 1", "new_string": "foo = 2"},
+    )
+    assert "a.py" in preview
+    assert "foo = 1" in preview
+    assert "foo = 2" in preview
+    assert "→" in preview
+
+
+def test_format_approval_preview_multiedit_shows_first_edit():
+    preview = format_approval_preview(
+        "MultiEdit",
+        {
+            "file_path": "a.py",
+            "edits": [
+                {"old_string": "aaa", "new_string": "bbb"},
+                {"old_string": "ccc", "new_string": "ddd"},
+            ],
+        },
+    )
+    assert "a.py" in preview
+    assert "aaa" in preview and "bbb" in preview
+    assert "→" in preview
+
+
+def test_format_approval_preview_other_tool_shows_key_inputs():
+    preview = format_approval_preview("Grep", {"pattern": "def main", "path": "src"})
+    assert "Grep" in preview
+    assert "def main" in preview
+
+
+def test_format_approval_spoken_is_generic_and_code_free():
+    spoken = format_approval_spoken(
+        "qwing", "Bash", {"command": "git push origin main"}
+    )
+    assert "qwing" in spoken
+    assert "git push" not in spoken
+    # a different tool yields a different (still code-free) action
+    write_spoken = format_approval_spoken(
+        "qwing", "Write", {"file_path": "/etc/hosts", "content": "x"}
+    )
+    assert "/etc/hosts" not in write_spoken
+    assert spoken != write_spoken
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +534,7 @@ def test_relative_path_outside_cwd_is_risky():
 async def test_duplicate_message_id_resolves_old_future():
     call_count = 0
 
-    async def send_question(project: str, text: str) -> int:
+    async def send_question(project: str, text: str, spoken: str, token: int) -> int:
         nonlocal call_count
         call_count += 1
         # Both calls return the same message_id to simulate a collision.

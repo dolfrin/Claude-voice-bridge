@@ -28,6 +28,9 @@ class Config:
     autonomy_mode: str
     approval_timeout: int
     db_path: str
+    # Optional distinct voice for ALERT-class TTS (approval questions + crash
+    # notices). Empty string -> fall back to the project/default voice.
+    tts_alert_voice: str = ""
     auto_discover_projects: bool = False
     auto_discover_limit: int = 12
     open_vscode_on_enable: bool = False
@@ -123,6 +126,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         together_tts_language=_together_language(env),
         tts_backend=tts_backend,
         tts_voice=env.get("TTS_VOICE") or "alloy",
+        tts_alert_voice=env.get("TTS_ALERT_VOICE") or "",
         piper_voice_path=env.get("PIPER_VOICE_PATH") or "",
         whisper_model=env.get("WHISPER_MODEL") or "large-v3",
         autonomy_mode=autonomy_mode,

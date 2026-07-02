@@ -205,37 +205,142 @@ def parse_yes_no(text: str) -> bool | None:
 # ---------------------------------------------------------------------------
 
 
-def _format_question(project: str, tool_name: str, tool_input: dict) -> str:
-    command = tool_input.get("command")
-    if isinstance(command, str) and command.strip():
-        action = command.strip()
-    else:
-        path = ""
-        for key in _PATH_INPUT_KEYS:
-            value = tool_input.get(key)
-            if isinstance(value, str) and value:
-                path = value
-                break
-        action = f"{tool_name} {path}".strip() if path else tool_name
-    return f"{project} wants to run: {action}. Allow?"
+# Max characters of file content / edit strings shown inline in the preview.
+_PREVIEW_SNIPPET = 400
+_PREVIEW_EDIT = 200
+_PREVIEW_VALUE = 120
+_TRUNCATE_MARKER = "…"
+
+# Generic, code-free spoken verb per tool. The spoken channel never names the
+# command or path (that would leak code into voice); it stays a short action so
+# a walking user hears *what kind* of thing is being asked, then reads the text.
+_SPOKEN_ACTIONS = {
+    "Bash": "paleisti komandą",
+    "Write": "įrašyti failą",
+    "Edit": "redaguoti failą",
+    "MultiEdit": "redaguoti failą",
+    "Read": "perskaityti failą",
+    "NotebookEdit": "redaguoti užrašinę",
+}
+# Tool-input keys worth surfacing (in order) for tools without a bespoke branch.
+_OTHER_PREVIEW_KEYS = (
+    "file_path", "path", "notebook_path", "pattern", "url",
+    "command", "query", "prompt", "description",
+)
+
+
+def _truncate(text: str, limit: int) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + _TRUNCATE_MARKER
+
+
+def _first_path(tool_input: dict) -> str:
+    for key in _PATH_INPUT_KEYS:
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def format_approval_preview(tool_name: str, tool_input: dict) -> str:
+    """Render a compact, human-readable preview of *what* a tool call will do.
+
+    This is the TEXT side of an approval (the user reads it to decide); it may
+    contain code/paths. The spoken side stays code-free (see
+    :func:`format_approval_spoken`).
+
+    * Bash -> the command in a code block.
+    * Write -> file_path + a short snippet of content.
+    * Edit / MultiEdit -> file_path + a compact ``old → new`` preview.
+    * other tools -> tool name + a compact repr of the key inputs.
+    """
+    if tool_name == "Bash":
+        command = (tool_input.get("command") or "").strip()
+        return f"```\n{command}\n```" if command else "Bash"
+
+    if tool_name == "Write":
+        path = _first_path(tool_input)
+        snippet = _truncate(tool_input.get("content") or "", _PREVIEW_SNIPPET)
+        if snippet:
+            return f"{path}\n```\n{snippet}\n```"
+        return path or "Write"
+
+    if tool_name in ("Edit", "MultiEdit"):
+        path = _first_path(tool_input)
+        if tool_name == "MultiEdit":
+            edits = tool_input.get("edits") or []
+            if not edits:
+                return path or "MultiEdit"
+            first = edits[0]
+            old = _truncate(first.get("old_string") or "", _PREVIEW_EDIT)
+            new = _truncate(first.get("new_string") or "", _PREVIEW_EDIT)
+            more = f" (+{len(edits) - 1} more)" if len(edits) > 1 else ""
+            return f"{path}\n{old} → {new}{more}"
+        old = _truncate(tool_input.get("old_string") or "", _PREVIEW_EDIT)
+        new = _truncate(tool_input.get("new_string") or "", _PREVIEW_EDIT)
+        return f"{path}\n{old} → {new}"
+
+    parts = [
+        f"{key}={_truncate(str(tool_input[key]), _PREVIEW_VALUE)}"
+        for key in _OTHER_PREVIEW_KEYS
+        if tool_input.get(key)
+    ]
+    if parts:
+        return f"{tool_name}: " + ", ".join(parts)
+    return f"{tool_name}: {_truncate(repr(tool_input), _PREVIEW_EDIT)}"
+
+
+def format_approval_spoken(project: str, tool_name: str, tool_input: dict) -> str:
+    """Return the code-free spoken approval line (no command/path leaks)."""
+    action = _SPOKEN_ACTIONS.get(tool_name, "atlikti veiksmą")
+    return f"{project} nori {action} — leidžiu?"
+
+
+def _format_question(project: str, preview: str) -> str:
+    """Build the approval message TEXT (carries the preview for the user)."""
+    return f"{project} — approval reikalingas:\n\n{preview}"
 
 
 class ApprovalManager:
-    """Holds asyncio futures keyed by the question message_id; timeout -> deny."""
+    """Holds asyncio futures keyed by BOTH a stable approval token and the
+    question message_id; timeout -> deny.
+
+    The token is an incrementing per-manager int generated *before* the question
+    is sent (the inline Allow/Deny buttons need it at send time, but the
+    message_id is only known *after* send). Registering the same future under
+    both keys lets an inline-button tap resolve by token
+    (:meth:`resolve_token`) and a quote-reply resolve by message_id
+    (:meth:`resolve`) — either path resolves the same waiter, and both are
+    idempotent (a second resolve is a no-op).
+    """
 
     def __init__(
         self,
-        send_question: Callable[[str, str], Awaitable[int]],
+        send_question: Callable[[str, str, str, int], Awaitable[int]],
         timeout: int,
     ) -> None:
         self._send_question = send_question
         self._timeout = timeout
+        # Same future object stored in both maps for dual-key resolution. The
+        # numeric spaces are disjoint by construction only in intent (a token
+        # and a message_id could coincide), so they are kept in SEPARATE dicts.
         self._pending: dict[int, asyncio.Future[bool]] = {}
+        self._pending_by_token: dict[int, asyncio.Future[bool]] = {}
+        self._token_counter = 0
+
+    def _next_token(self) -> int:
+        self._token_counter += 1
+        return self._token_counter
 
     async def request(self, project: str, tool_name: str, tool_input: dict) -> bool:
         """Ask user for permission; returns True if approved, False if denied or timed out."""
-        text = _format_question(project, tool_name, tool_input)
-        message_id = await self._send_question(project, text)
+        preview = format_approval_preview(tool_name, tool_input)
+        text = _format_question(project, preview)
+        spoken = format_approval_spoken(project, tool_name, tool_input)
+        token = self._next_token()
+        message_id = await self._send_question(project, text, spoken, token)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
         existing = self._pending.get(message_id)
@@ -246,16 +351,33 @@ class ApprovalManager:
             )
             existing.set_result(False)
         self._pending[message_id] = future
+        self._pending_by_token[token] = future
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
         except asyncio.TimeoutError:
             return False
         finally:
             self._pending.pop(message_id, None)
+            self._pending_by_token.pop(token, None)
 
     def resolve(self, message_id: int, approved: bool) -> bool:
-        """Set the result of a pending future. Returns True if matched, False otherwise."""
-        future = self._pending.get(message_id)
+        """Resolve a pending future by message_id (quote-reply path).
+
+        Returns True if a live future was resolved, False otherwise (unknown or
+        already resolved)."""
+        return self._resolve_future(self._pending.get(message_id), approved)
+
+    def resolve_token(self, token: int, approved: bool) -> bool:
+        """Resolve a pending future by approval token (inline-button path).
+
+        Returns True if a live future was resolved, False otherwise (unknown or
+        already resolved). A stale token (already answered / timed out) -> False
+        so the caller can show a "no longer relevant" toast instead of crashing.
+        """
+        return self._resolve_future(self._pending_by_token.get(token), approved)
+
+    @staticmethod
+    def _resolve_future(future: asyncio.Future[bool] | None, approved: bool) -> bool:
         if future is None or future.done():
             return False
         future.set_result(approved)

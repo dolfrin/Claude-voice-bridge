@@ -387,10 +387,15 @@ class TelegramIO:
         cfg: Config,
         on_user_message: Callable[[dict], Awaitable[None]],
         controls: Controls,
+        on_approval: Callable[[int, bool], bool] | None = None,
     ) -> None:
         self.cfg = cfg
         self.on_user_message = on_user_message
         self.controls = controls
+        # Resolver for inline Allow/Deny taps: returns True if a live pending
+        # approval was resolved, False if it was already answered / timed out.
+        # Wired in bridge to ApprovalManager.resolve_token.
+        self._on_approval = on_approval
         self.app: Application | None = None
         self._pending_off_sends: dict[str, tuple[str, str]] = {}
         self._pending_off_seq = 0
@@ -509,15 +514,48 @@ class TelegramIO:
             ids.append(voice_msg.message_id)
         return ids
 
-    async def send_question(self, project: str, text: str) -> int:
-        """Send one message and return its message_id (keys approvals)."""
+    async def send_question(
+        self,
+        project: str,
+        text: str,
+        *,
+        voice_label: str | None = None,
+        voice_bytes: bytes | None = None,
+        approval_token: int | None = None,
+    ) -> int:
+        """Send one message and return its (text) message_id (keys approvals).
+
+        When ``approval_token`` is given, the message carries inline
+        ✅ Leisti / ❌ Neleisti buttons whose ``callback_data`` encodes the
+        token (``apv:{token}:1`` / ``apv:{token}:0``). When ``voice_bytes`` is
+        given, an accompanying VOICE message is sent (used for the ALERT-voiced
+        spoken approval line); the returned id is still the text message's, so
+        both the quote-reply and inline-button paths key the same approval.
+        """
         bot = self.app.bot
+        reply_markup = None
+        if approval_token is not None:
+            reply_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "✅ Leisti", callback_data=f"apv:{approval_token}:1"),
+                InlineKeyboardButton(
+                    "❌ Neleisti", callback_data=f"apv:{approval_token}:0"),
+            ]])
         msg = await _send_with_retry(
             lambda: bot.send_message(
                 chat_id=self._chat_id,
                 text=f"[{project}] {text}",
+                reply_markup=reply_markup,
             )
         )
+        if voice_bytes is not None:
+            await _send_with_retry(
+                lambda: bot.send_voice(
+                    chat_id=self._chat_id,
+                    voice=voice_bytes,
+                    caption=f"{project} · {voice_label}",
+                )
+            )
         return msg.message_id
 
     async def ask_user(self, project: str, question: str, choices: list[str]) -> str:
@@ -670,13 +708,20 @@ class TelegramIO:
         query = update.callback_query
         if query is None or not self._allowed(query.from_user.id):
             return
+        action, index_str = parse_callback(query.data)
+
+        # Inline approval taps own their query.answer() (a stale token shows a
+        # toast), so they are dispatched BEFORE the generic acknowledgement.
+        if action == "apv":
+            await self._handle_approval_callback(query, index_str)
+            return
+
         try:
             await query.answer()
         except BadRequest as exc:
             if "query is too old" in str(exc).lower():
                 return
             raise
-        action, index_str = parse_callback(query.data)
 
         if action == "noop":
             return
@@ -785,6 +830,46 @@ class TelegramIO:
 
         new_markup = build_panel_markup(self.controls.snapshot())
         await self._edit_callback_markup(query, new_markup)
+
+    async def _handle_approval_callback(self, query, index_str: str) -> None:
+        """Resolve an inline Allow/Deny tap by approval token.
+
+        ``index_str`` is ``"{token}:{approved}"`` (``1`` = allow, ``0`` = deny).
+        A token with no live pending (already answered via quote-reply, or timed
+        out) answers with a "no longer relevant" toast and leaves the message
+        untouched. A resolved tap edits the message to show the outcome and
+        removes the buttons.
+        """
+        try:
+            token_str, approved_str = index_str.split(":", 1)
+            token = int(token_str)
+        except (ValueError, TypeError):
+            await self._answer_quietly(query)
+            return
+        approved = approved_str == "1"
+        resolved = (
+            self._on_approval(token, approved)
+            if self._on_approval is not None
+            else False
+        )
+        if not resolved:
+            await self._answer_quietly(query, "nebeaktualu")
+            return
+        await self._answer_quietly(query)
+        label = "✅ Leista" if approved else "❌ Neleista"
+        try:
+            await query.edit_message_text(label)
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
+    @staticmethod
+    async def _answer_quietly(query, text: str | None = None) -> None:
+        try:
+            await query.answer(text) if text is not None else await query.answer()
+        except BadRequest as exc:
+            if "query is too old" not in str(exc).lower():
+                raise
 
     async def _handle_menu_callback(self, query, action: str) -> None:
         snapshot = self.controls.snapshot()

@@ -646,6 +646,7 @@ class SessionManager:
                     project=name,
                     text=f"Sesija krito: {err}",
                     spoken=_ERROR_SPOKEN,
+                    alert=True,
                 )
             )
         except Exception:  # pragma: no cover - defensive

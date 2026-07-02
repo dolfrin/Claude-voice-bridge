@@ -831,7 +831,11 @@ async def test_receive_response_error_emits_error_outbound_and_keeps_other_sessi
     texts = {o.project: o for o in outbound}
     assert "Sesija krito" in texts["qwing"].text
     assert texts["qwing"].spoken == "The session crashed. Check the text."
+    # crash notices are ALERT-class so TTS can use the distinct alert voice
+    assert texts["qwing"].alert is True
     assert "beta" in texts and "hi from beta" in texts["beta"].text
+    # a normal assistant turn stays on the routine (non-alert) voice
+    assert texts["beta"].alert is False
 
     # The crashed session is marked stopped; beta keeps running.
     assert sm.is_running("qwing") is False

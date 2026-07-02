@@ -81,6 +81,35 @@ async def resolve_target(msg: dict, store: Store) -> tuple[str | None, str]:
 
 
 # --------------------------------------------------------------------------- #
+# TTS helpers (shared by the outbound closure and the approval question path)
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_voice(cfg: Config, proj, alert: bool) -> str:
+    """Pick the TTS voice: the ALERT voice for alert-class sends (when
+    configured), otherwise the project's effective voice / global default."""
+    base = effective_voice(proj, cfg) if proj is not None else cfg.tts_voice
+    if alert and getattr(cfg, "tts_alert_voice", ""):
+        return cfg.tts_alert_voice
+    return base
+
+
+async def _synthesize(tts_holder: dict, spoken: str, voice: str, project: str) -> bytes | None:
+    """Synthesize ``spoken`` via the live TTS backend; never raise.
+
+    Empty/whitespace spoken -> no audio. A backend failure logs and returns
+    None so the caller still sends the text (mirrors make_outbound's guard and
+    keeps the never-raises invariant intact)."""
+    if not spoken.strip():
+        return None
+    try:
+        return await tts_holder["backend"].synthesize(spoken, voice)
+    except Exception:  # noqa: BLE001 - never let TTS failure drop the text
+        logger.exception("TTS synthesize failed for %s; sending text-only", project)
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Outbound closure
 # --------------------------------------------------------------------------- #
 
@@ -115,15 +144,9 @@ def make_outbound(
             full_text, spoken = prepare_outbound(o.text)
 
         proj = sessions.project(o.project)
-        voice = effective_voice(proj, cfg) if proj is not None else cfg.tts_voice
+        voice = _resolve_voice(cfg, proj, o.alert)
 
-        voice_bytes: bytes | None = None
-        if spoken.strip():
-            try:
-                voice_bytes = await tts_holder["backend"].synthesize(spoken, voice)
-            except Exception:  # noqa: BLE001 - never let TTS failure drop the text
-                logger.exception("TTS synthesize failed for %s; sending text-only", o.project)
-                voice_bytes = None
+        voice_bytes = await _synthesize(tts_holder, spoken, voice, o.project)
 
         try:
             if o.file_path:
@@ -484,9 +507,29 @@ async def build() -> Wiring:
     # but ApprovalManager.send_question and the controls notices need it. Use a
     # one-slot holder resolved at call time to break the cycle.
     telegram_ref: dict = {}
+    sessions_ref: dict = {}
 
-    async def send_question(project: str, text: str) -> int:
-        return await telegram_ref["io"].send_question(project, text)
+    async def send_question(
+        project: str, text: str, spoken: str = "", token: int | None = None
+    ) -> int:
+        """ApprovalManager's send hook: attach the token-encoded inline buttons
+        and speak the (code-free) approval line with the ALERT voice."""
+        voice_bytes: bytes | None = None
+        voice_label: str | None = None
+        if spoken and spoken.strip():
+            sm = sessions_ref.get("sm")
+            proj = sm.project(project) if sm is not None else None
+            voice_label = _resolve_voice(cfg, proj, alert=True)
+            voice_bytes = await _synthesize(
+                tts_holder, to_spoken(spoken), voice_label, project
+            )
+        return await telegram_ref["io"].send_question(
+            project,
+            text,
+            voice_label=voice_label,
+            voice_bytes=voice_bytes,
+            approval_token=token,
+        )
 
     approvals = ApprovalManager(send_question, cfg.approval_timeout)
 
@@ -511,8 +554,6 @@ async def build() -> Wiring:
             return await telegram_ref["io"].ask_user(project, question, choices)
 
     lazy_telegram = _LazyTelegram()
-
-    sessions_ref: dict = {}
 
     class _LazySessions:
         def project(self, name):
@@ -553,7 +594,9 @@ async def build() -> Wiring:
 
     inbound = make_inbound(transcriber, store, approvals, lazy_sessions, lazy_telegram)
 
-    telegram = TelegramIO(cfg, inbound, controls)
+    telegram = TelegramIO(
+        cfg, inbound, controls, on_approval=approvals.resolve_token
+    )
     telegram_ref["io"] = telegram
     controls.attach_telegram(telegram)
 

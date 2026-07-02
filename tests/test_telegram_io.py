@@ -417,6 +417,143 @@ async def test_send_question_returns_message_id():
 
 
 @pytest.mark.asyncio
+async def test_send_question_attaches_approval_buttons():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=610))
+    bot.send_voice = AsyncMock()
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    mid = await io.send_question("qwing", "run: git push", approval_token=7)
+
+    assert mid == 610
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == ["apv:7:1", "apv:7:0"]
+    assert "Leisti" in buttons[0].text
+    assert "Neleisti" in buttons[1].text
+    # no token -> no voice send in this case
+    bot.send_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_question_sends_alert_voice_when_bytes_provided():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=611))
+    bot.send_voice = AsyncMock(return_value=MagicMock(message_id=612))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    mid = await io.send_question(
+        "qwing", "run: git push",
+        approval_token=8, voice_label="shimmer", voice_bytes=b"ALERT",
+    )
+
+    # returns the TEXT message id (the id the approval future keys on)
+    assert mid == 611
+    bot.send_voice.assert_awaited_once()
+    assert bot.send_voice.await_args.kwargs["voice"] == b"ALERT"
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_resolves_and_edits_message():
+    resolved: list[tuple[int, bool]] = []
+
+    def on_approval(token, approved):
+        resolved.append((token, approved))
+        return True
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), on_approval=on_approval)
+    query = AsyncMock()
+    query.data = "apv:7:1"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert resolved == [(7, True)]
+    query.edit_message_text.assert_awaited_once()
+    edited = query.edit_message_text.await_args.args[0]
+    assert "Leista" in edited
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_deny_edits_message():
+    resolved: list[tuple[int, bool]] = []
+
+    def on_approval(token, approved):
+        resolved.append((token, approved))
+        return True
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), on_approval=on_approval)
+    query = AsyncMock()
+    query.data = "apv:7:0"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert resolved == [(7, False)]
+    edited = query.edit_message_text.await_args.args[0]
+    assert "Neleista" in edited
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_stale_token_shows_toast_no_edit():
+    def on_approval(token, approved):
+        return False  # no live pending (already answered / timed out)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), on_approval=on_approval)
+    query = AsyncMock()
+    query.data = "apv:99:1"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    # a stale tap answers with a toast and does NOT edit the message
+    query.answer.assert_awaited_once()
+    assert query.answer.await_args.args[0]  # non-empty toast text
+    query.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_from_non_whitelisted_user_is_ignored():
+    resolved: list[tuple[int, bool]] = []
+
+    def on_approval(token, approved):
+        resolved.append((token, approved))
+        return True
+
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), FakeControls(),
+                    on_approval=on_approval)
+    query = AsyncMock()
+    query.data = "apv:7:1"
+    query.from_user = MagicMock(id=999)  # not the owner
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    # the whitelist gates the approval callback: a non-owner tap is ignored
+    assert resolved == []
+    query.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ask_user_sends_buttons_and_returns_selected_choice():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     bot = MagicMock()
