@@ -61,7 +61,7 @@ def _piper_executable() -> str:
     found = shutil.which("piper")
     if found is not None:
         return found
-    venv_bin = Path(sys.executable).resolve().parent / "piper"
+    venv_bin = Path(sys.executable).parent / "piper"
     if venv_bin.exists():
         return str(venv_bin)
     return "piper"

@@ -1,4 +1,5 @@
 import asyncio
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -309,7 +310,7 @@ async def test_piper_synthesize_pipes_pcm_through_ffmpeg_to_opus():
 
     async def fake_exec(*args, **kwargs):
         created.append(args)
-        return piper_proc if args[0] == "piper" else ffmpeg_proc
+        return piper_proc if os.path.basename(args[0]) == "piper" else ffmpeg_proc
 
     with patch(
         "voice_bridge.tts.piper_tts.asyncio.create_subprocess_exec",
@@ -320,7 +321,7 @@ async def test_piper_synthesize_pipes_pcm_through_ffmpeg_to_opus():
 
     assert out == b"OggS-piper-opus"
     # piper invoked with the configured model path
-    assert created[0][0] == "piper"
+    assert os.path.basename(created[0][0]) == "piper"
     assert "/opt/piper/en_US.onnx" in created[0]
     assert "--output-raw" in created[0]
     # ffmpeg invoked to encode opus in an ogg container
@@ -354,7 +355,7 @@ async def test_piper_synthesize_raises_when_ffmpeg_fails():
     ffmpeg_proc = _fake_proc(stdout=b"", stderr=b"enc error", returncode=1)
 
     async def fake_exec(*args, **kwargs):
-        return piper_proc if args[0] == "piper" else ffmpeg_proc
+        return piper_proc if os.path.basename(args[0]) == "piper" else ffmpeg_proc
 
     with patch(
         "voice_bridge.tts.piper_tts.asyncio.create_subprocess_exec",
