@@ -48,8 +48,9 @@ def parse_callback(data: str) -> tuple[str, str]:
 
     Returns ``(action, index_str)`` where ``index_str`` is the project index
     (as a string) for per-project actions, or ``""`` for global actions.
-    Global actions: ``allon``, ``alloff``, ``engine``.
-    Per-project actions: ``tog``, ``sel``, ``ptgl``, ``mode``, ``voice``, ``noop``.
+    Global actions: ``allon``, ``alloff``, ``engine``, ``cost``, ``recap``.
+    Per-project actions: ``tog``, ``sel``, ``ptgl``, ``mode``, ``voice``,
+    ``verb``, ``noop``.
     """
     parts = data.split(":", 1)
     action = parts[0]
@@ -188,6 +189,7 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
         proj = row.get("display_name") or row["project"]
         dot = "\U0001F7E2" if row["enabled"] else "\U0001F534"  # green/red
         on_label = "ON" if row["enabled"] else "OFF"
+        verbose_label = "\U0001F527✓" if row.get("verbose") else "\U0001F527·"
         rows.append([
             InlineKeyboardButton(
                 f"{dot} {proj}", callback_data=f"noop:{i}"),
@@ -197,6 +199,8 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
                 f"{row['mode']} ▾", callback_data=f"mode:{i}"),
             InlineKeyboardButton(
                 f"{row['voice']} ▾", callback_data=f"voice:{i}"),
+            InlineKeyboardButton(
+                verbose_label, callback_data=f"verb:{i}"),
         ])
     engine = snapshot[0]["engine"] if snapshot else "openai"
     rows.append([
@@ -204,6 +208,10 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
         InlineKeyboardButton("⏸ ALL OFF", callback_data="alloff"),
         InlineKeyboardButton(
             f"engine: {engine} ▾", callback_data="engine"),
+    ])
+    rows.append([
+        InlineKeyboardButton("💰 Cost", callback_data="cost"),
+        InlineKeyboardButton("🗒 Recap", callback_data="recap"),
     ])
     return InlineKeyboardMarkup(rows)
 

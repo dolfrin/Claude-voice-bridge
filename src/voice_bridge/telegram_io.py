@@ -578,6 +578,13 @@ class TelegramIO:
                 future.set_result(choice)
             await query.edit_message_text(f"Selected: {choice}")
             return
+        if action == "cost":
+            # Info action: reply with a fresh message, do not touch the panel.
+            await query.message.reply_text(await self.controls.cost_summary())
+            return
+        if action == "recap":
+            await query.message.reply_text(self.controls.recap())
+            return
 
         # Global actions do not need a project index.
         if action == "allon":
@@ -608,6 +615,8 @@ class TelegramIO:
 
             if action == "tog":
                 await self.controls.toggle(project, not row["enabled"])
+            elif action == "verb":
+                await self.controls.set_verbose(project, not row.get("verbose", False))
             elif action in {"sel"}:
                 await self.controls.select(project)
                 snap = self.controls.snapshot()

@@ -59,10 +59,10 @@ class FakeControls:
         self._snapshot = [
             {"project": "qwing", "enabled": True, "mode": "safe",
              "voice": "alloy", "engine": "openai", "last_active": True,
-             "cwd": "/home/home/Projects/WhisperX"},
+             "cwd": "/home/home/Projects/WhisperX", "verbose": True},
             {"project": "othersapp", "enabled": False, "mode": "full",
              "voice": "echo", "engine": "openai", "last_active": False,
-             "cwd": "/home/home/Projects/othersapp"},
+             "cwd": "/home/home/Projects/othersapp", "verbose": False},
         ]
 
     async def toggle(self, project, on):
@@ -825,15 +825,31 @@ def test_build_panel_markup_has_per_project_and_global_rows():
     markup = build_panel_markup(snap)
     kb = markup.inline_keyboard
 
-    # two project rows + one global row
-    assert len(kb) == 3
+    # two project rows + all-on/off/engine row + cost/recap row
+    assert len(kb) == 4
     # per-project toggle buttons use index-based callback_data
     toggle_btns = [b for row in kb for b in row
                    if b.callback_data.startswith("tog:")]
     assert {b.callback_data for b in toggle_btns} == {"tog:0", "tog:1"}
-    # global row carries all-on/all-off/engine (no colon suffix)
-    last = kb[-1]
-    assert [b.callback_data for b in last] == ["allon", "alloff", "engine"]
+    # all-on/all-off/engine row (no colon suffix)
+    engine_row = kb[-2]
+    assert [b.callback_data for b in engine_row] == ["allon", "alloff", "engine"]
+    # new cost/recap row
+    cost_recap_row = kb[-1]
+    assert [b.callback_data for b in cost_recap_row] == ["cost", "recap"]
+
+
+def test_build_panel_markup_has_verbose_toggle_buttons_with_state_label():
+    snap = FakeControls().snapshot()  # qwing verbose=True, othersapp verbose=False
+    markup = build_panel_markup(snap)
+    kb = markup.inline_keyboard
+
+    verb_btns = {b.callback_data: b.text for row in kb for b in row
+                 if b.callback_data.startswith("verb:")}
+    assert verb_btns == {"verb:0": "\U0001F527✓", "verb:1": "\U0001F527·"}
+    # verb button is the last button on its project row.
+    assert kb[0][-1].callback_data == "verb:0"
+    assert kb[1][-1].callback_data == "verb:1"
 
 
 def test_build_menu_markup_has_primary_actions():
@@ -867,10 +883,11 @@ def test_build_panel_markup_reflects_enabled_mode_voice_engine():
 
 def test_build_panel_markup_empty_snapshot():
     markup = build_panel_markup([])
-    # only the global row
-    assert len(markup.inline_keyboard) == 1
-    assert [b.callback_data for b in markup.inline_keyboard[0]] == [
-        "allon", "alloff", "engine"]
+    # no project rows, but the two global rows are always present.
+    kb = markup.inline_keyboard
+    assert len(kb) == 2
+    assert [b.callback_data for b in kb[0]] == ["allon", "alloff", "engine"]
+    assert [b.callback_data for b in kb[1]] == ["cost", "recap"]
 
 
 def test_format_projects_uses_status_path_and_last_active_first():
@@ -975,6 +992,25 @@ async def test_callback_toggle_off_project_calls_controls():
     await io._handle_callback(update, MagicMock())
 
     assert ("toggle", "qwing", False) in controls.calls
+    query.answer.assert_awaited()
+    query.edit_message_reply_markup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_callback_verbose_toggle_calls_controls_and_redraws():
+    controls = FakeControls()  # qwing is index 0, currently verbose=True
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "verb:0"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("set_verbose", "qwing", False) in controls.calls
     query.answer.assert_awaited()
     query.edit_message_reply_markup.assert_awaited_once()
 
@@ -1235,6 +1271,80 @@ async def test_callback_from_non_whitelisted_user_is_ignored():
     assert controls.calls == []
 
 
+@pytest.mark.asyncio
+async def test_callback_cost_replies_with_cost_summary_and_does_not_rerender():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "cost"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.message = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("cost_summary",) in controls.calls
+    query.message.reply_text.assert_awaited_once_with(controls.cost_text)
+    query.edit_message_reply_markup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_callback_recap_replies_with_recap_and_does_not_rerender():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "recap"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.message = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("recap",) in controls.calls
+    query.message.reply_text.assert_awaited_once_with(controls.recap_text)
+    query.edit_message_reply_markup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_callback_cost_from_non_whitelisted_user_is_ignored():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "cost"
+    query.from_user = MagicMock(id=999)
+    query.answer = AsyncMock()
+    query.message = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert controls.calls == []
+    query.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_callback_verb_from_non_whitelisted_user_is_ignored():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "verb:0"
+    query.from_user = MagicMock(id=999)
+    query.answer = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert controls.calls == []
+
+
 # --------------------------------------------------------------------------
 # regression: project names containing ":" round-trip correctly
 # --------------------------------------------------------------------------
@@ -1313,7 +1423,7 @@ async def test_cmd_panel_replies_with_markup():
 
     msg.reply_text.assert_awaited_once()
     markup = msg.reply_text.await_args.kwargs["reply_markup"]
-    assert len(markup.inline_keyboard) == 3
+    assert len(markup.inline_keyboard) == 4
 
 
 @pytest.mark.asyncio
