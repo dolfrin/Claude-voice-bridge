@@ -30,7 +30,12 @@ def assistant(*texts: str) -> AssistantMessage:
     )
 
 
-def result(session_id: str = "sess-123") -> ResultMessage:
+def result(
+    session_id: str = "sess-123",
+    *,
+    usage: dict | None = None,
+    total_cost_usd: float | None = None,
+) -> ResultMessage:
     return ResultMessage(
         subtype="success",
         duration_ms=1,
@@ -38,6 +43,8 @@ def result(session_id: str = "sess-123") -> ResultMessage:
         is_error=False,
         num_turns=1,
         session_id=session_id,
+        usage=usage,
+        total_cost_usd=total_cost_usd,
     )
 
 
@@ -98,6 +105,7 @@ class FakeStore:
         self._enabled = dict(enabled or {})
         self._session_ids = dict(session_ids or {})
         self.set_session_calls: list[tuple[str, str]] = []
+        self.usage_calls: list[dict] = []
 
     async def is_enabled(self, project):
         return self._enabled.get(project, True)
@@ -111,6 +119,25 @@ class FakeStore:
     async def set_session_id(self, project, session_id):
         self._session_ids[project] = session_id
         self.set_session_calls.append((project, session_id))
+
+    async def add_usage(
+        self,
+        project,
+        *,
+        cost_usd,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=0,
+        cache_creation_tokens=0,
+    ):
+        self.usage_calls.append({
+            "project": project,
+            "cost_usd": cost_usd,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
+        })
 
 
 class FakeApprovals:
@@ -1165,6 +1192,114 @@ async def test_error_result_without_text_emits_outbound():
     assert await _wait_for(
         lambda: any(o.text == "explicit error detail" for o in outbound)
     )
+
+    await sm.stop_all()
+
+
+# --------------------------------------------------------------------------- #
+# per-turn token & cost usage capture (B3c)
+# --------------------------------------------------------------------------- #
+
+async def test_result_message_usage_and_cost_captured_in_store():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[
+        assistant("Done."),
+        result(
+            "sess-123",
+            usage={
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "cache_read_input_tokens": 10,
+                "cache_creation_input_tokens": 3,
+            },
+            total_cost_usd=0.0456,
+        ),
+    ]]
+
+    await sm.deliver("qwing", "build the thing")
+    assert await _wait_for(lambda: len(store.usage_calls) >= 1)
+
+    call = store.usage_calls[0]
+    assert call["project"] == "qwing"
+    assert call["cost_usd"] == 0.0456
+    assert call["input_tokens"] == 120
+    assert call["output_tokens"] == 45
+    assert call["cache_read_tokens"] == 10
+    assert call["cache_creation_tokens"] == 3
+
+    await sm.stop_all()
+
+
+async def test_result_message_missing_usage_and_none_cost_defaults_to_zero():
+    # Claude Code subscription auth: total_cost_usd is None and usage may be
+    # absent entirely. Missing keys/usage must default to 0 tokens; the None
+    # cost is passed through as-is (Store.add_usage treats None as 0).
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[
+        assistant("Done."),
+        result("sess-123", usage=None, total_cost_usd=None),
+    ]]
+
+    await sm.deliver("qwing", "build the thing")
+    assert await _wait_for(lambda: len(store.usage_calls) >= 1)
+
+    call = store.usage_calls[0]
+    assert call["cost_usd"] is None
+    assert call["input_tokens"] == 0
+    assert call["output_tokens"] == 0
+    assert call["cache_read_tokens"] == 0
+    assert call["cache_creation_tokens"] == 0
+
+    await sm.stop_all()
+
+
+async def test_malformed_usage_payload_does_not_crash_turn():
+    # A non-numeric usage value must be swallowed (logged, not raised) so a
+    # bad usage payload can never be mistaken for a turn crash (C8 corollary).
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[
+        assistant("Done."),
+        result("sess-123", usage={"input_tokens": "not-a-number"}),
+    ]]
+
+    await sm.deliver("qwing", "build the thing")
+    assert await _wait_for(lambda: any(o.text == "Done." for o in outbound))
+
+    # the turn completed normally and the session is still healthy
+    assert sm.is_running("qwing")
+    assert not any("krito" in o.text.lower() for o in outbound)
+    # session_id was still persisted despite the bad usage payload
+    assert store._session_ids["qwing"] == "sess-123"
 
     await sm.stop_all()
 

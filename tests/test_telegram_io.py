@@ -51,6 +51,7 @@ class FakeControls:
     def __init__(self):
         self.calls = []
         self.recap_text = "Nieko naujo."
+        self.cost_text = "qwing: 3 turai, 1000+400 tok, $0.0567\nTOTAL: 3 turai, 1000+400 tok, $0.0567"
         self._snapshot = [
             {"project": "qwing", "enabled": True, "mode": "safe",
              "voice": "alloy", "engine": "openai", "last_active": True,
@@ -108,6 +109,10 @@ class FakeControls:
     def recap(self):
         self.calls.append(("recap",))
         return self.recap_text
+
+    async def cost_summary(self):
+        self.calls.append(("cost_summary",))
+        return self.cost_text
 
     def snapshot(self):
         return self._snapshot
@@ -1627,6 +1632,49 @@ async def test_cmd_recap_rejects_non_whitelisted():
     upd.message.reply_text.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_cmd_cost_replies_with_controls_cost_summary():
+    controls = FakeControls()
+    controls.cost_text = "qwing: 3 turai, 1000+400 tok, $0.0567"
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/cost")
+
+    await io._cmd_cost(upd, make_ctx([]))
+
+    assert ("cost_summary",) in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    assert sent == "qwing: 3 turai, 1000+400 tok, $0.0567"
+
+
+@pytest.mark.asyncio
+async def test_cmd_cost_shows_tokens_and_cost_unavailable_note():
+    controls = FakeControls()
+    controls.cost_text = (
+        "qwing: 2 turai, 500+200 tok, $0.0000\n"
+        "TOTAL: 2 turai, 500+200 tok (cost n/a — subscription auth?)"
+    )
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/cost")
+
+    await io._cmd_cost(upd, make_ctx([]))
+
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "500+200 tok" in sent
+    assert "n/a" in sent.lower()
+
+
+@pytest.mark.asyncio
+async def test_cmd_cost_rejects_non_whitelisted():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    upd = make_cmd_update("/cost", user_id=999)
+
+    await io._cmd_cost(upd, make_ctx([]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_not_awaited()
+
+
 # --------------------------------------------------------------------------
 # run() / stop() lifecycle
 # --------------------------------------------------------------------------
@@ -1663,9 +1711,9 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
     # at least: menu, panel, projects, projects_all, projects_refresh, handoff,
-    # on, off, stop, mode, voice, engine, status, recap, callback, text, voice,
-    # attachments.
-    assert len(added) >= 18
+    # on, off, stop, mode, voice, engine, status, recap, cost, callback, text,
+    # voice, attachments.
+    assert len(added) >= 19
 
     cmd_names = set()
     for h in added:
@@ -1673,12 +1721,12 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
         if cmds:
             cmd_names |= set(cmds)
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off", "stop",
-            "mode", "voice", "engine", "status", "recap"} <= cmd_names
+            "mode", "voice", "engine", "status", "recap", "cost"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off", "stop",
-            "mode", "voice", "engine", "recap"} == registered_names
+            "mode", "voice", "engine", "recap", "cost"} == registered_names
 
 
 @pytest.mark.asyncio

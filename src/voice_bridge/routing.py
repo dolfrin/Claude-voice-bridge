@@ -19,6 +19,15 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS usage (
+    project               TEXT PRIMARY KEY,
+    turns                 INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd              REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -148,3 +157,89 @@ class Store:
             )
             row = await cur.fetchone()
         return row[0] if row is not None else None
+
+    # ------------------------------------------------------------------
+    # per-project token & cost usage (B3c)
+    # ------------------------------------------------------------------
+
+    async def add_usage(
+        self,
+        project: str,
+        *,
+        cost_usd: float | None,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+    ) -> None:
+        """Accumulate one turn's usage into *project*'s running totals.
+
+        Upsert-accumulate: creates the row on the first call, otherwise adds
+        to the existing totals (never overwrites). ``cost_usd is None`` (e.g.
+        Claude Code subscription auth reports no ``total_cost_usd``) adds 0.
+        """
+        cost = cost_usd if cost_usd is not None else 0.0
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO usage (project, turns, input_tokens, output_tokens, "
+                "cache_read_tokens, cache_creation_tokens, cost_usd) "
+                "VALUES (?, 1, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(project) DO UPDATE SET "
+                "turns = turns + 1, "
+                "input_tokens = input_tokens + excluded.input_tokens, "
+                "output_tokens = output_tokens + excluded.output_tokens, "
+                "cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens, "
+                "cache_creation_tokens = cache_creation_tokens + excluded.cache_creation_tokens, "
+                "cost_usd = cost_usd + excluded.cost_usd",
+                (
+                    project,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    cost,
+                ),
+            )
+            await db.commit()
+
+    async def get_usage(self, project: str) -> dict:
+        """Return the accumulated usage row for *project* (zeros if none)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT turns, input_tokens, output_tokens, cache_read_tokens, "
+                "cache_creation_tokens, cost_usd FROM usage WHERE project = ?",
+                (project,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return {
+                "turns": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cost_usd": 0.0,
+            }
+        return _usage_row_to_dict(row)
+
+    async def all_usage(self) -> dict[str, dict]:
+        """Return the accumulated usage row for every project with usage."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT project, turns, input_tokens, output_tokens, "
+                "cache_read_tokens, cache_creation_tokens, cost_usd FROM usage"
+            )
+            rows = await cur.fetchall()
+        return {row[0]: _usage_row_to_dict(row[1:]) for row in rows}
+
+
+def _usage_row_to_dict(row) -> dict:
+    turns, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd = row
+    return {
+        "turns": turns,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "cost_usd": cost_usd,
+    }

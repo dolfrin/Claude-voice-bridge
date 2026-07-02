@@ -567,6 +567,7 @@ class SessionManager:
                                 result_error = True
                                 result_subtype = getattr(msg, "subtype", None)
                                 result_detail = getattr(msg, "result", None)
+                            await self._capture_usage(name, msg)
                 finally:
                     watchdog.cancel()
                     try:
@@ -596,6 +597,40 @@ class SessionManager:
                 await self._emit_crash(sess, err)
                 self._schedule_restart(name)
                 return
+
+    async def _capture_usage(self, name: str, msg: ResultMessage) -> None:
+        """Persist one turn's token/cost usage from a ResultMessage (B3c).
+
+        Defensive by design: ``usage`` may be a plain dict (the normal shape,
+        keyed ``input_tokens`` / ``output_tokens`` /
+        ``cache_read_input_tokens`` / ``cache_creation_input_tokens``) or, in
+        principle, an object exposing the same names as attributes — both are
+        read via a getter that never raises on a missing key/attr. A
+        malformed payload (unexpected type, non-numeric value) is caught here
+        and logged; it must never propagate into the per-turn loop and be
+        mistaken for a turn crash (C8 corollary). ``total_cost_usd is None``
+        (Claude Code subscription auth reports no cost) is passed through
+        unchanged — ``Store.add_usage`` stores that as 0.
+        """
+        try:
+            usage = getattr(msg, "usage", None) or {}
+
+            def _field(key: str) -> int:
+                value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
+                return int(value or 0)
+
+            await self._store.add_usage(
+                name,
+                cost_usd=getattr(msg, "total_cost_usd", None),
+                input_tokens=_field("input_tokens"),
+                output_tokens=_field("output_tokens"),
+                cache_read_tokens=_field("cache_read_input_tokens"),
+                cache_creation_tokens=_field("cache_creation_input_tokens"),
+            )
+        except Exception:  # noqa: BLE001 - never let a bad usage payload
+            # crash the turn loop; it would otherwise be misread as a
+            # session crash by _run_loop's outer except.
+            logger.exception("usage capture failed for %s", name)
 
     async def _heartbeat_loop(self, name: str, activity: asyncio.Event) -> None:
         """Emit a "still working" Outbound after each interval of silence.

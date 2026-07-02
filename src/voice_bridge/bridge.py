@@ -478,6 +478,49 @@ class _Controls:
             )
         return "\n".join(parts) if parts else "Nieko naujo."
 
+    # -- Cost / token usage (B3c) -------------------------------------------
+
+    async def cost_summary(self) -> str:
+        """Per-project + TOTAL token/cost summary, read fresh from the store.
+
+        One line per project with recorded usage:
+        ``"{display}: {turns} turai, {in}+{out} tok, ${cost:.4f}"`` plus a
+        TOTAL line. Under Claude Code subscription auth the SDK never reports
+        ``total_cost_usd`` so every accumulated cost stays 0 — in that case
+        (no project shows a nonzero cost) the TOTAL line notes the cost is
+        unavailable instead of a misleading ``$0.0000``.
+        """
+        all_usage = await self._store.all_usage()
+        if not all_usage:
+            return "No usage recorded yet."
+
+        lines: list[str] = []
+        total_turns = total_in = total_out = 0
+        total_cost = 0.0
+        for name, row in all_usage.items():
+            display = self._mirror.get(name, {}).get("display_name", name)
+            turns = row.get("turns", 0)
+            tin = row.get("input_tokens", 0)
+            tout = row.get("output_tokens", 0)
+            cost = row.get("cost_usd", 0.0) or 0.0
+            total_turns += turns
+            total_in += tin
+            total_out += tout
+            total_cost += cost
+            lines.append(f"{display}: {turns} turai, {tin}+{tout} tok, ${cost:.4f}")
+
+        if total_cost > 0:
+            lines.append(
+                f"TOTAL: {total_turns} turai, {total_in}+{total_out} tok, "
+                f"${total_cost:.4f}"
+            )
+        else:
+            lines.append(
+                f"TOTAL: {total_turns} turai, {total_in}+{total_out} tok "
+                "(cost n/a — subscription auth?)"
+            )
+        return "\n".join(lines)
+
     def mark_last_active(self, project: str) -> None:
         """Flip last_active on for *project* and off for every other in the mirror."""
         for name, row in self._mirror.items():

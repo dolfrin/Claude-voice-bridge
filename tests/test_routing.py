@@ -204,3 +204,139 @@ async def test_state_survives_new_store_instance(tmp_db):
     assert await s2.get_session_id("qwing") == "sess-xyz"
     assert await s2.project_for_message(42) == "qwing"
     assert await s2.get_last_active() == "qwing"
+
+
+# ---------------------------------------------------------------------------
+# Step 7: per-project token & cost usage (B3c)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_usage_zeros_for_unknown_project(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+
+    assert await store.get_usage("ghost") == {
+        "turns": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "cost_usd": 0.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_add_usage_creates_row_on_first_call(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+
+    await store.add_usage(
+        "qwing",
+        cost_usd=0.0123,
+        input_tokens=100,
+        output_tokens=50,
+        cache_read_tokens=10,
+        cache_creation_tokens=5,
+    )
+
+    assert await store.get_usage("qwing") == {
+        "turns": 1,
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cache_read_tokens": 10,
+        "cache_creation_tokens": 5,
+        "cost_usd": pytest.approx(0.0123),
+    }
+
+
+@pytest.mark.asyncio
+async def test_add_usage_accumulates_across_calls(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+
+    await store.add_usage(
+        "qwing", cost_usd=0.01, input_tokens=100, output_tokens=50,
+        cache_read_tokens=10, cache_creation_tokens=5,
+    )
+    await store.add_usage(
+        "qwing", cost_usd=0.02, input_tokens=200, output_tokens=75,
+        cache_read_tokens=20, cache_creation_tokens=15,
+    )
+
+    usage = await store.get_usage("qwing")
+    assert usage["turns"] == 2
+    assert usage["input_tokens"] == 300
+    assert usage["output_tokens"] == 125
+    assert usage["cache_read_tokens"] == 30
+    assert usage["cache_creation_tokens"] == 20
+    assert usage["cost_usd"] == pytest.approx(0.03)
+
+
+@pytest.mark.asyncio
+async def test_add_usage_none_cost_adds_zero(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+
+    await store.add_usage(
+        "qwing", cost_usd=None, input_tokens=10, output_tokens=5,
+    )
+    await store.add_usage(
+        "qwing", cost_usd=None, input_tokens=10, output_tokens=5,
+    )
+
+    usage = await store.get_usage("qwing")
+    assert usage["cost_usd"] == 0.0
+    assert usage["turns"] == 2
+    assert usage["input_tokens"] == 20
+
+
+@pytest.mark.asyncio
+async def test_add_usage_defaults_cache_tokens_to_zero(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+
+    await store.add_usage("qwing", cost_usd=0.1, input_tokens=1, output_tokens=1)
+
+    usage = await store.get_usage("qwing")
+    assert usage["cache_read_tokens"] == 0
+    assert usage["cache_creation_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_all_usage_returns_every_project(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+
+    await store.add_usage("qwing", cost_usd=0.1, input_tokens=1, output_tokens=1)
+    await store.add_usage("othersapp", cost_usd=0.2, input_tokens=2, output_tokens=2)
+
+    all_usage = await store.all_usage()
+    assert set(all_usage) == {"qwing", "othersapp"}
+    assert all_usage["qwing"]["input_tokens"] == 1
+    assert all_usage["othersapp"]["input_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_all_usage_empty_when_none_recorded(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+
+    assert await store.all_usage() == {}
+
+
+@pytest.mark.asyncio
+async def test_usage_survives_new_store_instance(tmp_db):
+    s1 = Store(tmp_db)
+    await s1.init()
+    await s1.add_usage(
+        "qwing", cost_usd=0.05, input_tokens=42, output_tokens=7,
+        cache_read_tokens=3, cache_creation_tokens=1,
+    )
+
+    s2 = Store(tmp_db)
+    await s2.init()
+
+    usage = await s2.get_usage("qwing")
+    assert usage["turns"] == 1
+    assert usage["input_tokens"] == 42
+    assert usage["cost_usd"] == pytest.approx(0.05)
