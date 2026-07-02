@@ -94,8 +94,8 @@ _RESTART_MAX_ATTEMPTS = 5
 # Opt-in verbose tool-activity streaming (per project, default OFF). When a
 # project is verbose, each ToolUseBlock the agent runs is rendered to a compact
 # one-line preview and COALESCED into a buffer, flushed as ONE text-only
-# Outbound (spoken="" => no TTS) once the buffer reaches this many lines OR
-# before the turn's final assistant text — whichever comes first. Size-based
+# Outbound (spoken=_SILENT_SPOKEN => no TTS) once the buffer reaches this many
+# lines OR before the turn's final assistant text — whichever first. Size-based
 # batching keeps message volume bounded AND makes flushing deterministic.
 _VERBOSE_BATCH_SIZE = 4
 # Cap the per-line input preview so a huge command/argument can never blow up
@@ -735,9 +735,12 @@ class SessionManager:
     async def _flush_verbose(self, name: str, buffer: list[str]) -> None:
         """Emit buffered verbose tool-activity as ONE text-only Outbound.
 
-        TEXT-ONLY (``spoken=""``) so it triggers NO TTS — coalescing plus
-        no-audio is what keeps verbose from spamming. Never raises: a failure
-        here must not crash the turn or trigger a spurious restart (mirrors the
+        Uses the SILENT sentinel ``spoken=_SILENT_SPOKEN`` (a single space) so
+        make_outbound sends TEXT ONLY with NO TTS. NOTE: ``spoken=""`` is NOT
+        silent — it is the turn-end sentinel that makes make_outbound *derive* a
+        spoken line from the text (and speak it). Coalescing plus no-audio is
+        what keeps verbose from spamming. Never raises: a failure here must not
+        crash the turn or trigger a spurious restart (mirrors the
         ``_capture_usage`` / heartbeat guards, since ``_run_loop``'s outer
         except would otherwise misread it as a turn crash). The buffer is
         CLEARED unconditionally — even on a send failure — so the same lines are
@@ -748,7 +751,9 @@ class SessionManager:
         text = "\n".join(buffer)
         buffer.clear()
         try:
-            await self._on_outbound(Outbound(project=name, text=text, spoken=""))
+            await self._on_outbound(
+                Outbound(project=name, text=text, spoken=_SILENT_SPOKEN)
+            )
         except Exception:  # noqa: BLE001 - a verbose flush must never crash the turn
             logger.exception("verbose activity flush failed for %s", name)
 

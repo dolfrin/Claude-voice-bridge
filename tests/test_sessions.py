@@ -1577,7 +1577,15 @@ async def test_verbose_streams_coalesced_tool_activity_then_final_text():
     acts = _activity(outbound)
     # batch_size=2 with 3 tool blocks -> flush of 2, then remaining 1 before text
     assert len(acts) == 2
-    assert all(a.spoken == "" for a in acts), "activity must be TEXT-ONLY (no TTS)"
+    # Activity must be TEXT-ONLY. It uses the SILENT sentinel (a single space),
+    # NOT spoken="" (which is the turn-end sentinel that make_outbound would
+    # turn back into a spoken line and speak). Assert both the sentinel and the
+    # downstream no-TTS property (make_outbound skips TTS when to_spoken is empty).
+    from voice_bridge.sanitizer import to_spoken
+    assert all(a.spoken == sessions_mod._SILENT_SPOKEN for a in acts)
+    assert all(a.spoken and to_spoken(a.spoken) == "" for a in acts), (
+        "silent sentinel must yield no TTS downstream"
+    )
 
     first_lines = acts[0].text.split("\n")
     assert first_lines == [
