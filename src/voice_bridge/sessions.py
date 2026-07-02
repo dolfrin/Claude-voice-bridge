@@ -43,7 +43,7 @@ from claude_agent_sdk import (
 )
 
 from .approvals import ApprovalManager, make_can_use_tool
-from .config import Config, ProjectConfig, effective_autonomy
+from .config import AUTONOMY_MODES, Config, ProjectConfig, effective_autonomy
 from .notify_tool import (
     ASK_USER_TOOL_NAME,
     NOTIFY_TOOL_NAME,
@@ -337,7 +337,7 @@ class SessionManager:
         cfg = self._projects.get(project)
         if cfg is None:
             return
-        if mode not in {"full", "safe", "ask"}:
+        if mode not in AUTONOMY_MODES:
             logger.warning("set_mode: invalid mode %r for project %r; ignored", mode, project)
             return
         cfg.autonomy = mode

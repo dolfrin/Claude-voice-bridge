@@ -560,7 +560,8 @@ class _Controls:
             }
 
     def snapshot(self) -> list[dict]:
-        """SYNC: list of dicts keyed exactly project/enabled/mode/voice/engine/last_active."""
+        """SYNC: per-project dicts for the panel/status views, keyed
+        project/display_name/enabled/mode/voice/engine/last_active/cwd/verbose."""
         return [
             {
                 "project": name,
