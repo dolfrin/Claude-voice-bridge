@@ -614,13 +614,21 @@ class SessionManager:
             if activity.is_set():
                 activity.clear()  # progress this interval: reset, do not fire
                 continue
-            await self._on_outbound(
-                Outbound(
-                    project=name,
-                    text=_HEARTBEAT_TEXT,
-                    spoken=_HEARTBEAT_SPOKEN,
+            try:
+                await self._on_outbound(
+                    Outbound(
+                        project=name,
+                        text=_HEARTBEAT_TEXT,
+                        spoken=_HEARTBEAT_SPOKEN,
+                    )
                 )
-            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Heartbeat is best-effort: a failure here must never latch and
+                # poison the turn (its exception would re-raise on the turn's
+                # `await watchdog` and discard the turn's real output).
+                logger.exception("heartbeat outbound failed for %s", name)
 
     async def _emit_crash(self, sess: _Session, err: Exception) -> None:
         name = sess.project.name

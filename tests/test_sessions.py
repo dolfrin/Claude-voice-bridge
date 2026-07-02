@@ -1201,6 +1201,44 @@ async def test_heartbeat_emits_during_long_silent_turn():
     await sm.stop_all()
 
 
+async def test_heartbeat_outbound_failure_does_not_poison_turn():
+    # A failure while emitting a heartbeat (e.g. a transient store hiccup) must
+    # be swallowed: the turn's real output still lands and the session survives.
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        if "dirbu" in o.text.lower():
+            raise RuntimeError("store hiccup during heartbeat")
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    sm.heartbeat_interval = 0.01
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+
+    async def slow_response():
+        await asyncio.sleep(0.08)  # silence long enough for a heartbeat to fire
+        yield assistant("done")
+        yield result("s-1")
+
+    client.receive_response = slow_response
+
+    await sm.deliver("qwing", "long task")
+
+    assert await _wait_for(lambda: any(o.text == "done" for o in outbound)), (
+        "the turn's real output must still be delivered despite a failing heartbeat"
+    )
+    assert not any("krito" in o.text.lower() for o in outbound), (
+        "a failing heartbeat must not crash/restart the session"
+    )
+    assert sm.is_running("qwing")
+
+    await sm.stop_all()
+
+
 async def test_no_heartbeat_on_fast_turn():
     project = make_project("qwing")
     store = FakeStore(enabled={"qwing": True})
