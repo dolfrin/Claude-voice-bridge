@@ -3,6 +3,7 @@ outbound send_update/send_question, /panel control board, slash commands,
 and run()/stop() lifecycle. All telegram network I/O is mocked."""
 
 import asyncio
+import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ from voice_bridge.config import Config
 from voice_bridge.telegram_io import (
     build_menu_markup,
     TelegramIO,
+    _CAPTION_LIMIT,
     _chunk_text,
     _send_with_retry,
     build_mode_markup,
@@ -357,6 +359,49 @@ async def test_send_file_uses_photo_method_for_images(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_send_file_caption_over_limit_sends_short_caption_and_overflow_text(tmp_path):
+    path = tmp_path / "report.txt"
+    path.write_text("hello")
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_document = AsyncMock(return_value=MagicMock(message_id=210))
+    next_id = iter([300, 301, 302, 303])
+    bot.send_message = AsyncMock(
+        side_effect=lambda **kw: MagicMock(message_id=next(next_id))
+    )
+    bot.send_voice = AsyncMock()
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    long_text = "x" * 1500  # full caption "[qwing] " + text > 1024 caption limit
+
+    ids = await io.send_file(
+        project="qwing",
+        voice_label="alloy",
+        text=long_text,
+        voice_bytes=None,
+        file_path=str(path),
+    )
+
+    # File goes out with a SHORT caption (well under the 1024 caption cap).
+    bot.send_document.assert_awaited_once()
+    caption = bot.send_document.await_args.kwargs["caption"]
+    assert caption == "[qwing]"
+    assert len(caption) <= _CAPTION_LIMIT
+
+    # The full text follows as a separate chunked message with the project prefix.
+    assert bot.send_message.await_count >= 1
+    sent_texts = [c.kwargs["text"] for c in bot.send_message.await_args_list]
+    assert sent_texts[0].startswith("[qwing] ")
+    assert "".join(sent_texts).count("x") == 1500
+
+    # All message_ids returned: the document plus the overflow chunk(s).
+    assert ids[0] == 210
+    assert len(ids) == 1 + bot.send_message.await_count
+    bot.send_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_send_question_returns_message_id():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     bot = MagicMock()
@@ -525,6 +570,39 @@ async def test_send_with_retry_bad_request_raises_immediately_no_retry(monkeypat
         await _send_with_retry(factory)
 
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_normalizes_timedelta_retry_after(monkeypatch):
+    # PTB (opt-in today, future default) returns RetryAfter.retry_after as a
+    # datetime.timedelta; _send_with_retry must convert it to float seconds
+    # instead of raising TypeError on timedelta + float.
+    monkeypatch.setenv("PTB_TIMEDELTA", "1")
+    exc = RetryAfter(retry_after=5)
+    assert isinstance(exc.retry_after, datetime.timedelta)  # sanity: PTB gives timedelta
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    calls = []
+
+    async def factory():
+        calls.append(1)
+        if len(calls) == 1:
+            raise exc
+        return "ok"
+
+    result = await _send_with_retry(factory)
+
+    assert result == "ok"
+    assert len(sleeps) == 1
+    # 5 seconds + jitter in [0.05, 0.25], as a plain float (no TypeError).
+    assert isinstance(sleeps[0], float)
+    assert 5.0 < sleeps[0] < 5.3
 
 
 # --------------------------------------------------------------------------
@@ -1327,6 +1405,29 @@ async def test_cmd_handoff_unknown_project_replies_help():
 
     sent = upd.message.reply_text.await_args.args[0]
     assert "Project not found" in sent
+
+
+@pytest.mark.asyncio
+async def test_format_handoff_escapes_transcript_html(tmp_path):
+    # Transcripts routinely contain <, >, & (code). The handoff /panel button
+    # edits with parse_mode=HTML, so raw markup would raise BadRequest and the
+    # button would silently do nothing. The dynamic content must be escaped.
+    controls = FakeControls()
+    controls._snapshot[0]["cwd"] = str(tmp_path)
+    path = transcript_path(str(tmp_path))
+    path.parent.mkdir(parents=True)
+    path.write_text('## user\n<div> & "x"\n', encoding="utf-8")
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+
+    text = io._format_handoff_text("")
+
+    # No raw markup metacharacters survive from the file content.
+    assert "<div>" not in text
+    assert "<" not in text
+    assert ">" not in text
+    # The content is HTML-escaped so a parse_mode=HTML edit would not raise.
+    assert "&lt;div&gt;" in text
+    assert "&amp;" in text
 
 
 @pytest.mark.asyncio

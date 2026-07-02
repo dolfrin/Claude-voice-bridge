@@ -1163,3 +1163,160 @@ async def test_error_result_without_text_emits_outbound():
     )
 
     await sm.stop_all()
+
+
+# --------------------------------------------------------------------------- #
+# heartbeat watchdog during long turns (item 1)
+# --------------------------------------------------------------------------- #
+
+async def test_heartbeat_emits_during_long_silent_turn():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    sm.heartbeat_interval = 0.01
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+
+    async def slow_response():
+        # Genuine silence: the SDK is busy running tools and emits no text
+        # for far longer than the heartbeat interval before finishing.
+        await asyncio.sleep(0.08)
+        yield assistant("done")
+        yield result("s-1")
+
+    client.receive_response = slow_response
+
+    await sm.deliver("qwing", "long task")
+
+    assert await _wait_for(
+        lambda: any("dirbu" in o.text.lower() for o in outbound)
+    ), "expected at least one 'still working' heartbeat during the silent turn"
+
+    await sm.stop_all()
+
+
+async def test_no_heartbeat_on_fast_turn():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    # Interval far longer than a fast turn: no heartbeat should ever fire.
+    sm.heartbeat_interval = 5.0
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[assistant("quick"), result("s-1")]]
+
+    await sm.deliver("qwing", "quick task")
+    assert await _wait_for(lambda: any(o.text == "quick" for o in outbound))
+
+    assert not any("dirbu" in o.text.lower() for o in outbound)
+
+    await sm.stop_all()
+
+
+async def test_heartbeat_does_not_fire_after_intentional_cancel():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    sm.heartbeat_interval = 0.02
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    started = asyncio.Event()
+
+    async def hanging_response():
+        started.set()
+        await asyncio.sleep(3600)
+        yield result("s-1")
+
+    client.receive_response = hanging_response
+
+    await sm.deliver("qwing", "hang")
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await sm.stop_all()
+
+    count_after_stop = sum(1 for o in outbound if "dirbu" in o.text.lower())
+    # Give any leaked watchdog several intervals to (wrongly) fire.
+    await asyncio.sleep(0.08)
+    count_later = sum(1 for o in outbound if "dirbu" in o.text.lower())
+    assert count_later == count_after_stop, (
+        "watchdog fired after the turn was intentionally cancelled"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# connect-orphan leak / double-start window in _start (item 2)
+# --------------------------------------------------------------------------- #
+
+async def test_start_cancelled_during_connect_disconnects_and_no_orphan(monkeypatch):
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+
+    connecting = asyncio.Event()
+
+    class BlockingClient(FakeClaudeSDKClient):
+        async def connect(self):
+            connecting.set()
+            await asyncio.sleep(3600)  # hang until cancelled
+
+    monkeypatch.setattr(sessions_mod, "ClaudeSDKClient", BlockingClient)
+
+    task = asyncio.create_task(sm._start("qwing"))
+    await asyncio.wait_for(connecting.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The connected-but-unregistered client must be cleaned up, not orphaned.
+    assert sm.is_running("qwing") is False
+    assert len(FakeClaudeSDKClient.instances) == 1
+    assert FakeClaudeSDKClient.instances[0].disconnected is True
+
+
+async def test_concurrent_start_builds_single_client(monkeypatch):
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+
+    class SlowConnectClient(FakeClaudeSDKClient):
+        async def connect(self):
+            # Yield control so a racing _start can also reach the build/connect
+            # stage before this one registers into _sessions. Without the
+            # per-project start lock this window builds two CLI subprocesses.
+            await asyncio.sleep(0.02)
+            self.connected = True
+
+    monkeypatch.setattr(sessions_mod, "ClaudeSDKClient", SlowConnectClient)
+
+    await asyncio.gather(sm._start("qwing"), sm._start("qwing"))
+
+    assert sm.is_running("qwing") is True
+    assert len(FakeClaudeSDKClient.instances) == 1
+
+    await sm.stop_all()

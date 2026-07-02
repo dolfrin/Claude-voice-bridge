@@ -74,6 +74,15 @@ _SILENT_SPOKEN = " "
 _TURN_ERROR_SPOKEN = "Turas baigėsi klaida."
 _GIVEUP_SPOKEN = "Sesija nekyla, ją išjungiau."
 
+# Per-turn "still working" heartbeat. A multi-minute tool-running turn emits no
+# user-facing text until it finishes, which reads as total silence to a walking
+# user. A watchdog emits ONE brief Outbound after each interval of genuine
+# silence (reset whenever the loop receives assistant text), so it never fires
+# on a fast turn and stays non-spammy on a slow one.
+_HEARTBEAT_INTERVAL = 60.0
+_HEARTBEAT_TEXT = "Vis dar dirbu…"
+_HEARTBEAT_SPOKEN = "Vis dar dirbu…"
+
 # Supervised auto-restart policy. Backoff grows exponentially from *base*
 # seconds, doubling per attempt, capped at *cap*. After *max* consecutive
 # restart cycles without a successful turn the project is disabled.
@@ -126,6 +135,9 @@ class SessionManager:
         self._restart_backoff_base = _RESTART_BACKOFF_BASE
         self._restart_backoff_cap = _RESTART_BACKOFF_CAP
         self._max_restart_attempts = _RESTART_MAX_ATTEMPTS
+        # Seconds of user-facing silence within a turn before the "still
+        # working" heartbeat fires. An instance attribute so tests set it tiny.
+        self.heartbeat_interval = _HEARTBEAT_INTERVAL
 
     # ------------------------------------------------------------------ #
     # Lookup
@@ -224,7 +236,9 @@ class SessionManager:
             if name in self._sessions:
                 return
             try:
-                await self._start(name)
+                # Already holding the per-project lock: call the locked variant
+                # directly (self._start would re-acquire and deadlock).
+                await self._start_locked(name)
             except Exception:  # noqa: BLE001 - deliver recovery is best-effort
                 logger.exception("deliver recovery: failed to start %s", name)
 
@@ -361,6 +375,27 @@ class SessionManager:
         return on_ask_user
 
     async def _start(self, name: str) -> None:
+        """Start a session for *name*, serialized by the per-project lock.
+
+        The lock closes the double-start window: two concurrent starts for one
+        project cannot both pass the ``name in _sessions`` guard and build two
+        CLI subprocesses. The fast path for an already-running project returns
+        before touching the lock.
+        """
+        if name in self._sessions:
+            return
+        lock = self._locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            await self._start_locked(name)
+
+    async def _start_locked(self, name: str) -> None:
+        """Build and register a session. Caller must hold the per-project lock.
+
+        Connecting the client is wrapped so a cancellation (e.g. a supervisor
+        task cancelled mid-connect) or a connect failure disconnects the
+        already-connected CLI subprocess instead of orphaning it — the client
+        is only registered into ``_sessions`` once it is fully connected.
+        """
         if name in self._sessions:
             return
         project = self._projects[name]
@@ -375,7 +410,14 @@ class SessionManager:
         options = self._build_options(project, resume, notify_server)
 
         client = ClaudeSDKClient(options)
-        await client.connect()
+        try:
+            await client.connect()
+        except BaseException:
+            try:
+                await client.disconnect()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("cleanup after failed connect for %s", name)
+            raise
         sess.client = client
 
         self._sessions[name] = sess
@@ -502,19 +544,35 @@ class SessionManager:
                 result_error = False
                 result_subtype: str | None = None
                 result_detail: str | None = None
-                async for msg in client.receive_response():
-                    if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextBlock):
-                                parts.append(block.text)
-                    elif isinstance(msg, ResultMessage):
-                        session_id = getattr(msg, "session_id", None)
-                        if session_id:
-                            await self._store.set_session_id(name, session_id)
-                        if getattr(msg, "is_error", False):
-                            result_error = True
-                            result_subtype = getattr(msg, "subtype", None)
-                            result_detail = getattr(msg, "result", None)
+                # Per-turn "still working" watchdog. It fires during genuine
+                # silence and is reset whenever we receive assistant text. It is
+                # always cancelled AND awaited in the finally so it can never
+                # leak, fire after the turn, or fire during a cancellation.
+                activity = asyncio.Event()
+                watchdog = asyncio.create_task(
+                    self._heartbeat_loop(name, activity)
+                )
+                try:
+                    async for msg in client.receive_response():
+                        if isinstance(msg, AssistantMessage):
+                            for block in msg.content:
+                                if isinstance(block, TextBlock):
+                                    parts.append(block.text)
+                                    activity.set()  # reset the heartbeat timer
+                        elif isinstance(msg, ResultMessage):
+                            session_id = getattr(msg, "session_id", None)
+                            if session_id:
+                                await self._store.set_session_id(name, session_id)
+                            if getattr(msg, "is_error", False):
+                                result_error = True
+                                result_subtype = getattr(msg, "subtype", None)
+                                result_detail = getattr(msg, "result", None)
+                finally:
+                    watchdog.cancel()
+                    try:
+                        await watchdog
+                    except asyncio.CancelledError:
+                        pass
                 joined = "\n".join(p for p in parts if p).strip()
                 if joined:
                     await append_transcript(sess.project.cwd, "assistant", joined)
@@ -538,6 +596,31 @@ class SessionManager:
                 await self._emit_crash(sess, err)
                 self._schedule_restart(name)
                 return
+
+    async def _heartbeat_loop(self, name: str, activity: asyncio.Event) -> None:
+        """Emit a "still working" Outbound after each interval of silence.
+
+        Sleeps one ``heartbeat_interval`` at a time. If *activity* was set during
+        that interval (the turn loop received assistant text) the timer is reset
+        and no heartbeat fires; otherwise — genuine silence — it emits ONE
+        heartbeat. So a turn that keeps streaming text never fires, and a long
+        silence fires at most once per interval. Built on ``asyncio.sleep`` (not
+        ``wait_for``, which mis-handles cancellation on Python < 3.11) so the
+        caller's cancel+await tears it down cleanly: it never fires after the
+        turn ends nor during an intentional cancellation.
+        """
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            if activity.is_set():
+                activity.clear()  # progress this interval: reset, do not fire
+                continue
+            await self._on_outbound(
+                Outbound(
+                    project=name,
+                    text=_HEARTBEAT_TEXT,
+                    spoken=_HEARTBEAT_SPOKEN,
+                )
+            )
 
     async def _emit_crash(self, sess: _Session, err: Exception) -> None:
         name = sess.project.name

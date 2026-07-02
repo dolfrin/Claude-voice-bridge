@@ -19,6 +19,7 @@ run-forever wait. ``stop()`` shuts the Application down.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import html
 import logging
 import random
@@ -158,7 +159,13 @@ async def _send_with_retry(
             last_exc = exc
             if attempt == attempts - 1:
                 break
-            await asyncio.sleep(exc.retry_after + random.uniform(0.05, 0.25))
+            # PTB returns retry_after as int seconds today but as a
+            # datetime.timedelta under PTB_TIMEDELTA (a future default);
+            # normalize to float seconds so the sleep never raises TypeError.
+            delay = exc.retry_after
+            if isinstance(delay, datetime.timedelta):
+                delay = delay.total_seconds()
+            await asyncio.sleep(delay + random.uniform(0.05, 0.25))
         except BadRequest:
             raise
         except (TimedOut, NetworkError) as exc:
@@ -979,21 +986,32 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        await msg.reply_text(self._format_handoff_text(context.args[0] if context.args else ""))
+        # parse_mode=HTML matches the /panel Handoff button edit; the content
+        # is html.escape'd inside _format_handoff_text so this never raises.
+        await msg.reply_text(
+            self._format_handoff_text(context.args[0] if context.args else ""),
+            parse_mode="HTML",
+        )
 
     def _format_handoff_text(self, project: str) -> str:
+        # This text is rendered with parse_mode='HTML' (the /panel Handoff
+        # button edits that way). Transcripts routinely contain <, >, & from
+        # code, so every dynamic value below is html.escape'd; a raw '<' would
+        # make Telegram reject the edit and the button would silently do
+        # nothing. The static structure has no HTML metacharacters.
         row = _find_project_row(self.controls.snapshot(), project)
         if row is None:
             return "Project not found. Use /projects_all."
         path = transcript_path(row.get("cwd") or "")
-        label = row.get("display_name") or row["project"]
+        label = html.escape(row.get("display_name") or row["project"])
         if not path.exists():
             return f"{label}: no handoff history yet."
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if not text:
             return f"{label}: handoff history is empty."
-        tail = _tail_for_telegram(text)
-        return f"{label} handoff\n{_friendly_path(str(path))}\n\n{tail}"
+        tail = html.escape(_tail_for_telegram(text))
+        friendly = html.escape(_friendly_path(str(path)))
+        return f"{label} handoff\n{friendly}\n\n{tail}"
 
     # --- lifecycle -------------------------------------------------------
     async def run(self) -> None:
