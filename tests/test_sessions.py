@@ -49,6 +49,9 @@ class FakeClaudeSDKClient:
     """Records construction + drives a scripted response stream per turn."""
 
     instances: list["FakeClaudeSDKClient"] = []
+    # When True, every new client's connect() raises (simulates a broken
+    # project). Tests flip this to exercise restart/connect-failure paths.
+    fail_connect: bool = False
 
     def __init__(self, options=None):
         self.options = options
@@ -61,6 +64,8 @@ class FakeClaudeSDKClient:
         FakeClaudeSDKClient.instances.append(self)
 
     async def connect(self):
+        if type(self).fail_connect:
+            raise RuntimeError("connect boom")
         self.connected = True
 
     async def disconnect(self):
@@ -154,9 +159,11 @@ def make_sm(projects, store, on_outbound, cfg=None):
 @pytest.fixture(autouse=True)
 def _patch_sdk(monkeypatch):
     FakeClaudeSDKClient.instances = []
+    FakeClaudeSDKClient.fail_connect = False
     monkeypatch.setattr(sessions_mod, "ClaudeSDKClient", FakeClaudeSDKClient)
     yield
     FakeClaudeSDKClient.instances = []
+    FakeClaudeSDKClient.fail_connect = False
 
 
 async def _wait_for(predicate, tries=300, delay=0.005):
@@ -865,3 +872,294 @@ async def test_stop_all_disconnects_every_running_client():
     assert all(c.disconnected for c in FakeClaudeSDKClient.instances)
     assert sm.is_running("qwing") is False
     assert sm.is_running("beta") is False
+
+
+# --------------------------------------------------------------------------- #
+# start_all per-project isolation (problem 1)
+# --------------------------------------------------------------------------- #
+
+async def test_start_all_isolates_a_failing_project():
+    projects = [make_project("qwing"), make_project("beta", cwd="/tmp/beta")]
+    store = FakeStore(enabled={"qwing": True, "beta": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm(projects, store, on_outbound)
+
+    orig_start = sm._start
+
+    async def flaky_start(name):
+        if name == "qwing":
+            raise RuntimeError("connect boom")
+        await orig_start(name)
+
+    sm._start = flaky_start
+
+    # Must NOT raise even though qwing's start blows up.
+    await sm.start_all()
+
+    assert sm.is_running("qwing") is False
+    assert sm.is_running("beta") is True
+    fails = [o for o in outbound if o.project == "qwing"]
+    assert fails, "expected a failure Outbound for qwing"
+    assert "nepavyko paleisti" in fails[0].text
+    assert fails[0].spoken == "nepavyko paleisti"
+
+    await sm.stop_all()
+
+
+# --------------------------------------------------------------------------- #
+# supervised auto-restart (problem 2a)
+# --------------------------------------------------------------------------- #
+
+def _fast_backoff(sm):
+    sm._restart_backoff_base = 0
+    sm._restart_backoff_cap = 0
+
+
+async def test_crash_schedules_supervised_restart_and_resumes():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True}, session_ids={"qwing": "prev-9"})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    _fast_backoff(sm)
+    await sm.start_all()
+
+    client0 = FakeClaudeSDKClient.instances[0]
+    client0.scripted_turns = [RuntimeError("boom")]
+
+    await sm.deliver("qwing", "go")
+
+    # The crash schedules a supervised restart; a new client resumes.
+    assert await _wait_for(lambda: len(FakeClaudeSDKClient.instances) >= 2)
+    assert await _wait_for(lambda: sm.is_running("qwing"))
+    client1 = FakeClaudeSDKClient.instances[1]
+    assert client1.options.resume == "prev-9"
+    assert client1.connected is True
+
+    await sm.stop_all()
+
+
+async def test_attempt_counter_resets_after_successful_turn():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    _fast_backoff(sm)
+    await sm.start_all()
+
+    client0 = FakeClaudeSDKClient.instances[0]
+    client0.scripted_turns = [RuntimeError("boom")]
+
+    await sm.deliver("qwing", "crash")
+
+    assert await _wait_for(
+        lambda: sm.is_running("qwing") and len(FakeClaudeSDKClient.instances) >= 2
+    )
+    # After a restart but before any successful turn the counter is non-zero.
+    assert sm._attempts.get("qwing") == 1
+
+    # A turn that completes cleanly resets the counter.
+    await sm.deliver("qwing", "ok now")
+    assert await _wait_for(lambda: sm._attempts.get("qwing", 0) == 0)
+
+    await sm.stop_all()
+
+
+async def test_restart_gives_up_after_max_failures_and_disables():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    _fast_backoff(sm)
+    sm._max_restart_attempts = 3
+    await sm.start_all()
+
+    client0 = FakeClaudeSDKClient.instances[0]
+    client0.scripted_turns = [RuntimeError("boom")]
+    # Every restart's connect fails from now on.
+    FakeClaudeSDKClient.fail_connect = True
+
+    await sm.deliver("qwing", "crash")
+
+    assert await _wait_for(lambda: store._enabled.get("qwing") is False)
+    giveup = [o for o in outbound if "išjungiau" in o.text]
+    assert giveup, "expected a give-up Outbound"
+    assert "/on qwing" in giveup[0].text
+    assert sm.is_running("qwing") is False
+    # No lingering supervisor task.
+    assert await _wait_for(lambda: "qwing" not in sm._restart_tasks)
+
+    FakeClaudeSDKClient.fail_connect = False
+    await sm.stop_all()
+
+
+async def test_intentional_disable_does_not_auto_restart():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    _fast_backoff(sm)
+    await sm.start_all()
+    assert sm.is_running("qwing") is True
+
+    await sm.set_enabled("qwing", False)
+    assert sm.is_running("qwing") is False
+
+    # Give the loop ample time to (wrongly) resurrect the session.
+    await asyncio.sleep(0.02)
+    assert sm.is_running("qwing") is False
+    assert sm._restart_tasks == {}
+    assert len(FakeClaudeSDKClient.instances) == 1
+
+    await sm.stop_all()
+
+
+async def test_stop_all_cancels_a_pending_restart():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    # Long backoff so the supervisor is still sleeping when we stop.
+    sm._restart_backoff_base = 100
+    sm._restart_backoff_cap = 100
+    await sm.start_all()
+
+    client0 = FakeClaudeSDKClient.instances[0]
+    client0.scripted_turns = [RuntimeError("boom")]
+    await sm.deliver("qwing", "crash")
+
+    assert await _wait_for(lambda: "qwing" in sm._restart_tasks)
+
+    await sm.stop_all()
+
+    assert sm._restart_tasks == {}
+    assert sm.is_running("qwing") is False
+    # The pending supervisor never resurrected the session.
+    assert len(FakeClaudeSDKClient.instances) == 1
+
+
+# --------------------------------------------------------------------------- #
+# deliver recovery (problem 2b)
+# --------------------------------------------------------------------------- #
+
+async def test_deliver_recovery_starts_enabled_session_and_delivers():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True}, session_ids={"qwing": "s-42"})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    # No start_all: the project is enabled but has no live session.
+    assert sm.is_running("qwing") is False
+
+    await sm.deliver("qwing", "wake up")
+
+    assert await _wait_for(lambda: sm.is_running("qwing"))
+    client = FakeClaudeSDKClient.instances[0]
+    assert client.options.resume == "s-42"
+    assert await _wait_for(lambda: client.queries == ["wake up"])
+
+    await sm.stop_all()
+
+
+async def test_deliver_recovery_no_double_start_when_called_twice():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    assert sm.is_running("qwing") is False
+
+    await asyncio.gather(
+        sm.deliver("qwing", "one"),
+        sm.deliver("qwing", "two"),
+    )
+
+    assert await _wait_for(lambda: sm.is_running("qwing"))
+    # Exactly one client despite two racing delivers.
+    assert len(FakeClaudeSDKClient.instances) == 1
+    client = FakeClaudeSDKClient.instances[0]
+    assert await _wait_for(lambda: set(client.queries) == {"one", "two"})
+
+    await sm.stop_all()
+
+
+# --------------------------------------------------------------------------- #
+# error ResultMessage with no assistant text (problem 3)
+# --------------------------------------------------------------------------- #
+
+async def test_error_result_without_text_emits_outbound():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    err_result = ResultMessage(
+        subtype="error_max_turns",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=True,
+        num_turns=1,
+        session_id="s-err",
+    )
+    err_result_with_text = ResultMessage(
+        subtype="error_during_execution",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=True,
+        num_turns=1,
+        session_id="s-err2",
+        result="explicit error detail",
+    )
+    client.scripted_turns = [[err_result], [err_result_with_text]]
+
+    await sm.deliver("qwing", "do too much")
+    assert await _wait_for(
+        lambda: any(
+            o.project == "qwing" and "klaida" in o.text for o in outbound
+        )
+    )
+    first = [o for o in outbound if o.project == "qwing" and "klaida" in o.text][-1]
+    assert "error_max_turns" in first.text  # falls back to subtype
+    assert first.spoken.strip()  # not silent
+
+    await sm.deliver("qwing", "again")
+    assert await _wait_for(
+        lambda: any(o.text == "explicit error detail" for o in outbound)
+    )
+
+    await sm.stop_all()

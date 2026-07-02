@@ -71,6 +71,15 @@ _SHUTDOWN = None
 
 _ERROR_SPOKEN = "The session crashed. Check the text."
 _SILENT_SPOKEN = " "
+_TURN_ERROR_SPOKEN = "Turas baigėsi klaida."
+_GIVEUP_SPOKEN = "Sesija nekyla, ją išjungiau."
+
+# Supervised auto-restart policy. Backoff grows exponentially from *base*
+# seconds, doubling per attempt, capped at *cap*. After *max* consecutive
+# restart cycles without a successful turn the project is disabled.
+_RESTART_BACKOFF_BASE = 1.0
+_RESTART_BACKOFF_CAP = 30.0
+_RESTART_MAX_ATTEMPTS = 5
 
 
 class _Session:
@@ -103,6 +112,21 @@ class SessionManager:
         self._ask_user = ask_user
         self._sessions: dict[str, _Session] = {}
 
+        # Supervision state (crash recovery / deliver recovery).
+        # _restart_tasks: pending backoff->restart supervisor task per project.
+        # _attempts: consecutive restart cycles since the last successful turn.
+        # _locks: per-project start lock guarding double-start races.
+        # _stopping: projects whose stop is intentional (must not auto-restart).
+        # _closed: set once by stop_all so no new restart is ever scheduled.
+        self._restart_tasks: dict[str, asyncio.Task] = {}
+        self._attempts: dict[str, int] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._stopping: set[str] = set()
+        self._closed = False
+        self._restart_backoff_base = _RESTART_BACKOFF_BASE
+        self._restart_backoff_cap = _RESTART_BACKOFF_CAP
+        self._max_restart_attempts = _RESTART_MAX_ATTEMPTS
+
     # ------------------------------------------------------------------ #
     # Lookup
     # ------------------------------------------------------------------ #
@@ -134,20 +158,75 @@ class SessionManager:
     # ------------------------------------------------------------------ #
 
     async def start_all(self) -> None:
-        """Start a session task for each project where store.is_enabled is True."""
+        """Start a session task for each enabled project, in isolation.
+
+        One project's ``client.connect()`` failure must never take down the
+        whole boot: each start is wrapped so a failure is logged, surfaced to
+        the user, and the next project still starts.
+        """
         for name in self._projects:
-            if await self._store.is_enabled(name):
+            if not await self._store.is_enabled(name):
+                continue
+            try:
                 await self._start(name)
+            except Exception as err:  # noqa: BLE001 - boot must not die
+                logger.exception("start_all: failed to start %s", name)
+                try:
+                    await self._on_outbound(
+                        Outbound(
+                            project=name,
+                            text=f"{name}: nepavyko paleisti — {err}",
+                            spoken="nepavyko paleisti",
+                        )
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception(
+                        "start_all: failed to emit start failure for %s", name
+                    )
 
     async def deliver(self, project: str, text: str) -> None:
-        """Enqueue a user turn. No-op if the session is not running."""
+        """Enqueue a user turn.
+
+        If the project has no live session but is still enabled (e.g. it is in
+        the down window after a crash, before the supervisor has resumed it),
+        (re)start the session first so the turn is not black-holed. Unknown or
+        disabled projects remain a no-op.
+        """
         sess = self._sessions.get(project)
         if sess is None:
-            return
+            if project not in self._projects:
+                return
+            if not await self._store.is_enabled(project):
+                return
+            await self._ensure_started(project)
+            sess = self._sessions.get(project)
+            if sess is None:
+                return
         position = sess.queue.qsize() + 1
         await sess.queue.put(text)
         if position > 1:
             await self._emit_status(project, f"Queued: {position}.")
+
+    async def _ensure_started(self, name: str) -> None:
+        """Start *name* if not running, guarding against double-start races.
+
+        A per-project lock serializes concurrent recovery starts; any pending
+        restart supervisor is cancelled first so it cannot start a second
+        client. A failed start is logged (deliver stays best-effort).
+        """
+        if name in self._sessions:
+            return
+        lock = self._locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            if name in self._sessions:
+                return
+            await self._cancel_restart(name)
+            if name in self._sessions:
+                return
+            try:
+                await self._start(name)
+            except Exception:  # noqa: BLE001 - deliver recovery is best-effort
+                logger.exception("deliver recovery: failed to start %s", name)
 
     async def interrupt(self, project: str) -> bool:
         """Cancel the running session, drop queued turns, and restart if enabled."""
@@ -190,8 +269,13 @@ class SessionManager:
             await self._start(project)
 
     async def stop_all(self) -> None:
-        """Stop and disconnect every running session."""
-        for name in list(self._sessions):
+        """Stop every running session and cancel every pending restart.
+
+        Sets ``_closed`` first so a crash racing with shutdown cannot schedule
+        a new restart that would resurrect a session after we have torn down.
+        """
+        self._closed = True
+        for name in set(self._sessions) | set(self._restart_tasks):
             await self._stop(name)
 
     # ------------------------------------------------------------------ #
@@ -353,27 +437,49 @@ class SessionManager:
             logger.exception("failed to close VS Code for %s", project.cwd)
 
     async def _stop(self, name: str) -> None:
-        sess = self._sessions.pop(name, None)
-        if sess is None:
-            return
-        # Ask the loop to exit cleanly, then cancel as a fallback.
+        # Mark the stop intentional for the whole duration so a crash racing
+        # in a sibling coroutine cannot be misread as needing a restart, and
+        # cancel any pending restart supervisor before touching the session.
+        self._stopping.add(name)
         try:
-            sess.queue.put_nowait(_SHUTDOWN)
-        except asyncio.QueueFull:  # pragma: no cover - unbounded queue
-            pass
-        if sess.task is not None:
-            sess.task.cancel()
+            await self._cancel_restart(name)
+            sess = self._sessions.pop(name, None)
+            if sess is None:
+                return
+            # Ask the loop to exit cleanly, then cancel as a fallback.
             try:
-                await sess.task
-            except asyncio.CancelledError:
+                sess.queue.put_nowait(_SHUTDOWN)
+            except asyncio.QueueFull:  # pragma: no cover - unbounded queue
                 pass
-            except Exception:  # pragma: no cover - defensive
-                logger.exception("session %s task raised during stop", name)
-        if sess.client is not None:
-            try:
-                await sess.client.disconnect()
-            except Exception:  # pragma: no cover - defensive
-                logger.exception("session %s disconnect failed", name)
+            if sess.task is not None:
+                sess.task.cancel()
+                try:
+                    await sess.task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("session %s task raised during stop", name)
+            if sess.client is not None:
+                try:
+                    await sess.client.disconnect()
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("session %s disconnect failed", name)
+        finally:
+            self._stopping.discard(name)
+            self._attempts.pop(name, None)
+
+    async def _cancel_restart(self, name: str) -> None:
+        """Cancel and await a project's pending restart supervisor, if any."""
+        task = self._restart_tasks.pop(name, None)
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("restart task for %s raised during cancel", name)
 
     async def _run_loop(self, sess: _Session) -> None:
         """Drain the queue, forward turns to the SDK, emit assistant output.
@@ -393,6 +499,9 @@ class SessionManager:
                 await append_transcript(sess.project.cwd, "user", text)
                 await client.query(text)
                 parts: list[str] = []
+                result_error = False
+                result_subtype: str | None = None
+                result_detail: str | None = None
                 async for msg in client.receive_response():
                     if isinstance(msg, AssistantMessage):
                         for block in msg.content:
@@ -402,17 +511,32 @@ class SessionManager:
                         session_id = getattr(msg, "session_id", None)
                         if session_id:
                             await self._store.set_session_id(name, session_id)
+                        if getattr(msg, "is_error", False):
+                            result_error = True
+                            result_subtype = getattr(msg, "subtype", None)
+                            result_detail = getattr(msg, "result", None)
                 joined = "\n".join(p for p in parts if p).strip()
                 if joined:
                     await append_transcript(sess.project.cwd, "assistant", joined)
                     await self._on_outbound(
                         Outbound(project=name, text=joined, spoken="")
                     )
+                elif result_error:
+                    # The SDK ended the turn in error with no assistant text;
+                    # surface something so the user is not left in silence.
+                    detail = result_detail or f"Turas baigėsi klaida: {result_subtype}"
+                    await self._on_outbound(
+                        Outbound(project=name, text=detail, spoken=_TURN_ERROR_SPOKEN)
+                    )
+                # A turn completed without raising: the session is healthy,
+                # so reset the consecutive-restart counter.
+                self._attempts.pop(name, None)
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 - C8: never crash the service
                 logger.exception("session %s crashed on a turn", name)
                 await self._emit_crash(sess, err)
+                self._schedule_restart(name)
                 return
 
     async def _emit_crash(self, sess: _Session, err: Exception) -> None:
@@ -435,6 +559,91 @@ class SessionManager:
             )
         except Exception:  # pragma: no cover - defensive
             logger.exception("failed to emit crash Outbound for %s", name)
+
+    # ------------------------------------------------------------------ #
+    # Supervised restart
+    # ------------------------------------------------------------------ #
+
+    def _schedule_restart(self, name: str) -> None:
+        """Schedule a supervised restart for a crashed project (idempotent).
+
+        Never schedules for an intentional stop or after shutdown. At most one
+        supervisor per project runs at a time.
+        """
+        if self._closed or name in self._stopping:
+            return
+        existing = self._restart_tasks.get(name)
+        if existing is not None and not existing.done():
+            return
+        self._restart_tasks[name] = asyncio.create_task(
+            self._supervise_restart(name)
+        )
+
+    def _restart_backoff(self, attempt: int) -> float:
+        return min(
+            self._restart_backoff_base * (2 ** (attempt - 1)),
+            self._restart_backoff_cap,
+        )
+
+    async def _supervise_restart(self, name: str) -> None:
+        """Back off, then resume a crashed session while it is still wanted.
+
+        ``_attempts[name]`` counts consecutive restart cycles since the last
+        successful turn (a healthy turn resets it in ``_run_loop``). After
+        ``_max_restart_attempts`` cycles the project is disabled and the user
+        is told. Bails out (no restart) if the project was disabled, is being
+        intentionally stopped, or was already brought back up meanwhile.
+        """
+        try:
+            while True:
+                attempt = self._attempts.get(name, 0) + 1
+                self._attempts[name] = attempt
+                if attempt > self._max_restart_attempts:
+                    await self._store.set_enabled(name, False)
+                    await self._emit_giveup(name)
+                    self._attempts.pop(name, None)
+                    return
+
+                await asyncio.sleep(self._restart_backoff(attempt))
+
+                if self._closed or name in self._stopping:
+                    return
+                if not await self._store.is_enabled(name):
+                    return
+                if name in self._sessions:
+                    # deliver-recovery (or another path) already resumed it.
+                    return
+
+                try:
+                    await self._start(name)
+                except Exception:  # noqa: BLE001 - retry with longer backoff
+                    logger.exception(
+                        "restart %s failed (attempt %d)", name, attempt
+                    )
+                    continue
+                else:
+                    # Session is back up. If it crashes again a fresh
+                    # supervisor is scheduled by _run_loop.
+                    return
+        finally:
+            if self._restart_tasks.get(name) is asyncio.current_task():
+                self._restart_tasks.pop(name, None)
+
+    async def _emit_giveup(self, name: str) -> None:
+        n = self._max_restart_attempts
+        try:
+            await self._on_outbound(
+                Outbound(
+                    project=name,
+                    text=(
+                        f"po {n} bandymų sesija nekyla, išjungiau — "
+                        f"/on {name} kai pataisysi"
+                    ),
+                    spoken=_GIVEUP_SPOKEN,
+                )
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("failed to emit give-up Outbound for %s", name)
 
     async def _emit_status(self, project: str, text: str) -> None:
         await self._on_outbound(
