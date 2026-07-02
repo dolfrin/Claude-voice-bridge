@@ -39,6 +39,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ResultMessage,
     TextBlock,
+    ToolUseBlock,
 )
 
 from .approvals import ApprovalManager, make_can_use_tool
@@ -90,6 +91,64 @@ _RESTART_BACKOFF_BASE = 1.0
 _RESTART_BACKOFF_CAP = 30.0
 _RESTART_MAX_ATTEMPTS = 5
 
+# Opt-in verbose tool-activity streaming (per project, default OFF). When a
+# project is verbose, each ToolUseBlock the agent runs is rendered to a compact
+# one-line preview and COALESCED into a buffer, flushed as ONE text-only
+# Outbound (spoken="" => no TTS) once the buffer reaches this many lines OR
+# before the turn's final assistant text — whichever comes first. Size-based
+# batching keeps message volume bounded AND makes flushing deterministic.
+_VERBOSE_BATCH_SIZE = 4
+# Cap the per-line input preview so a huge command/argument can never blow up
+# the "one compact line" invariant or leak large content.
+_VERBOSE_PREVIEW_CHARS = 60
+
+
+def _verbose_preview(value: object, limit: int = _VERBOSE_PREVIEW_CHARS) -> str:
+    """Collapse *value* to a single short line for a tool-activity preview.
+
+    Whitespace (including newlines) is collapsed to single spaces so a
+    multi-line command stays one line, then truncated to *limit* chars with an
+    ellipsis. Never raises."""
+    text = " ".join(str(value).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _tool_activity_line(block: ToolUseBlock) -> str:
+    """Render a ToolUseBlock as a compact ``🔧 {tool}: {short}`` line.
+
+    NEVER includes large content and NEVER raises: a malformed/missing input
+    (e.g. ``None`` instead of a dict) degrades to just ``🔧 {tool}``. The
+    ``short`` preview is tool-aware — Bash shows the command, Write/Edit/
+    MultiEdit/Read show the file basename, everything else shows a short value
+    from a small set of common keys.
+    """
+    try:
+        tool = getattr(block, "name", None) or "tool"
+        raw = getattr(block, "input", None)
+        inp = raw if isinstance(raw, dict) else {}
+        short = _tool_activity_short(tool, inp)
+    except Exception:  # noqa: BLE001 - a preview must never crash the turn
+        return "🔧 tool"
+    return f"🔧 {tool}: {short}" if short else f"🔧 {tool}"
+
+
+def _tool_activity_short(tool: str, inp: dict) -> str:
+    """Tiny, content-free preview of a tool's input. Never raises."""
+    if tool == "Bash":
+        return _verbose_preview(inp.get("command", ""))
+    if tool in {"Write", "Edit", "MultiEdit", "Read"}:
+        path = inp.get("file_path") or inp.get("path") or ""
+        return Path(str(path)).name if str(path).strip() else ""
+    # Fallback: the first short, meaningful string value we recognize.
+    for key in ("pattern", "query", "url", "prompt", "description",
+                "command", "path", "file_path", "name"):
+        value = inp.get(key)
+        if value:
+            return _verbose_preview(value)
+    return ""
+
 
 class _Session:
     """Live state for one project's ClaudeSDKClient."""
@@ -138,6 +197,10 @@ class SessionManager:
         # Seconds of user-facing silence within a turn before the "still
         # working" heartbeat fires. An instance attribute so tests set it tiny.
         self.heartbeat_interval = _HEARTBEAT_INTERVAL
+        # Number of buffered tool-activity lines that triggers a coalesced
+        # flush in a verbose turn. An instance attribute so tests set it tiny
+        # for deterministic size-based batching.
+        self.verbose_batch_size = _VERBOSE_BATCH_SIZE
 
     # ------------------------------------------------------------------ #
     # Lookup
@@ -281,6 +344,20 @@ class SessionManager:
         if project in self._sessions:
             await self._stop(project)
             await self._start(project)
+
+    async def set_verbose(self, project: str | None, on: bool) -> None:
+        """Toggle per-project verbose tool-activity streaming (in-memory).
+
+        ``project=None`` targets every project. An unknown project is a no-op.
+        The flag lives on the shared :class:`ProjectConfig` (the same object the
+        live session reads), so a running turn picks it up on its NEXT message
+        with no restart. Not persisted — verbose is a transient view toggle.
+        """
+        targets = [project] if project is not None else list(self._projects)
+        for name in targets:
+            cfg = self._projects.get(name)
+            if cfg is not None:
+                cfg.verbose = on
 
     async def stop_all(self) -> None:
         """Stop every running session and cancel every pending restart.
@@ -544,6 +621,13 @@ class SessionManager:
                 result_error = False
                 result_subtype: str | None = None
                 result_detail: str | None = None
+                # Verbose tool-activity streaming (opt-in, per project). Read
+                # live from the shared ProjectConfig so a /verbose toggle takes
+                # effect on the next turn without a restart. Lines are buffered
+                # and COALESCED into text-only Outbounds; when OFF the buffer
+                # stays empty and behavior is unchanged.
+                verbose = bool(getattr(sess.project, "verbose", False))
+                activity_buffer: list[str] = []
                 # Per-turn "still working" watchdog. It fires during genuine
                 # silence and is reset whenever we receive assistant text. It is
                 # always cancelled AND awaited in the finally so it can never
@@ -559,6 +643,18 @@ class SessionManager:
                                 if isinstance(block, TextBlock):
                                     parts.append(block.text)
                                     activity.set()  # reset the heartbeat timer
+                                elif verbose and isinstance(block, ToolUseBlock):
+                                    activity_buffer.append(
+                                        _tool_activity_line(block)
+                                    )
+                                    # Size-based coalescing: flush ONE text-only
+                                    # Outbound once the buffer fills, bounding
+                                    # message volume even on a tool-heavy turn.
+                                    if len(activity_buffer) >= self.verbose_batch_size:
+                                        await self._flush_verbose(
+                                            name, activity_buffer
+                                        )
+                                        activity.set()  # a flush is progress
                         elif isinstance(msg, ResultMessage):
                             session_id = getattr(msg, "session_id", None)
                             if session_id:
@@ -574,6 +670,10 @@ class SessionManager:
                         await watchdog
                     except asyncio.CancelledError:
                         pass
+                # Flush any remaining buffered verbose activity BEFORE the final
+                # assistant text (or the error-detail Outbound), so the last
+                # thing the user sees is the answer, not stale tool lines.
+                await self._flush_verbose(name, activity_buffer)
                 joined = "\n".join(p for p in parts if p).strip()
                 if joined:
                     await append_transcript(sess.project.cwd, "assistant", joined)
@@ -631,6 +731,26 @@ class SessionManager:
             # crash the turn loop; it would otherwise be misread as a
             # session crash by _run_loop's outer except.
             logger.exception("usage capture failed for %s", name)
+
+    async def _flush_verbose(self, name: str, buffer: list[str]) -> None:
+        """Emit buffered verbose tool-activity as ONE text-only Outbound.
+
+        TEXT-ONLY (``spoken=""``) so it triggers NO TTS — coalescing plus
+        no-audio is what keeps verbose from spamming. Never raises: a failure
+        here must not crash the turn or trigger a spurious restart (mirrors the
+        ``_capture_usage`` / heartbeat guards, since ``_run_loop``'s outer
+        except would otherwise misread it as a turn crash). The buffer is
+        CLEARED unconditionally — even on a send failure — so the same lines are
+        never re-emitted on a later flush.
+        """
+        if not buffer:
+            return
+        text = "\n".join(buffer)
+        buffer.clear()
+        try:
+            await self._on_outbound(Outbound(project=name, text=text, spoken=""))
+        except Exception:  # noqa: BLE001 - a verbose flush must never crash the turn
+            logger.exception("verbose activity flush failed for %s", name)
 
     async def _heartbeat_loop(self, name: str, activity: asyncio.Event) -> None:
         """Emit a "still working" Outbound after each interval of silence.

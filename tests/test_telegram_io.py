@@ -96,6 +96,9 @@ class FakeControls:
     async def set_mode(self, project, mode):
         self.calls.append(("set_mode", project, mode))
 
+    async def set_verbose(self, project, on):
+        self.calls.append(("set_verbose", project, on))
+
     async def set_voice(self, project, voice):
         self.calls.append(("set_voice", project, voice))
 
@@ -1501,6 +1504,52 @@ async def test_cmd_voice_set_for_project():
 
 
 @pytest.mark.asyncio
+async def test_cmd_verbose_on_sets_project():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/verbose on qwing")
+
+    await io._cmd_verbose(upd, make_ctx(["on", "qwing"]))
+
+    assert ("set_verbose", "qwing", True) in controls.calls
+    upd.message.reply_text.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cmd_verbose_off_all_projects():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/verbose off")
+
+    await io._cmd_verbose(upd, make_ctx(["off"]))
+
+    assert ("set_verbose", None, False) in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_verbose_defaults_to_on_when_no_state_arg():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/verbose")
+
+    await io._cmd_verbose(upd, make_ctx([]))
+
+    assert ("set_verbose", None, True) in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_verbose_non_owner_ignored():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    upd = make_cmd_update("/verbose on qwing", user_id=999)
+
+    await io._cmd_verbose(upd, make_ctx(["on", "qwing"]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cmd_engine_switches_backend():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
@@ -1726,7 +1775,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off", "stop",
-            "mode", "voice", "engine", "recap", "cost"} == registered_names
+            "mode", "voice", "verbose", "engine", "recap", "cost"} == registered_names
 
 
 @pytest.mark.asyncio

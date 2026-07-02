@@ -6,6 +6,10 @@ projects:
     autonomy: safe
     voice: alloy
     system_prompt_extra: ""
+    # Opt-in live tool-activity streaming (default false). When true, the
+    # session streams compact, text-only tool-activity while it works, so a
+    # glance at the phone shows progress. Toggle live with /verbose.
+    verbose: false
 
   - name: api
     display_name: API

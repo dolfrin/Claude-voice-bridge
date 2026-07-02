@@ -11,7 +11,12 @@ import asyncio
 
 import pytest
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+)
 
 import voice_bridge.sessions as sessions_mod
 from voice_bridge.sessions import SessionManager
@@ -28,6 +33,14 @@ def assistant(*texts: str) -> AssistantMessage:
         content=[TextBlock(text=t) for t in texts],
         model="claude-test",
     )
+
+
+def tool(name: str, _id: str = "t", **inp) -> ToolUseBlock:
+    return ToolUseBlock(id=_id, name=name, input=inp)
+
+
+def tool_msg(*blocks) -> AssistantMessage:
+    return AssistantMessage(content=list(blocks), model="claude-test")
 
 
 def result(
@@ -1495,5 +1508,189 @@ async def test_concurrent_start_builds_single_client(monkeypatch):
 
     assert sm.is_running("qwing") is True
     assert len(FakeClaudeSDKClient.instances) == 1
+
+    await sm.stop_all()
+
+
+# --------------------------------------------------------------------------- #
+# verbose tool-activity streaming (B3d)
+# --------------------------------------------------------------------------- #
+
+def _activity(outbound):
+    """Tool-activity Outbounds are the text-only ones whose text starts 🔧."""
+    return [o for o in outbound if o.text.startswith("🔧")]
+
+
+async def test_set_verbose_toggles_flag_per_project_and_all():
+    projects = [make_project("qwing"), make_project("beta", cwd="/tmp/beta")]
+    store = FakeStore(enabled={"qwing": True, "beta": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm(projects, store, on_outbound)
+
+    await sm.set_verbose("qwing", True)
+    assert sm.project("qwing").verbose is True
+    assert sm.project("beta").verbose is False
+
+    await sm.set_verbose(None, True)
+    assert sm.project("qwing").verbose is True
+    assert sm.project("beta").verbose is True
+
+    await sm.set_verbose(None, False)
+    assert sm.project("qwing").verbose is False
+    assert sm.project("beta").verbose is False
+
+    # unknown project is a no-op (must not raise)
+    await sm.set_verbose("nope", True)
+
+
+async def test_verbose_streams_coalesced_tool_activity_then_final_text():
+    project = make_project("qwing", verbose=True)
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    sm.verbose_batch_size = 2  # deterministic size-based flush
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[
+        tool_msg(
+            tool("Bash", command="npm run build && echo done"),
+            tool("Read", file_path="/home/x/src/app.py"),
+            tool("Write", file_path="/home/x/out.txt",
+                 content="SECRETLARGECONTENT" * 100),
+        ),
+        assistant("All done."),
+        result("s-1"),
+    ]]
+
+    await sm.deliver("qwing", "go")
+
+    assert await _wait_for(lambda: any(o.text == "All done." for o in outbound))
+
+    acts = _activity(outbound)
+    # batch_size=2 with 3 tool blocks -> flush of 2, then remaining 1 before text
+    assert len(acts) == 2
+    assert all(a.spoken == "" for a in acts), "activity must be TEXT-ONLY (no TTS)"
+
+    first_lines = acts[0].text.split("\n")
+    assert first_lines == [
+        "🔧 Bash: npm run build && echo done",
+        "🔧 Read: app.py",
+    ]
+    assert acts[1].text == "🔧 Write: out.txt"
+
+    # NEVER include large content
+    assert "SECRETLARGECONTENT" not in "\n".join(a.text for a in acts)
+
+    # the final assistant text still lands (make_outbound derives its TTS)
+    final = outbound[-1]
+    assert final.text == "All done."
+    assert final.spoken == ""
+
+    # activity is emitted BEFORE the final text
+    assert outbound.index(acts[-1]) < outbound.index(final)
+
+    await sm.stop_all()
+
+
+async def test_verbose_off_emits_no_tool_activity_regression():
+    project = make_project("qwing")  # verbose defaults OFF
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    sm.verbose_batch_size = 2
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[
+        tool_msg(
+            tool("Bash", command="ls -la"),
+            tool("Read", file_path="/home/x/src/app.py"),
+        ),
+        assistant("All done."),
+        result("s-1"),
+    ]]
+
+    await sm.deliver("qwing", "go")
+    assert await _wait_for(lambda: any(o.text == "All done." for o in outbound))
+
+    assert _activity(outbound) == [], "verbose OFF must emit no tool activity"
+
+    await sm.stop_all()
+
+
+async def test_verbose_malformed_tool_block_does_not_crash_turn():
+    project = make_project("qwing", verbose=True)
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    sm.verbose_batch_size = 4
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    # input=None is malformed; a missing-key input must also be tolerated.
+    bad = ToolUseBlock(id="b", name="Bash", input=None)
+    empty = ToolUseBlock(id="e", name="Read", input={})
+    client.scripted_turns = [[
+        tool_msg(bad, empty),
+        assistant("Done."),
+        result("s-1"),
+    ]]
+
+    await sm.deliver("qwing", "go")
+    assert await _wait_for(lambda: any(o.text == "Done." for o in outbound))
+
+    # never crashed / restarted; session still healthy
+    assert sm.is_running("qwing")
+    assert not any("krito" in o.text.lower() for o in outbound)
+
+    await sm.stop_all()
+
+
+async def test_verbose_session_id_and_usage_still_captured():
+    project = make_project("qwing", verbose=True)
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    sm.verbose_batch_size = 2
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[
+        tool_msg(tool("Bash", command="make"), tool("Read", file_path="a.py")),
+        assistant("Done."),
+        result(
+            "sess-verbose",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            total_cost_usd=0.01,
+        ),
+    ]]
+
+    await sm.deliver("qwing", "go")
+    assert await _wait_for(lambda: len(store.usage_calls) >= 1)
+
+    assert store._session_ids["qwing"] == "sess-verbose"
+    call = store.usage_calls[0]
+    assert call["input_tokens"] == 10
+    assert call["output_tokens"] == 5
 
     await sm.stop_all()

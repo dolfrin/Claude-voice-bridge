@@ -69,6 +69,7 @@ class Controls(Protocol):
     async def enable_and_deliver(self, project: str, text: str) -> None: ...
     async def refresh_projects(self) -> int: ...
     async def set_mode(self, project: str | None, mode: str) -> None: ...
+    async def set_verbose(self, project: str | None, on: bool) -> None: ...
     async def set_voice(self, project: str | None, voice: str) -> None: ...
     async def set_engine(self, name: str) -> None: ...
     async def interrupt(self, project: str | None) -> str: ...
@@ -94,6 +95,7 @@ _BOT_COMMANDS = [
     BotCommand("stop", "⛔ Interrupt current work"),
     BotCommand("mode", "🛡 Change safe/full/ask mode"),
     BotCommand("voice", "🔊 List or set TTS voice"),
+    BotCommand("verbose", "🔧 Toggle live tool activity"),
     BotCommand("engine", "🧠 Change TTS backend"),
     BotCommand("recap", "🗒 What happened while away"),
     BotCommand("cost", "💰 Token & cost usage"),
@@ -1020,6 +1022,27 @@ class TelegramIO:
         await self.controls.set_mode(project, mode)
         await msg.reply_text(f"mode {mode} for {project or 'all'}")
 
+    async def _cmd_verbose(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Toggle live tool-activity streaming: ``/verbose [on|off] [project]``.
+
+        A leading ``on``/``off`` sets the state (defaults to ``on`` when
+        omitted); a trailing token is the project (else all projects)."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        args = list(context.args or [])
+        on = True
+        project = None
+        if args and args[0].lower() in {"on", "off"}:
+            on = args.pop(0).lower() == "on"
+        if args:
+            project = args[0]
+        await self.controls.set_verbose(project, on)
+        state = "on" if on else "off"
+        await msg.reply_text(f"verbose {state} for {project or 'all'}")
+
     async def _cmd_voice(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1154,6 +1177,8 @@ class TelegramIO:
             CommandHandler("mode", self._cmd_mode, filters=only_me))
         app.add_handler(
             CommandHandler("voice", self._cmd_voice, filters=only_me))
+        app.add_handler(
+            CommandHandler("verbose", self._cmd_verbose, filters=only_me))
         app.add_handler(
             CommandHandler("engine", self._cmd_engine, filters=only_me))
         app.add_handler(

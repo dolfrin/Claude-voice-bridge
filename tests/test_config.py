@@ -202,6 +202,32 @@ def test_load_projects_parses_fields_and_defaults(tmp_path):
     assert bridge.system_prompt_extra == ""
 
 
+def test_load_projects_parses_verbose_flag(tmp_path):
+    yaml_text = textwrap.dedent(
+        """
+        projects:
+          - name: loud
+            cwd: /tmp/loud
+            verbose: true
+          - name: quiet
+            cwd: /tmp/quiet
+        """
+    )
+    path = tmp_path / "projects.yaml"
+    path.write_text(yaml_text)
+
+    projects = load_projects(str(path))
+    by_name = {p.name: p for p in projects}
+    assert by_name["loud"].verbose is True
+    # default OFF when the key is absent
+    assert by_name["quiet"].verbose is False
+
+
+def test_project_config_verbose_defaults_false():
+    proj = ProjectConfig(name="x", cwd="/tmp/x")
+    assert proj.verbose is False
+
+
 def test_load_projects_missing_name_raises_clear_error(tmp_path):
     path = tmp_path / "projects.yaml"
     path.write_text("projects:\n  - cwd: /tmp/x\n")

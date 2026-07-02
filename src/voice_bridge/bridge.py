@@ -545,6 +545,7 @@ class _Controls:
                 "engine": self._cfg.tts_backend,
                 "last_active": last_active == name,
                 "cwd": getattr(proj, "cwd", "") if proj is not None else "",
+                "verbose": bool(getattr(proj, "verbose", False)) if proj is not None else False,
             }
 
     def snapshot(self) -> list[dict]:
@@ -559,6 +560,7 @@ class _Controls:
                 "engine": row["engine"],
                 "last_active": row["last_active"],
                 "cwd": row["cwd"],
+                "verbose": row.get("verbose", False),
             }
             for name, row in self._mirror.items()
         ]
@@ -621,6 +623,18 @@ class _Controls:
             if proj is not None:
                 proj.voice = voice  # so effective_voice picks it up
 
+    async def set_verbose(self, project: str | None, on: bool) -> None:
+        """Toggle live tool-activity streaming and mirror it for the snapshot.
+
+        In-memory only (verbose is a transient view toggle): flips the flag on
+        the SessionManager's ProjectConfig — where the live turn loop reads it —
+        and updates the mirror so a later /panel can surface it."""
+        targets = [project] if project is not None else list(self._mirror)
+        for name in targets:
+            if name in self._mirror:
+                self._mirror[name]["verbose"] = on
+            await self._sessions.set_verbose(name, on)
+
     async def refresh_projects(self) -> int:
         explicit = load_projects()
         discovered: list[ProjectConfig] = []
@@ -650,6 +664,7 @@ class _Controls:
                 "engine": self._cfg.tts_backend,
                 "last_active": last_active == project.name,
                 "cwd": project.cwd,
+                "verbose": bool(getattr(project, "verbose", False)),
             }
         return len(new_projects)
 
@@ -769,6 +784,9 @@ async def build() -> Wiring:
 
         async def set_mode(self, project, mode):
             await sessions_ref["sm"].set_mode(project, mode)
+
+        async def set_verbose(self, project, on):
+            await sessions_ref["sm"].set_verbose(project, on)
 
         async def interrupt(self, project):
             return await sessions_ref["sm"].interrupt(project)

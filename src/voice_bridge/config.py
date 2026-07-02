@@ -47,6 +47,10 @@ class ProjectConfig:
     voice: str | None = None
     model: str | None = None
     system_prompt_extra: str = ""
+    # Opt-in live tool-activity streaming (default OFF). When True the session
+    # emits compact, text-only, coalesced tool-activity Outbounds during a turn
+    # so a glance at the phone shows progress. Toggled live via /verbose.
+    verbose: bool = False
 
 
 def _require(env: Mapping[str, str], key: str) -> str:
@@ -172,6 +176,7 @@ def load_projects(path: str = "projects.yaml") -> list[ProjectConfig]:
                 voice=raw.get("voice"),
                 model=raw.get("model"),
                 system_prompt_extra=raw.get("system_prompt_extra") or "",
+                verbose=bool(raw.get("verbose", False)),
             )
         )
     return projects

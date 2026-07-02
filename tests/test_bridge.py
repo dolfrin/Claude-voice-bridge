@@ -136,6 +136,7 @@ class FakeSessions:
         self.delivered: list[tuple[str, str]] = []
         self.enabled_calls: list[tuple[str, bool]] = []
         self.mode_calls: list[tuple[str, str]] = []
+        self.verbose_calls: list[tuple[str, bool]] = []
         self.interrupt_calls: list[str] = []
         self.started = 0
         self.stopped = 0
@@ -163,6 +164,9 @@ class FakeSessions:
 
     async def set_mode(self, project, mode):
         self.mode_calls.append((project, mode))
+
+    async def set_verbose(self, project, on):
+        self.verbose_calls.append((project, on))
 
     async def interrupt(self, project):
         self.interrupt_calls.append(project)
@@ -974,7 +978,7 @@ async def test_controls_snapshot_sync_exact_keys():
     for row in snap:
         assert set(row.keys()) == {
             "project", "enabled", "mode", "voice", "engine", "last_active",
-            "cwd", "display_name",
+            "cwd", "display_name", "verbose",
         }
     by_name = {r["project"]: r for r in snap}
     assert by_name["qwing"]["enabled"] is True
@@ -1083,6 +1087,32 @@ async def test_controls_set_mode_sends_notice(monkeypatch):
     assert sessions.mode_calls == [("qwing", "ask")]
     assert len(telegram.questions) == 1
     assert "ask" in telegram.questions[0][1]
+
+
+@pytest.mark.asyncio
+async def test_controls_set_verbose_updates_mirror_and_sessions():
+    controls, sessions, *_ = _make_controls()
+    await controls.seed()
+    # default OFF everywhere
+    assert all(r["verbose"] is False for r in controls.snapshot())
+
+    await controls.set_verbose("qwing", True)
+
+    assert sessions.verbose_calls == [("qwing", True)]
+    snap = {r["project"]: r for r in controls.snapshot()}
+    assert snap["qwing"]["verbose"] is True
+    assert snap["othersapp"]["verbose"] is False
+
+
+@pytest.mark.asyncio
+async def test_controls_set_verbose_all_projects():
+    controls, sessions, *_ = _make_controls()
+    await controls.seed()
+
+    await controls.set_verbose(None, True)
+
+    assert sorted(sessions.verbose_calls) == [("othersapp", True), ("qwing", True)]
+    assert all(r["verbose"] is True for r in controls.snapshot())
 
 
 @pytest.mark.asyncio
