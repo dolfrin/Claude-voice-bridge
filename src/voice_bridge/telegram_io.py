@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
+import random
 from pathlib import Path
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, Protocol, TypeVar
 
 from telegram import (
     BotCommand,
@@ -29,7 +31,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -42,6 +44,10 @@ from telegram.ext import (
 from .config import Config
 from .transcript import transcript_path
 from .tts import available_voices
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class Controls(Protocol):
@@ -87,6 +93,81 @@ _BOT_COMMANDS = [
     BotCommand("voice", "🔊 List or set TTS voice"),
     BotCommand("engine", "🧠 Change TTS backend"),
 ]
+
+# Telegram hard limits: a text message tops out at 4096 chars, a media
+# caption at 1024. Reliability fix (audit-confirmed HIGH impact): outbound
+# sends used to be unguarded and unbounded, so a long assistant reply or a
+# transient API error would raise out of make_outbound and permanently kill
+# the session's turn loop. _chunk_text keeps every send under the hard cap;
+# _send_with_retry absorbs transient errors; the call site in bridge.py's
+# make_outbound never lets a send failure propagate.
+_MESSAGE_LIMIT = 4096
+_CAPTION_LIMIT = 1024
+_RETRY_BACKOFF = (0.5, 1.0, 2.0)
+
+
+def _chunk_text(text: str, limit: int = _MESSAGE_LIMIT) -> list[str]:
+    """Split ``text`` into pieces no longer than ``limit`` characters.
+
+    Prefers to break on the last newline within the current window so a
+    Telegram message never cuts a line in half; falls back to a hard cut at
+    ``limit`` when a single line is itself longer than the limit. The
+    newline (when used as the break point) stays with the earlier chunk, so
+    ``"".join(_chunk_text(text)) == text`` always holds.
+    """
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        newline_at = window.rfind("\n")
+        split_at = newline_at + 1 if newline_at != -1 else limit
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def _send_with_retry(
+    coro_factory: Callable[[], Awaitable[_T]], *, attempts: int = 4
+) -> _T:
+    """Call ``coro_factory()`` and retry on transient Telegram errors.
+
+    ``coro_factory`` is a zero-arg callable that returns a fresh awaitable
+    each time, so a failed send can be re-invoked (a plain coroutine object
+    can only be awaited once).
+
+    * ``RetryAfter`` (flood control / 429) -> sleep ``retry_after`` seconds
+      plus a small jitter, then retry.
+    * ``TimedOut`` / other ``NetworkError`` -> exponential backoff
+      (0.5s, 1s, 2s, ...) then retry.
+    * ``BadRequest`` (e.g. malformed entities) is NOT transient -> re-raise
+      immediately without retrying.
+    * Once ``attempts`` tries are exhausted, the last error is raised.
+
+    This is implemented manually (no dependency on the optional
+    ``AIORateLimiter`` extra) so tests need no extra deps and no network.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return await coro_factory()
+        except RetryAfter as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            await asyncio.sleep(exc.retry_after + random.uniform(0.05, 0.25))
+        except BadRequest:
+            raise
+        except (TimedOut, NetworkError) as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            await asyncio.sleep(_RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)])
+    assert last_exc is not None  # pragma: no branch - loop always sets it before break
+    raise last_exc
 
 
 def _next(seq: list[str], current: str) -> str:
@@ -374,6 +455,25 @@ class TelegramIO:
         })
 
     # --- outbound --------------------------------------------------------
+    async def _send_text_chunks(self, project: str, text: str) -> list[int]:
+        """Send ``text`` as one or more <=4096-char messages.
+
+        The ``[{project}] `` prefix is added once, to the FIRST chunk only
+        (subsequent chunks are plain continuations of the same message).
+        Every resulting message_id is returned so the caller can map ALL of
+        them to the project for reply routing.
+        """
+        bot = self.app.bot
+        ids: list[int] = []
+        for chunk in _chunk_text(f"[{project}] {text}"):
+            msg = await _send_with_retry(
+                lambda chunk=chunk: bot.send_message(
+                    chat_id=self._chat_id, text=chunk
+                )
+            )
+            ids.append(msg.message_id)
+        return ids
+
     async def send_update(
         self,
         project: str,
@@ -382,19 +482,22 @@ class TelegramIO:
         voice_bytes: bytes | None,
     ) -> list[int]:
         """Send a TEXT message (full, may contain code) and, if voice_bytes
-        is provided, a VOICE message. Return the message_ids sent."""
+        is provided, a VOICE message. Return the message_ids sent.
+
+        ``text`` is chunked (see ``_send_text_chunks``) since Telegram caps a
+        single message at 4096 chars; every chunk's message_id comes back so
+        the caller maps ALL of them to the project. Transient Telegram
+        errors are retried via ``_send_with_retry``.
+        """
         bot = self.app.bot
-        ids: list[int] = []
-        text_msg = await bot.send_message(
-            chat_id=self._chat_id,
-            text=f"[{project}] {text}",
-        )
-        ids.append(text_msg.message_id)
+        ids = await self._send_text_chunks(project, text)
         if voice_bytes is not None:
-            voice_msg = await bot.send_voice(
-                chat_id=self._chat_id,
-                voice=voice_bytes,
-                caption=f"{project} · {voice_label}",
+            voice_msg = await _send_with_retry(
+                lambda: bot.send_voice(
+                    chat_id=self._chat_id,
+                    voice=voice_bytes,
+                    caption=f"{project} · {voice_label}",
+                )
             )
             ids.append(voice_msg.message_id)
         return ids
@@ -402,9 +505,11 @@ class TelegramIO:
     async def send_question(self, project: str, text: str) -> int:
         """Send one message and return its message_id (keys approvals)."""
         bot = self.app.bot
-        msg = await bot.send_message(
-            chat_id=self._chat_id,
-            text=f"[{project}] {text}",
+        msg = await _send_with_retry(
+            lambda: bot.send_message(
+                chat_id=self._chat_id,
+                text=f"[{project}] {text}",
+            )
         )
         return msg.message_id
 
@@ -441,46 +546,72 @@ class TelegramIO:
         voice_bytes: bytes | None,
         file_path: str,
     ) -> list[int]:
-        """Send a project-produced file and optional voice summary."""
+        """Send a project-produced file and optional voice summary.
+
+        Telegram caps a media caption at ~1024 chars. When the full
+        ``"[{project}] {text}"`` caption would exceed that, the file goes
+        out with a short caption instead and the full text follows as a
+        separate chunked message (see ``_send_text_chunks``).
+        """
         bot = self.app.bot
         ids: list[int] = []
         path = Path(file_path)
-        caption = f"[{project}] {text}".strip()
+        full_caption = f"[{project}] {text}".strip()
         suffix = path.suffix.lower()
 
+        if len(full_caption) <= _CAPTION_LIMIT:
+            caption = full_caption
+            overflow_text: str | None = None
+        else:
+            caption = f"[{project}]"
+            overflow_text = text
+
         with path.open("rb") as fh:
+            def _seek_and(factory):
+                def _call():
+                    fh.seek(0)
+                    return factory()
+                return _call
+
             if suffix in _PHOTO_SUFFIXES:
-                msg = await bot.send_photo(
-                    chat_id=self._chat_id,
-                    photo=fh,
-                    caption=caption,
-                )
+                msg = await _send_with_retry(_seek_and(
+                    lambda: bot.send_photo(
+                        chat_id=self._chat_id, photo=fh, caption=caption
+                    )
+                ))
             elif suffix in _AUDIO_SUFFIXES:
-                msg = await bot.send_audio(
-                    chat_id=self._chat_id,
-                    audio=fh,
-                    caption=caption,
-                )
+                msg = await _send_with_retry(_seek_and(
+                    lambda: bot.send_audio(
+                        chat_id=self._chat_id, audio=fh, caption=caption
+                    )
+                ))
             elif suffix in _VIDEO_SUFFIXES:
-                msg = await bot.send_video(
-                    chat_id=self._chat_id,
-                    video=fh,
-                    caption=caption,
-                )
+                msg = await _send_with_retry(_seek_and(
+                    lambda: bot.send_video(
+                        chat_id=self._chat_id, video=fh, caption=caption
+                    )
+                ))
             else:
-                msg = await bot.send_document(
-                    chat_id=self._chat_id,
-                    document=fh,
-                    caption=caption,
-                    filename=path.name,
-                )
+                msg = await _send_with_retry(_seek_and(
+                    lambda: bot.send_document(
+                        chat_id=self._chat_id,
+                        document=fh,
+                        caption=caption,
+                        filename=path.name,
+                    )
+                ))
         ids.append(msg.message_id)
 
+        if overflow_text is not None:
+            ids.extend(await self._send_text_chunks(project, overflow_text))
+
         if voice_bytes is not None:
-            voice_msg = await bot.send_voice(
-                chat_id=self._chat_id,
-                voice=voice_bytes,
-                caption=f"{project} · {voice_label}",
+            voice_msg = await _send_with_retry(
+                lambda: bot.send_voice(
+                    chat_id=self._chat_id,
+                    voice=voice_bytes,
+                    caption=f"{project} · {voice_label}",
+                )
             )
             ids.append(voice_msg.message_id)
         return ids

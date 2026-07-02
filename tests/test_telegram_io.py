@@ -6,12 +6,14 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 from voice_bridge.config import Config
 from voice_bridge.telegram_io import (
     build_menu_markup,
     TelegramIO,
+    _chunk_text,
+    _send_with_retry,
     build_mode_markup,
     build_panel_markup,
     build_projects_list_markup,
@@ -399,6 +401,158 @@ async def test_ask_user_sends_buttons_and_returns_selected_choice():
 
     assert await task == "B"
     query.edit_message_text.assert_awaited_once_with("Selected: B")
+
+
+# --------------------------------------------------------------------------
+# _chunk_text
+# --------------------------------------------------------------------------
+def test_chunk_text_short_text_returns_single_chunk():
+    text = "hello world"
+    assert _chunk_text(text) == [text]
+
+
+def test_chunk_text_splits_long_text_and_preserves_content():
+    text = "a" * 10000
+    chunks = _chunk_text(text)
+    assert len(chunks) > 1
+    assert all(len(c) <= 4096 for c in chunks)
+    assert "".join(chunks) == text
+
+
+def test_chunk_text_hard_splits_a_single_line_longer_than_limit():
+    text = "b" * 5000  # single "line", no newlines to break on
+    chunks = _chunk_text(text, limit=4096)
+    assert len(chunks) == 2
+    assert len(chunks[0]) == 4096
+    assert all(len(c) <= 4096 for c in chunks)
+    assert "".join(chunks) == text
+
+
+def test_chunk_text_prefers_breaking_on_last_newline_before_limit():
+    first = "x" * 4000
+    second = "y" * 4000
+    text = first + "\n" + second
+    chunks = _chunk_text(text, limit=4096)
+    assert all(len(c) <= 4096 for c in chunks)
+    assert chunks[0] == first + "\n"
+    assert "".join(chunks) == text
+
+
+# --------------------------------------------------------------------------
+# _send_with_retry
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_send_with_retry_retries_once_after_retry_after_then_succeeds(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    calls = []
+
+    async def factory():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RetryAfter(retry_after=0)
+        return "ok"
+
+    result = await _send_with_retry(factory)
+
+    assert result == "ok"
+    assert len(calls) == 2
+    assert len(sleeps) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_backs_off_exponentially_on_timed_out(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    calls = []
+
+    async def factory():
+        calls.append(1)
+        if len(calls) < 3:
+            raise TimedOut()
+        return "ok"
+
+    result = await _send_with_retry(factory)
+
+    assert result == "ok"
+    assert len(calls) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_raises_after_exhausting_attempts_on_network_error(monkeypatch):
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    calls = []
+
+    async def factory():
+        calls.append(1)
+        raise NetworkError("boom")
+
+    with pytest.raises(NetworkError):
+        await _send_with_retry(factory, attempts=3)
+
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_bad_request_raises_immediately_no_retry(monkeypatch):
+    async def fake_sleep(seconds):
+        raise AssertionError("must not sleep on a non-transient BadRequest")
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    calls = []
+
+    async def factory():
+        calls.append(1)
+        raise BadRequest("bad entities")
+
+    with pytest.raises(BadRequest):
+        await _send_with_retry(factory)
+
+    assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------
+# send_update: chunking of long text
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_send_update_chunks_text_over_4096_chars_into_multiple_messages():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    next_id = iter([100, 101, 102, 103])
+    bot.send_message = AsyncMock(
+        side_effect=lambda **kw: MagicMock(message_id=next(next_id))
+    )
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    long_text = "line\n" * 2000  # well over 4096 chars
+
+    ids = await io.send_update(
+        project="qwing", voice_label="alloy", text=long_text, voice_bytes=None,
+    )
+
+    assert bot.send_message.await_count > 1
+    assert len(ids) == bot.send_message.await_count
+    first_chunk = bot.send_message.await_args_list[0].kwargs["text"]
+    assert first_chunk.startswith("[qwing] ")
+    for call in bot.send_message.await_args_list:
+        assert len(call.kwargs["text"]) <= 4096
 
 
 # --------------------------------------------------------------------------

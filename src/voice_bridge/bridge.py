@@ -125,12 +125,34 @@ def make_outbound(
                 logger.exception("TTS synthesize failed for %s; sending text-only", o.project)
                 voice_bytes = None
 
-        if o.file_path:
-            ids = await telegram.send_file(
-                o.project, voice, full_text, voice_bytes, o.file_path
+        try:
+            if o.file_path:
+                ids = await telegram.send_file(
+                    o.project, voice, full_text, voice_bytes, o.file_path
+                )
+            else:
+                ids = await telegram.send_update(
+                    o.project, voice, full_text, voice_bytes
+                )
+        except Exception:  # noqa: BLE001 - C8 corollary: a bad send must
+            # never kill the session turn loop (sessions._run_loop's except
+            # would otherwise treat this as a turn crash and permanently
+            # stop the project's session). Mirrors the TTS guard above:
+            # log, best-effort notify, and return without re-raising.
+            logger.exception(
+                "telegram send failed for %s; session turn loop continues",
+                o.project,
             )
-        else:
-            ids = await telegram.send_update(o.project, voice, full_text, voice_bytes)
+            try:
+                await telegram.send_question(
+                    o.project, "(pranešimo išsiųsti nepavyko — žr. logus)"
+                )
+            except Exception:  # noqa: BLE001 - best effort only, swallow
+                logger.exception(
+                    "fallback send_question also failed for %s", o.project
+                )
+            return
+
         for mid in ids:
             await store.map_message(mid, o.project)
         await store.set_last_active(o.project)

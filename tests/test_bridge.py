@@ -366,6 +366,108 @@ async def test_make_outbound_file_sends_file_and_maps_message(tmp_path):
     assert store.mapped == [(501, "qwing")]
 
 
+@pytest.mark.asyncio
+async def test_make_outbound_survives_send_update_failure_and_sends_fallback():
+    """C8 corollary: a bad Telegram send must never kill the session turn
+    loop. make_outbound must swallow the error, log it, and best-effort
+    notify the user via send_question instead of propagating."""
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"VOICE")}
+    telegram = FakeTelegram(ids=[101])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    controls = _Controls(sessions, store, FakeCfg(), tts_holder)
+
+    async def boom(*a, **k):
+        raise RuntimeError("telegram down")
+
+    telegram.send_update = boom
+
+    outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
+
+    # Must not raise.
+    await outbound(Outbound(project="qwing", text="Done.\n---\n`code`", spoken=""))
+
+    assert store.mapped == []
+    assert store.last_active_calls == []
+    assert len(telegram.questions) == 1
+    assert telegram.questions[0][0] == "qwing"
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_survives_even_if_fallback_notify_also_fails():
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"VOICE")}
+    telegram = FakeTelegram(ids=[101])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    controls = _Controls(sessions, store, FakeCfg(), tts_holder)
+
+    async def boom(*a, **k):
+        raise RuntimeError("telegram down")
+
+    telegram.send_update = boom
+    telegram.send_question = boom
+
+    outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
+
+    # Must not raise even though BOTH the send and the fallback notice fail.
+    await outbound(Outbound(project="qwing", text="Done.", spoken=""))
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_survives_send_file_failure(tmp_path):
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"VOICE")}
+    telegram = FakeTelegram(ids=[101])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    controls = _Controls(sessions, store, FakeCfg(), tts_holder)
+    path = tmp_path / "result.txt"
+    path.write_text("ok")
+
+    async def boom(*a, **k):
+        raise RuntimeError("telegram down")
+
+    telegram.send_file = boom
+
+    outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
+
+    await outbound(
+        Outbound(project="qwing", text="result", spoken="", file_path=str(path))
+    )
+
+    assert store.mapped == []
+    assert len(telegram.questions) == 1
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_recovers_after_a_previous_send_failure():
+    """A single bad send must not wedge subsequent, healthy turns."""
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"VOICE")}
+    telegram = FakeTelegram(ids=[101])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    controls = _Controls(sessions, store, FakeCfg(), tts_holder)
+
+    real_send_update = telegram.send_update
+    call_count = {"n": 0}
+
+    async def flaky_once(*a, **k):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("telegram down")
+        return await real_send_update(*a, **k)
+
+    telegram.send_update = flaky_once
+
+    outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
+
+    await outbound(Outbound(project="qwing", text="first", spoken=""))
+    await outbound(Outbound(project="qwing", text="second", spoken=""))
+
+    assert telegram.updates == [("qwing", "echo", "second", b"VOICE")]
+    assert store.mapped == [(101, "qwing")]
+    assert store.last_active_calls == ["qwing"]
+
+
 # --------------------------------------------------------------------------- #
 # make_inbound
 # --------------------------------------------------------------------------- #
