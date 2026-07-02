@@ -364,6 +364,22 @@ def test_format_approval_preview_other_tool_shows_key_inputs():
     assert "def main" in preview
 
 
+@pytest.mark.parametrize(
+    "tool_name,tool_input",
+    [
+        ("Edit", {"file_path": "a.py", "old_string": 5, "new_string": None}),
+        ("MultiEdit", {"file_path": "a.py", "edits": ["oops"]}),
+        ("MultiEdit", {"file_path": "a.py", "edits": [None]}),
+        ("Write", {"file_path": "a.py", "content": 123}),
+    ],
+)
+def test_format_approval_preview_tolerates_malformed_input(tool_name, tool_input):
+    # A malformed (model-generated) tool_input must never raise into the
+    # permission flow — it just yields a degraded preview string.
+    preview = format_approval_preview(tool_name, tool_input)
+    assert isinstance(preview, str) and preview
+
+
 def test_format_approval_spoken_is_generic_and_code_free():
     spoken = format_approval_spoken(
         "qwing", "Bash", {"command": "git push origin main"}

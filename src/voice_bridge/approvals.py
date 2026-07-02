@@ -229,8 +229,11 @@ _OTHER_PREVIEW_KEYS = (
 )
 
 
-def _truncate(text: str, limit: int) -> str:
-    text = text or ""
+def _truncate(text, limit: int) -> str:
+    # Coerce defensively: model-generated tool_input may put non-str values in
+    # old_string/new_string/content, and a preview must never raise into the
+    # permission flow.
+    text = str(text) if text else ""
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + _TRUNCATE_MARKER
@@ -271,9 +274,9 @@ def format_approval_preview(tool_name: str, tool_input: dict) -> str:
         path = _first_path(tool_input)
         if tool_name == "MultiEdit":
             edits = tool_input.get("edits") or []
-            if not edits:
+            first = edits[0] if edits else None
+            if not isinstance(first, dict):
                 return path or "MultiEdit"
-            first = edits[0]
             old = _truncate(first.get("old_string") or "", _PREVIEW_EDIT)
             new = _truncate(first.get("new_string") or "", _PREVIEW_EDIT)
             more = f" (+{len(edits) - 1} more)" if len(edits) > 1 else ""
