@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from voice_bridge.config import Config, ProjectConfig, effective_autonomy
@@ -52,28 +53,102 @@ _RISKY_COMMAND_PATTERNS = [
     re.compile(r"\bshutdown\b"),
     re.compile(r"\breboot\b"),
     re.compile(r"\bsystemctl\b"),
+    # --- Data-exfiltration: curl/wget with a spelled-out upload/POST-style
+    # payload flag. Long flags are unambiguous so this is safe to match
+    # case-insensitively (checked against `lowered` below).
+    re.compile(
+        r"\b(curl|wget)\b.*("
+        r"--data-binary\b|--data-raw\b|--data\b|"
+        r"--form\b|--upload-file\b|"
+        r"--post-data\b|--post-file\b|"
+        r"--request[=\s]+(post|put)\b"
+        r")"
+    ),
 ]
+
+# Single-letter curl exfil flags (-d, -F, -T, -X POST/PUT) are matched
+# case-SENSITIVELY against the original (non-lowered) command, because
+# curl assigns unrelated meanings to the opposite case: -D dumps headers
+# (not -d, which sends data), -f fails silently on HTTP errors (not -F,
+# multipart form), -x sets a proxy (not -X, custom request method). Case
+# sensitivity here avoids flagging everyday safe curl usage like `curl -f`.
+_EXFIL_SHORT_FLAG_RE = re.compile(
+    r"\b(?:curl|wget)\b.*(-d\b|-F\b|-T\b|-X\s*(?:POST|PUT)\b)"
+)
+
+# Reader/dump commands that, combined with a sensitive-looking path, should
+# be flagged even though the bare command (e.g. `cat README.md`) is safe.
+_SENSITIVE_TOKEN_RE = (
+    r"(?:\.env\b|\.pem\b|id_rsa|id_ed25519|\.ssh/|\.aws/|\.gnupg|credentials|"
+    r"\.netrc|\.git-credentials|secret|token|password|\.key\b)"
+)
+_READER_CMD_RE = r"\b(?:cat|less|more|head|tail|xxd|od|base64|strings|grep|awk|sed|cp|mv)\b"
+
+_RISKY_COMMAND_PATTERNS.append(
+    re.compile(rf"{_READER_CMD_RE}.*{_SENSITIVE_TOKEN_RE}", re.IGNORECASE)
+)
+
+# Redirection target: the first non-whitespace token after `>`/`>>`, stopping
+# at shell metacharacters that would end the token (pipe, semicolon, `&`,
+# another redirection). This intentionally excludes fd-duplication targets
+# like `>&1` — those aren't file paths.
+_REDIRECT_TARGET_RE = re.compile(r">>?\s*([^\s|;&<>]+)")
+
+# Pseudo-files that discard/duplicate output rather than persist or exfil
+# data. `cmd > /dev/null 2>&1` is one of the most common shell idioms and
+# would otherwise be flagged purely for being an absolute path.
+_SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
+
+
+def _has_risky_redirect(command: str) -> bool:
+    """Flag `>`/`>>` redirection to an absolute path, a path that escapes
+    cwd (`../`), or a sensitive-looking target. Plain relative targets like
+    `> out.txt` stay safe, and so do the standard /dev/null-style sinks."""
+    for match in _REDIRECT_TARGET_RE.finditer(command):
+        target = match.group(1)
+        if target in _SAFE_REDIRECT_TARGETS:
+            continue
+        if target.startswith("/"):
+            return True
+        if target.startswith("..") or "../" in target:
+            return True
+        if re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE):
+            return True
+    return False
+
 
 # Tools that touch the filesystem with an explicit path.
 _PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 
 
 def _resolve(path: str, cwd: str) -> str:
-    return os.path.normpath(os.path.join(cwd, path))
+    """Resolve `path` against `cwd` to a real, symlink-free absolute path.
+
+    Uses realpath resolution (not lexical normalization) so a symlink that
+    lives inside cwd but points outside of it is not mistaken for an
+    in-cwd path. Non-existent paths are still resolved (as far as their
+    existing ancestors allow) so a Write to a brand-new file stays safe.
+    """
+    return str(Path(cwd, path).resolve())
 
 
 def _inside_cwd(path: str, cwd: str) -> bool:
-    base = os.path.normpath(os.path.abspath(cwd))
+    base = str(Path(cwd).resolve())
     target = _resolve(path, base)
     return target == base or target.startswith(base + os.sep)
 
 
 def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
-    """Return True if the tool call is risky: push/deploy/rm/ssh/install/out-of-cwd/wallet."""
+    """Return True if the tool call is risky: push/deploy/rm/ssh/install/out-of-cwd/
+    wallet/exfiltration/secret-read/sensitive-redirect."""
     command = tool_input.get("command")
     if isinstance(command, str):
         lowered = command.lower()
         if any(p.search(lowered) for p in _RISKY_COMMAND_PATTERNS):
+            return True
+        if _EXFIL_SHORT_FLAG_RE.search(command):
+            return True
+        if _has_risky_redirect(command):
             return True
 
     for key in _PATH_INPUT_KEYS:
