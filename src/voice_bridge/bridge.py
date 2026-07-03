@@ -31,6 +31,7 @@ from .attachments import format_attachment_prompt, save_attachments
 from .approvals import ApprovalManager, parse_yes_no
 from .config import (
     Config,
+    EFFORT_LEVELS,
     ProjectConfig,
     effective_autonomy,
     effective_voice,
@@ -557,11 +558,14 @@ class _Controls:
                 "last_active": last_active == name,
                 "cwd": getattr(proj, "cwd", "") if proj is not None else "",
                 "verbose": bool(getattr(proj, "verbose", False)) if proj is not None else False,
+                "model": getattr(proj, "model", None) if proj is not None else None,
+                "effort": getattr(proj, "effort", None) if proj is not None else None,
             }
 
     def snapshot(self) -> list[dict]:
         """SYNC: per-project dicts for the panel/status views, keyed
-        project/display_name/enabled/mode/voice/engine/last_active/cwd/verbose."""
+        project/display_name/enabled/mode/voice/engine/last_active/cwd/verbose/
+        model/effort."""
         return [
             {
                 "project": name,
@@ -573,6 +577,8 @@ class _Controls:
                 "last_active": row["last_active"],
                 "cwd": row["cwd"],
                 "verbose": row.get("verbose", False),
+                "model": row.get("model"),
+                "effort": row.get("effort"),
             }
             for name, row in self._mirror.items()
         ]
@@ -647,6 +653,45 @@ class _Controls:
                 self._mirror[name]["verbose"] = on
             await self._sessions.set_verbose(name, on)
 
+    async def set_effort(self, project: str | None, level: str) -> None:
+        """Set per-project reasoning effort and mirror it for the snapshot.
+
+        An invalid level is ignored/rejected (neither the mirror nor the live
+        session changes). Otherwise the mirror is updated and the change is
+        forwarded to the SessionManager, which RESTARTS the running session so
+        the new effort applies (mirrors :meth:`set_mode`). ``project=None``
+        targets every project."""
+        if level not in EFFORT_LEVELS:
+            return
+        targets = [project] if project is not None else list(self._mirror)
+        for name in targets:
+            if name in self._mirror:
+                self._mirror[name]["effort"] = level
+            await self._sessions.set_effort(name, level)
+
+    def info(self) -> str:
+        """SYNC: one line per project with model (config + REAL), effort, mode,
+        voice, verbose, plus the global TTS engine.
+
+        The real model is the last ACTUAL model that answered a turn, read from
+        the SessionManager's in-memory last-model map (None -> em dash)."""
+        lines: list[str] = []
+        for name, row in self._mirror.items():
+            display = row.get("display_name", name)
+            model = row.get("model") or "default"
+            real = None
+            if hasattr(self._sessions, "last_model"):
+                real = self._sessions.last_model(name)
+            effort = row.get("effort") or "default"
+            verbose = "on" if row.get("verbose") else "off"
+            lines.append(
+                f"{display}: model={model} (real: {real or '—'}) · "
+                f"effort={effort} · mode={row['mode']} · voice={row['voice']} · "
+                f"verbose={verbose}"
+            )
+        lines.append(f"engine: {self._cfg.tts_backend}")
+        return "\n".join(lines)
+
     async def refresh_projects(self) -> int:
         explicit = load_projects()
         discovered: list[ProjectConfig] = []
@@ -677,6 +722,8 @@ class _Controls:
                 "last_active": last_active == project.name,
                 "cwd": project.cwd,
                 "verbose": bool(getattr(project, "verbose", False)),
+                "model": getattr(project, "model", None),
+                "effort": getattr(project, "effort", None),
             }
         return len(new_projects)
 
@@ -788,6 +835,10 @@ async def build() -> Wiring:
             sm = sessions_ref.get("sm")
             return sm.names() if sm is not None and hasattr(sm, "names") else []
 
+        def last_model(self, name):
+            sm = sessions_ref.get("sm")
+            return sm.last_model(name) if sm is not None and hasattr(sm, "last_model") else None
+
         async def deliver(self, project, text):
             await sessions_ref["sm"].deliver(project, text)
 
@@ -796,6 +847,9 @@ async def build() -> Wiring:
 
         async def set_mode(self, project, mode):
             await sessions_ref["sm"].set_mode(project, mode)
+
+        async def set_effort(self, project, level):
+            await sessions_ref["sm"].set_effort(project, level)
 
         async def set_verbose(self, project, on):
             await sessions_ref["sm"].set_verbose(project, on)

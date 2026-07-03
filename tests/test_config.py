@@ -5,9 +5,11 @@ import pytest
 from voice_bridge.config import (
     AUTONOMY_MODES,
     Config,
+    EFFORT_LEVELS,
     ProjectConfig,
     TTS_BACKENDS,
     _VALID_AUTONOMY_MODES,
+    _VALID_EFFORT_LEVELS,
     _VALID_TTS_BACKENDS,
     effective_autonomy,
     effective_voice,
@@ -230,6 +232,56 @@ def test_load_projects_parses_verbose_flag(tmp_path):
 def test_project_config_verbose_defaults_false():
     proj = ProjectConfig(name="x", cwd="/tmp/x")
     assert proj.verbose is False
+
+
+def test_load_projects_parses_effort(tmp_path):
+    yaml_text = textwrap.dedent(
+        """
+        projects:
+          - name: hard
+            cwd: /tmp/hard
+            effort: high
+          - name: plain
+            cwd: /tmp/plain
+        """
+    )
+    path = tmp_path / "projects.yaml"
+    path.write_text(yaml_text)
+
+    projects = load_projects(str(path))
+    by_name = {p.name: p for p in projects}
+    assert by_name["hard"].effort == "high"
+    # default None when the key is absent
+    assert by_name["plain"].effort is None
+
+
+def test_load_projects_invalid_effort_raises_clear_error(tmp_path):
+    yaml_text = textwrap.dedent(
+        """
+        projects:
+          - name: x
+            cwd: /tmp/x
+            effort: turbo
+        """
+    )
+    path = tmp_path / "projects.yaml"
+    path.write_text(yaml_text)
+    with pytest.raises(ValueError) as exc:
+        load_projects(str(path))
+    assert "effort" in str(exc.value)
+
+
+def test_project_config_effort_defaults_none():
+    proj = ProjectConfig(name="x", cwd="/tmp/x")
+    assert proj.effort is None
+
+
+def test_effort_levels_is_canonical_ordered_tuple():
+    assert EFFORT_LEVELS == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_effort_validation_set_derives_from_canonical_tuple():
+    assert _VALID_EFFORT_LEVELS == set(EFFORT_LEVELS)
 
 
 def test_load_projects_missing_name_raises_clear_error(tmp_path):

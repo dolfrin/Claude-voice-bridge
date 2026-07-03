@@ -53,6 +53,7 @@ from .tts import available_voices
 # module (would create a cycle).
 from .telegram_views import (
     _BOT_COMMANDS,
+    _EFFORTS,
     _ENGINES,
     _MODES,
     _clean_choices,
@@ -85,7 +86,8 @@ class Controls(Protocol):
         # each dict keyed EXACTLY:
         # {"project": str, "display_name": str, "enabled": bool,
         #  "mode": str, "voice": str, "engine": str, "last_active": bool,
-        #  "cwd": str, "verbose": bool}
+        #  "cwd": str, "verbose": bool, "model": str | None,
+        #  "effort": str | None}
         ...
 
     async def toggle(self, project: str | None, on: bool) -> None: ...
@@ -93,11 +95,13 @@ class Controls(Protocol):
     async def enable_and_deliver(self, project: str, text: str) -> None: ...
     async def refresh_projects(self) -> int: ...
     async def set_mode(self, project: str | None, mode: str) -> None: ...
+    async def set_effort(self, project: str | None, level: str) -> None: ...
     async def set_verbose(self, project: str | None, on: bool) -> None: ...
     async def set_voice(self, project: str | None, voice: str) -> None: ...
     async def set_engine(self, name: str) -> None: ...
     async def interrupt(self, project: str | None) -> str: ...
     def recap(self) -> str: ...
+    def info(self) -> str: ...
     async def cost_summary(self) -> str: ...
 
 
@@ -840,6 +844,35 @@ class TelegramIO:
         await self.controls.set_mode(project, mode)
         await msg.reply_text(f"mode {mode} for {project or 'all'}")
 
+    async def _cmd_effort(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Set per-project reasoning effort: ``/effort <level> [project]``.
+
+        No project arg targets all projects. A live change restarts the running
+        session so the new effort applies (mirrors /mode)."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        if not context.args or context.args[0] not in _EFFORTS:
+            await msg.reply_text(
+                "usage: /effort <" + "|".join(_EFFORTS) + "> [project]"
+            )
+            return
+        level = context.args[0]
+        project = context.args[1] if len(context.args) > 1 else None
+        await self.controls.set_effort(project, level)
+        await msg.reply_text(f"effort {level} for {project or 'all'}")
+
+    async def _cmd_info(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Per-project model (config + real), effort, mode, voice, verbose."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        await msg.reply_text(self.controls.info())
+
     async def _cmd_verbose(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -993,6 +1026,10 @@ class TelegramIO:
             CommandHandler("stop", self._cmd_stop, filters=only_me))
         app.add_handler(
             CommandHandler("mode", self._cmd_mode, filters=only_me))
+        app.add_handler(
+            CommandHandler("effort", self._cmd_effort, filters=only_me))
+        app.add_handler(
+            CommandHandler("info", self._cmd_info, filters=only_me))
         app.add_handler(
             CommandHandler("voice", self._cmd_voice, filters=only_me))
         app.add_handler(

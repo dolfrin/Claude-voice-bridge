@@ -5,6 +5,12 @@ projects:
     enabled: true
     autonomy: safe
     voice: alloy
+    # Optional model override (omit for the account default). /info shows the
+    # configured model alongside the real model that actually answered.
+    # model: claude-opus-4-8
+    # Optional reasoning effort: low | medium | high | xhigh | max (omit for
+    # the SDK default). Change live with /effort <level> [project].
+    # effort: high
     system_prompt_extra: ""
     # Opt-in live tool-activity streaming (default false). When true, the
     # session streams compact, text-only tool-activity while it works, so a

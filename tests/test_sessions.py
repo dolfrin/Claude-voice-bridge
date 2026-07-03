@@ -653,6 +653,165 @@ async def test_set_mode_when_not_running_only_updates_config():
     await sm.stop_all()
 
 
+async def test_effort_passed_to_options_when_set():
+    project = make_project("qwing", effort="high")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    opts = FakeClaudeSDKClient.instances[0].options
+    assert opts.effort == "high"
+
+    await sm.stop_all()
+
+
+async def test_effort_none_by_default_in_options():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    opts = FakeClaudeSDKClient.instances[0].options
+    assert opts.effort is None
+
+    await sm.stop_all()
+
+
+async def test_set_effort_rebuilds_session_and_updates_config():
+    project = make_project("qwing", effort=None)
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    first_client = FakeClaudeSDKClient.instances[0]
+
+    await sm.set_effort("qwing", "max")
+
+    assert first_client.disconnected is True
+    assert len(FakeClaudeSDKClient.instances) == 2
+    assert FakeClaudeSDKClient.instances[1].options.effort == "max"
+    assert sm.project("qwing").effort == "max"
+
+    await sm.stop_all()
+
+
+async def test_set_effort_when_not_running_only_updates_config():
+    project = make_project("qwing", enabled=False)
+    store = FakeStore(enabled={"qwing": False})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    assert sm.is_running("qwing") is False
+
+    await sm.set_effort("qwing", "low")
+    assert sm.project("qwing").effort == "low"
+    assert FakeClaudeSDKClient.instances == []  # never started
+
+    await sm.stop_all()
+
+
+async def test_set_effort_invalid_level_is_ignored():
+    project = make_project("qwing", effort="medium")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    first_client = FakeClaudeSDKClient.instances[0]
+
+    await sm.set_effort("qwing", "turbo")  # invalid
+
+    assert sm.project("qwing").effort == "medium"
+    assert first_client.disconnected is False
+    assert len(FakeClaudeSDKClient.instances) == 1
+
+    await sm.stop_all()
+
+
+# --------------------------------------------------------------------------- #
+# actual-model capture (in-memory, never persisted)
+# --------------------------------------------------------------------------- #
+
+async def test_last_model_records_actual_model_from_assistant_message():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    # nothing captured before a turn
+    assert sm.last_model("qwing") is None
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[
+        AssistantMessage(content=[TextBlock(text="Done.")], model="claude-real-x"),
+        result("s-1"),
+    ]]
+
+    await sm.deliver("qwing", "go")
+    assert await _wait_for(lambda: sm.last_model("qwing") == "claude-real-x")
+
+    await sm.stop_all()
+
+
+async def test_last_model_none_model_does_not_crash_turn():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[
+        AssistantMessage(content=[TextBlock(text="Done.")], model=None),
+        result("s-1"),
+    ]]
+
+    await sm.deliver("qwing", "go")
+    assert await _wait_for(lambda: any(o.text == "Done." for o in outbound))
+
+    # the turn completed cleanly; a None model neither crashed nor was recorded
+    assert sm.is_running("qwing")
+    assert not any("krito" in o.text.lower() for o in outbound)
+    assert sm.last_model("qwing") is None
+
+    await sm.stop_all()
+
+
+async def test_last_model_unknown_project_returns_none():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    assert sm.last_model("nope") is None
+
+
 async def test_set_mode_invalid_mode_is_ignored():
     project = make_project("qwing", autonomy="safe")
     store = FakeStore(enabled={"qwing": True})

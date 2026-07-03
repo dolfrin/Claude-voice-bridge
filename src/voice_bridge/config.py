@@ -14,8 +14,13 @@ import yaml
 # sets are derived below so accepted values stay in sync automatically.
 AUTONOMY_MODES = ("safe", "full", "ask")
 TTS_BACKENDS = ("auto", "openai", "piper", "together")
+# Canonical, ORDERED source of truth for the per-project reasoning effort. The
+# SDK's ClaudeAgentOptions.effort accepts exactly these levels; passing None
+# keeps the SDK default. /effort cycles/sets through this exact preferred order.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 _VALID_TTS_BACKENDS = set(TTS_BACKENDS)
 _VALID_AUTONOMY_MODES = set(AUTONOMY_MODES)
+_VALID_EFFORT_LEVELS = set(EFFORT_LEVELS)
 
 
 @dataclass
@@ -52,6 +57,9 @@ class ProjectConfig:
     autonomy: str | None = None
     voice: str | None = None
     model: str | None = None
+    # Optional per-project reasoning effort passed to the SDK. None -> SDK
+    # default. When set it must be one of EFFORT_LEVELS (validated at load).
+    effort: str | None = None
     system_prompt_extra: str = ""
     # Opt-in live tool-activity streaming (default OFF). When True the session
     # emits compact, text-only, coalesced tool-activity Outbounds during a turn
@@ -172,6 +180,12 @@ def load_projects(path: str = "projects.yaml") -> list[ProjectConfig]:
             raise ValueError(f"project {name!r} is missing required field: cwd")
 
         enabled = raw.get("enabled")
+        effort = raw.get("effort")
+        if effort is not None and effort not in _VALID_EFFORT_LEVELS:
+            raise ValueError(
+                f"project {name!r} has invalid effort {effort!r}; "
+                f"must be one of {sorted(_VALID_EFFORT_LEVELS)}"
+            )
         projects.append(
             ProjectConfig(
                 name=name,
@@ -181,6 +195,7 @@ def load_projects(path: str = "projects.yaml") -> list[ProjectConfig]:
                 autonomy=raw.get("autonomy"),
                 voice=raw.get("voice"),
                 model=raw.get("model"),
+                effort=effort,
                 system_prompt_extra=raw.get("system_prompt_extra") or "",
                 verbose=bool(raw.get("verbose", False)),
             )

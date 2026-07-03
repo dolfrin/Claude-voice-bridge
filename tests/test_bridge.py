@@ -121,13 +121,16 @@ class FakeTelegram:
 
 
 class FakeProject:
-    def __init__(self, name, voice=None, autonomy=None, cwd=None, enabled=True, display_name=None):
+    def __init__(self, name, voice=None, autonomy=None, cwd=None, enabled=True,
+                 display_name=None, model=None, effort=None):
         self.name = name
         self.voice = voice
         self.autonomy = autonomy
         self.cwd = cwd or f"/tmp/{name}"
         self.enabled = enabled
         self.display_name = display_name
+        self.model = model
+        self.effort = effort
 
 
 class FakeSessions:
@@ -136,8 +139,10 @@ class FakeSessions:
         self.delivered: list[tuple[str, str]] = []
         self.enabled_calls: list[tuple[str, bool]] = []
         self.mode_calls: list[tuple[str, str]] = []
+        self.effort_calls: list[tuple[str, str]] = []
         self.verbose_calls: list[tuple[str, bool]] = []
         self.interrupt_calls: list[str] = []
+        self._last_model: dict[str, str] = {}
         self.started = 0
         self.stopped = 0
 
@@ -146,6 +151,9 @@ class FakeSessions:
 
     def names(self):
         return list(self._projects)
+
+    def last_model(self, name):
+        return self._last_model.get(name)
 
     def add_projects(self, projects):
         added = 0
@@ -164,6 +172,12 @@ class FakeSessions:
 
     async def set_mode(self, project, mode):
         self.mode_calls.append((project, mode))
+
+    async def set_effort(self, project, level):
+        self.effort_calls.append((project, level))
+        proj = self._projects.get(project)
+        if proj is not None:
+            proj.effort = level
 
     async def set_verbose(self, project, on):
         self.verbose_calls.append((project, on))
@@ -1051,7 +1065,7 @@ async def test_controls_snapshot_sync_exact_keys():
     for row in snap:
         assert set(row.keys()) == {
             "project", "enabled", "mode", "voice", "engine", "last_active",
-            "cwd", "display_name", "verbose",
+            "cwd", "display_name", "verbose", "model", "effort",
         }
     by_name = {r["project"]: r for r in snap}
     assert by_name["qwing"]["enabled"] is True
@@ -1186,6 +1200,84 @@ async def test_controls_set_verbose_all_projects():
 
     assert sorted(sessions.verbose_calls) == [("othersapp", True), ("qwing", True)]
     assert all(r["verbose"] is True for r in controls.snapshot())
+
+
+@pytest.mark.asyncio
+async def test_controls_snapshot_includes_model_and_effort():
+    cfg = FakeCfg()
+    store = FakeStore(enabled={"qwing": True})
+    sessions = FakeSessions([
+        FakeProject("qwing", model="claude-opus-4-8", effort="high"),
+    ])
+    controls = _Controls(sessions, store, cfg, {"backend": FakeTTS()})
+    await controls.seed()
+    snap = {r["project"]: r for r in controls.snapshot()}
+    assert snap["qwing"]["model"] == "claude-opus-4-8"
+    assert snap["qwing"]["effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_controls_set_effort_updates_mirror_and_sessions():
+    controls, sessions, *_ = _make_controls()
+    await controls.seed()
+    assert all(r["effort"] is None for r in controls.snapshot())
+
+    await controls.set_effort("qwing", "high")
+
+    assert sessions.effort_calls == [("qwing", "high")]
+    snap = {r["project"]: r for r in controls.snapshot()}
+    assert snap["qwing"]["effort"] == "high"
+    assert snap["othersapp"]["effort"] is None
+
+
+@pytest.mark.asyncio
+async def test_controls_set_effort_all_projects():
+    controls, sessions, *_ = _make_controls()
+    await controls.seed()
+
+    await controls.set_effort(None, "max")
+
+    assert sorted(sessions.effort_calls) == [("othersapp", "max"), ("qwing", "max")]
+    assert all(r["effort"] == "max" for r in controls.snapshot())
+
+
+@pytest.mark.asyncio
+async def test_controls_set_effort_invalid_level_is_ignored():
+    controls, sessions, *_ = _make_controls()
+    await controls.seed()
+
+    await controls.set_effort("qwing", "turbo")
+
+    assert sessions.effort_calls == []
+    assert all(r["effort"] is None for r in controls.snapshot())
+
+
+@pytest.mark.asyncio
+async def test_controls_info_renders_model_effort_mode_voice_verbose():
+    controls, sessions, *_ = _make_controls()
+    # qwing: explicit config model, and a captured REAL model from a turn
+    sessions.project("qwing").model = "claude-opus-4-8"
+    sessions._last_model["qwing"] = "claude-opus-4-8-20990101"
+    await controls.seed()
+    await controls.set_effort("qwing", "high")
+
+    text = controls.info()
+
+    lines = {ln.split(":")[0]: ln for ln in text.splitlines()}
+    qwing_line = next(ln for ln in text.splitlines() if ln.startswith("qwing"))
+    assert "model=claude-opus-4-8" in qwing_line
+    assert "real: claude-opus-4-8-20990101" in qwing_line
+    assert "effort=high" in qwing_line
+    assert "mode=full" in qwing_line  # qwing autonomy="full" in _make_controls
+    assert "voice=echo" in qwing_line
+    assert "verbose=off" in qwing_line
+    # othersapp: no config model, no real model captured, no effort -> defaults
+    others_line = next(ln for ln in text.splitlines() if ln.startswith("othersapp"))
+    assert "model=default" in others_line
+    assert "real: —" in others_line
+    assert "effort=default" in others_line
+    # the global engine is shown too
+    assert "openai" in text
 
 
 @pytest.mark.asyncio

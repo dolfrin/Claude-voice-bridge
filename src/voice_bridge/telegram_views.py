@@ -16,13 +16,14 @@ from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 
-from .config import AUTONOMY_MODES, TTS_BACKENDS
+from .config import AUTONOMY_MODES, EFFORT_LEVELS, TTS_BACKENDS
 from .tts import available_voices
 
 # Local aliases (list, not tuple) kept for minimal churn at call sites below;
 # config.py is the single source of truth for the order and the members.
 _MODES = list(AUTONOMY_MODES)
 _ENGINES = list(TTS_BACKENDS)
+_EFFORTS = list(EFFORT_LEVELS)
 _BOT_COMMANDS = [
     BotCommand("menu", "🏠 Main menu"),
     BotCommand("panel", "🎛 Control panel"),
@@ -31,10 +32,12 @@ _BOT_COMMANDS = [
     BotCommand("projects_refresh", "🔎 Discover new projects"),
     BotCommand("handoff", "🧾 Latest project handoff"),
     BotCommand("status", "📡 Ask project status"),
+    BotCommand("info", "ℹ️ Model, effort & settings"),
     BotCommand("on", "▶️ Enable one project or all"),
     BotCommand("off", "⏸ Disable one project or all"),
     BotCommand("stop", "⛔ Interrupt current work"),
     BotCommand("mode", "🛡 Change safe/full/ask mode"),
+    BotCommand("effort", "🧩 Change reasoning effort"),
     BotCommand("voice", "🔊 List or set TTS voice"),
     BotCommand("verbose", "🔧 Toggle live tool activity"),
     BotCommand("engine", "🧠 Change TTS backend"),

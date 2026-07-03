@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
-from voice_bridge.config import AUTONOMY_MODES, Config, TTS_BACKENDS
+from voice_bridge.config import AUTONOMY_MODES, Config, EFFORT_LEVELS, TTS_BACKENDS
 from voice_bridge.telegram_io import (
     build_menu_markup,
     TelegramIO,
@@ -56,6 +56,10 @@ class FakeControls:
         self.calls = []
         self.recap_text = "Nieko naujo."
         self.cost_text = "qwing: 3 turai, 1000+400 tok, $0.0567\nTOTAL: 3 turai, 1000+400 tok, $0.0567"
+        self.info_text = (
+            "qwing: model=default (real: claude-x) · effort=high · "
+            "mode=safe · voice=alloy · verbose=on\nengine: openai"
+        )
         self._snapshot = [
             {"project": "qwing", "enabled": True, "mode": "safe",
              "voice": "alloy", "engine": "openai", "last_active": True,
@@ -99,6 +103,13 @@ class FakeControls:
 
     async def set_mode(self, project, mode):
         self.calls.append(("set_mode", project, mode))
+
+    async def set_effort(self, project, level):
+        self.calls.append(("set_effort", project, level))
+
+    def info(self):
+        self.calls.append(("info",))
+        return self.info_text
 
     async def set_verbose(self, project, on):
         self.calls.append(("set_verbose", project, on))
@@ -1624,6 +1635,92 @@ async def test_cmd_mode_rejects_invalid_mode():
 
 
 @pytest.mark.asyncio
+async def test_cmd_effort_sets_per_project():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/effort high qwing")
+
+    await io._cmd_effort(upd, make_ctx(["high", "qwing"]))
+
+    assert ("set_effort", "qwing", "high") in controls.calls
+    upd.message.reply_text.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cmd_effort_no_project_targets_all():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/effort max")
+
+    await io._cmd_effort(upd, make_ctx(["max"]))
+
+    assert ("set_effort", None, "max") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_effort_rejects_invalid_level():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/effort turbo")
+
+    await io._cmd_effort(upd, make_ctx(["turbo"]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cmd_effort_accepts_every_level():
+    for level in EFFORT_LEVELS:
+        controls = FakeControls()
+        io = TelegramIO(make_cfg(), AsyncMock(), controls)
+        upd = make_cmd_update(f"/effort {level}")
+        await io._cmd_effort(upd, make_ctx([level]))
+        assert ("set_effort", None, level) in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_effort_non_owner_ignored():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    upd = make_cmd_update("/effort high qwing", user_id=999)
+
+    await io._cmd_effort(upd, make_ctx(["high", "qwing"]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cmd_info_replies_with_controls_info():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/info")
+
+    await io._cmd_info(upd, make_ctx([]))
+
+    assert ("info",) in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "model=default" in sent
+    assert "real: claude-x" in sent
+    assert "effort=high" in sent
+    assert "verbose=on" in sent
+    assert "engine: openai" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_info_non_owner_ignored():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    upd = make_cmd_update("/info", user_id=999)
+
+    await io._cmd_info(upd, make_ctx([]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cmd_voice_list_replies_voices():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
@@ -1904,9 +2001,9 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
     # at least: menu, panel, projects, projects_all, projects_refresh, handoff,
-    # on, off, stop, mode, voice, engine, status, recap, cost, callback, text,
-    # voice, attachments.
-    assert len(added) >= 19
+    # on, off, stop, mode, effort, voice, verbose, engine, status, recap, cost,
+    # info, callback, text, voice, attachments.
+    assert len(added) >= 21
 
     cmd_names = set()
     for h in added:
@@ -1914,12 +2011,12 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
         if cmds:
             cmd_names |= set(cmds)
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off", "stop",
-            "mode", "voice", "engine", "status", "recap", "cost"} <= cmd_names
+            "mode", "effort", "voice", "engine", "status", "recap", "cost", "info"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off", "stop",
-            "mode", "voice", "verbose", "engine", "recap", "cost"} == registered_names
+            "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info"} == registered_names
 
 
 @pytest.mark.asyncio

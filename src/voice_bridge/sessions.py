@@ -43,7 +43,13 @@ from claude_agent_sdk import (
 )
 
 from .approvals import ApprovalManager, make_can_use_tool
-from .config import AUTONOMY_MODES, Config, ProjectConfig, effective_autonomy
+from .config import (
+    AUTONOMY_MODES,
+    EFFORT_LEVELS,
+    Config,
+    ProjectConfig,
+    effective_autonomy,
+)
 from .notify_tool import (
     ASK_USER_TOOL_NAME,
     NOTIFY_TOOL_NAME,
@@ -189,6 +195,10 @@ class SessionManager:
         self._restart_tasks: dict[str, asyncio.Task] = {}
         self._attempts: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Last ACTUAL model that answered a turn per project (from
+        # AssistantMessage.model). In-memory only, never persisted: it lets
+        # /info show the real model even when project.model is None (default).
+        self._last_model: dict[str, str] = {}
         self._stopping: set[str] = set()
         self._closed = False
         self._restart_backoff_base = _RESTART_BACKOFF_BASE
@@ -213,6 +223,13 @@ class SessionManager:
     def names(self) -> list[str]:
         """Return configured project names in projects.yaml order."""
         return list(self._projects)
+
+    def last_model(self, project: str) -> str | None:
+        """Return the last ACTUAL model that answered a turn for *project*.
+
+        In-memory only (recorded by the turn loop from AssistantMessage.model);
+        None if no turn has completed yet or the project is unknown."""
+        return self._last_model.get(project)
 
     def add_projects(self, projects: list[ProjectConfig]) -> int:
         """Add newly discovered projects without starting their sessions."""
@@ -345,6 +362,23 @@ class SessionManager:
             await self._stop(project)
             await self._start(project)
 
+    async def set_effort(self, project: str, level: str) -> None:
+        """Update a project's reasoning effort; restart the running session so
+        the new ``effort`` takes effect. Resume preserves context across the
+        restart. Mirrors :meth:`set_mode`."""
+        cfg = self._projects.get(project)
+        if cfg is None:
+            return
+        if level not in EFFORT_LEVELS:
+            logger.warning(
+                "set_effort: invalid level %r for project %r; ignored", level, project
+            )
+            return
+        cfg.effort = level
+        if project in self._sessions:
+            await self._stop(project)
+            await self._start(project)
+
     async def set_verbose(self, project: str | None, on: bool) -> None:
         """Toggle per-project verbose tool-activity streaming (in-memory).
 
@@ -392,6 +426,7 @@ class SessionManager:
         return ClaudeAgentOptions(
             cwd=project.cwd,
             model=project.model,
+            effort=project.effort,
             system_prompt={"type": "preset", "preset": "claude_code", "append": append_text},
             permission_mode=permission_mode,
             can_use_tool=can_use_tool,
@@ -639,6 +674,7 @@ class SessionManager:
                 try:
                     async for msg in client.receive_response():
                         if isinstance(msg, AssistantMessage):
+                            self._record_last_model(name, msg)
                             for block in msg.content:
                                 if isinstance(block, TextBlock):
                                     parts.append(block.text)
@@ -697,6 +733,19 @@ class SessionManager:
                 await self._emit_crash(sess, err)
                 self._schedule_restart(name)
                 return
+
+    def _record_last_model(self, name: str, msg: AssistantMessage) -> None:
+        """Record the ACTUAL model that answered (AssistantMessage.model).
+
+        Guarded so a missing/None ``.model`` (or any odd payload) can NEVER
+        raise into the turn loop, where it would be misread as a turn crash.
+        A falsy model is ignored so the last known real model is preserved."""
+        try:
+            model = getattr(msg, "model", None)
+            if model:
+                self._last_model[name] = model
+        except Exception:  # noqa: BLE001 - model capture must never crash a turn
+            logger.exception("last-model capture failed for %s", name)
 
     async def _capture_usage(self, name: str, msg: ResultMessage) -> None:
         """Persist one turn's token/cost usage from a ResultMessage (B3c).
