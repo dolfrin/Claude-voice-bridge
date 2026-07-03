@@ -46,6 +46,10 @@ class Config:
     auto_discover_limit: int = 12
     open_vscode_on_enable: bool = False
     close_vscode_on_disable: bool = False
+    # Minutes of per-project idle before the next turn "wakes up" and gets an
+    # IDE catch-up (recent git changes + the gist of the most recent OTHER
+    # session) prepended. Feeds SessionManager.catchup_idle_seconds.
+    catchup_idle_minutes: int = 10
 
 
 @dataclass
@@ -156,6 +160,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         auto_discover_limit=_optional_int(env, "AUTO_DISCOVER_LIMIT", 12),
         open_vscode_on_enable=_optional_bool(env, "OPEN_VSCODE_ON_ENABLE", False),
         close_vscode_on_disable=_optional_bool(env, "CLOSE_VSCODE_ON_DISABLE", False),
+        catchup_idle_minutes=_optional_int(env, "CATCHUP_IDLE_MINUTES", 10),
     )
 
 

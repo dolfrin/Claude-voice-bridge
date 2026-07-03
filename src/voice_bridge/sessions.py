@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -43,6 +44,7 @@ from claude_agent_sdk import (
 )
 
 from .approvals import ApprovalManager, make_can_use_tool
+from .catchup import build_catchup
 from .config import (
     AUTONOMY_MODES,
     EFFORT_LEVELS,
@@ -96,6 +98,15 @@ _HEARTBEAT_SPOKEN = "Vis dar dirbu…"
 _RESTART_BACKOFF_BASE = 1.0
 _RESTART_BACKOFF_CAP = 30.0
 _RESTART_MAX_ATTEMPTS = 5
+
+# IDE catch-up (wake-up injection). When a project's first turn arrives after
+# this many seconds of bridge-side idle (or is its very first turn since the
+# bridge started / was re-enabled), a compact catch-up block — recent git
+# changes + the gist of the most recent OTHER (IDE) session — is PREPENDED to
+# the turn text so the bridge agent catches up on work done outside it. This is
+# inbound turn TEXT, never an Outbound, so it is never spoken. Default 10 min;
+# a config knob (CATCHUP_IDLE_MINUTES) and an instance attr both override it.
+_CATCHUP_IDLE_SECONDS = 600.0
 
 # Opt-in verbose tool-activity streaming (per project, default OFF). When a
 # project is verbose, each ToolUseBlock the agent runs is rendered to a compact
@@ -211,6 +222,17 @@ class SessionManager:
         # flush in a verbose turn. An instance attribute so tests set it tiny
         # for deterministic size-based batching.
         self.verbose_batch_size = _VERBOSE_BATCH_SIZE
+        # IDE catch-up wake-up state. _last_activity: last deliver time per
+        # project (monotonic seconds); a MISSING entry means "cold" -> the next
+        # deliver is a wake-up. catchup_idle_seconds: idle gap after which a
+        # deliver counts as a wake-up (fed from cfg.catchup_idle_minutes; tests
+        # set it tiny/large). _monotonic is injectable so tests can drive a
+        # fake clock deterministically.
+        self._last_activity: dict[str, float] = {}
+        self.catchup_idle_seconds = (
+            getattr(cfg, "catchup_idle_minutes", None) or 10
+        ) * 60.0
+        self._monotonic = time.monotonic
 
     # ------------------------------------------------------------------ #
     # Lookup
@@ -294,10 +316,42 @@ class SessionManager:
             sess = self._sessions.get(project)
             if sess is None:
                 return
+        # Wake-up detection: a project with no recorded activity (first turn
+        # since bridge start / re-enable) or one idle past catchup_idle_seconds
+        # gets a one-shot IDE catch-up PREPENDED to its turn text. Recorded
+        # AFTER the (possibly slow) catch-up build so a build that overruns the
+        # idle window cannot mark the project active prematurely.
+        now = self._monotonic()
+        last = self._last_activity.get(project)
+        if last is None or (now - last) > self.catchup_idle_seconds:
+            catchup = await self._maybe_catchup(project)
+            if catchup:
+                text = f"{catchup}\n\n---\n\n{text}"
+        self._last_activity[project] = self._monotonic()
         position = sess.queue.qsize() + 1
         await sess.queue.put(text)
         if position > 1:
             await self._emit_status(project, f"Queued: {position}.")
+
+    async def _maybe_catchup(self, project: str) -> str:
+        """Build the IDE catch-up block for *project*, guarded so a failure
+        (or a missing/odd session_id) can NEVER raise into deliver — a broken
+        catch-up must degrade to no injection, never a black-holed turn.
+
+        The project's OWN persisted session_id is excluded so the catch-up
+        surfaces the recent IDE session, not the bridge's own transcript."""
+        cfg = self._projects.get(project)
+        if cfg is None:
+            return ""
+        try:
+            session_id = await self._store.get_session_id(project)
+        except Exception:  # noqa: BLE001 - store hiccup must not break deliver
+            session_id = None
+        try:
+            return await build_catchup(cfg.cwd, exclude_session_id=session_id)
+        except Exception:  # noqa: BLE001 - build_catchup never raises, but guard
+            logger.exception("catchup build failed for %s", project)
+            return ""
 
     async def _ensure_started(self, name: str) -> None:
         """Start *name* if not running, guarding against double-start races.
@@ -339,6 +393,11 @@ class SessionManager:
             return
         await self._store.set_enabled(project, enabled)
         if enabled:
+            # Re-enabling forces a fresh wake-up catch-up on the next turn:
+            # drop the activity marker so the project reads as "cold". (A
+            # crash-auto-restart deliberately does NOT clear it, so a mid-
+            # conversation restart won't re-inject.)
+            self._last_activity.pop(project, None)
             if self._cfg.open_vscode_on_enable:
                 await self._open_vscode(self._projects[project])
             await self._start(project)

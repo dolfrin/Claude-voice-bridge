@@ -206,6 +206,18 @@ def _patch_sdk(monkeypatch):
     FakeClaudeSDKClient.fail_connect = False
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_catchup(monkeypatch):
+    """Default build_catchup to a no-op so ordinary deliver tests stay hermetic
+    (no real git subprocess / transcript reads on the first-turn wake-up). The
+    catch-up wiring tests re-patch it with their own fake."""
+
+    async def _empty(cwd, exclude_session_id=None, **kw):
+        return ""
+
+    monkeypatch.setattr(sessions_mod, "build_catchup", _empty)
+
+
 async def _wait_for(predicate, tries=300, delay=0.005):
     for _ in range(tries):
         if predicate():
@@ -1871,5 +1883,149 @@ async def test_verbose_session_id_and_usage_still_captured():
     call = store.usage_calls[0]
     assert call["input_tokens"] == 10
     assert call["output_tokens"] == 5
+
+    await sm.stop_all()
+
+
+# --------------------------------------------------------------------------- #
+# IDE catch-up (wake-up injection). build_catchup is patched so these never
+# touch the filesystem — they assert the WIRING (when it runs, what it prefixes,
+# which session_id it excludes), not the block's content.
+# --------------------------------------------------------------------------- #
+
+def _patch_catchup(monkeypatch, *, block="CATCHUP_BLOCK"):
+    """Patch sessions.build_catchup to a sentinel-returning fake; return a
+    calls list of (cwd, exclude_session_id)."""
+    calls: list[tuple] = []
+
+    async def fake_build(cwd, exclude_session_id=None, **kw):
+        calls.append((cwd, exclude_session_id))
+        return block
+
+    monkeypatch.setattr(sessions_mod, "build_catchup", fake_build)
+    return calls
+
+
+async def test_deliver_first_turn_injects_catchup(monkeypatch):
+    calls = _patch_catchup(monkeypatch)
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True}, session_ids={"qwing": "own-sess"})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[assistant("ok"), result()]]
+
+    await sm.deliver("qwing", "hello")
+    assert await _wait_for(lambda: bool(client.queries))
+
+    # Prepended as "<catchup>\n\n---\n\n<text>".
+    assert client.queries[0] == "CATCHUP_BLOCK\n\n---\n\nhello"
+    # The project's OWN persisted session_id is excluded from the catch-up.
+    assert calls == [("/tmp/qwing", "own-sess")]
+
+    await sm.stop_all()
+
+
+async def test_deliver_second_turn_within_idle_skips_catchup(monkeypatch):
+    calls = _patch_catchup(monkeypatch)
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)  # default idle window (10 min)
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+
+    await sm.deliver("qwing", "first")
+    assert await _wait_for(lambda: len(client.queries) >= 1)
+    await sm.deliver("qwing", "second")
+    assert await _wait_for(lambda: len(client.queries) >= 2)
+
+    assert client.queries[0] == "CATCHUP_BLOCK\n\n---\n\nfirst"
+    assert client.queries[1] == "second"  # no re-injection within the window
+    assert len(calls) == 1
+
+    await sm.stop_all()
+
+
+async def test_deliver_after_idle_reinjects_catchup(monkeypatch):
+    calls = _patch_catchup(monkeypatch)
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    sm.catchup_idle_seconds = 100.0
+    clock = {"t": 1000.0}
+    sm._monotonic = lambda: clock["t"]
+
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+
+    await sm.deliver("qwing", "first")
+    assert await _wait_for(lambda: len(client.queries) >= 1)
+
+    clock["t"] = 1000.0 + 200.0  # advance past the idle window
+    await sm.deliver("qwing", "second")
+    assert await _wait_for(lambda: len(client.queries) >= 2)
+
+    assert client.queries[0] == "CATCHUP_BLOCK\n\n---\n\nfirst"
+    assert client.queries[1] == "CATCHUP_BLOCK\n\n---\n\nsecond"
+    assert len(calls) == 2
+
+    await sm.stop_all()
+
+
+async def test_set_enabled_clears_catchup_marker(monkeypatch):
+    calls = _patch_catchup(monkeypatch)
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)  # default idle window
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+
+    await sm.deliver("qwing", "first")
+    assert await _wait_for(lambda: len(client.queries) >= 1)
+
+    # Re-enabling clears the activity marker -> next turn is a wake-up again,
+    # even though we are well within the idle window.
+    await sm.set_enabled("qwing", True)
+    await sm.deliver("qwing", "second")
+    assert await _wait_for(lambda: len(client.queries) >= 2)
+
+    assert client.queries[1] == "CATCHUP_BLOCK\n\n---\n\nsecond"
+    assert len(calls) == 2
+
+    await sm.stop_all()
+
+
+async def test_deliver_unchanged_when_catchup_empty(monkeypatch):
+    _patch_catchup(monkeypatch, block="")  # nothing useful to inject
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+
+    await sm.deliver("qwing", "hello")
+    assert await _wait_for(lambda: bool(client.queries))
+
+    assert client.queries[0] == "hello"  # empty catch-up -> text unchanged
 
     await sm.stop_all()
