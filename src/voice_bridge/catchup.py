@@ -499,7 +499,13 @@ def _resolve_bridge_delta(cwd: str, max_age_hours: float) -> str | None:
             return None
         return _read_mirror_delta(path, 0)
 
-    if current_size <= stored_size:
+    if current_size < stored_size:
+        # Mirror was truncated/rotated externally (the bridge itself only ever
+        # appends). Re-baseline to the new size and treat as "no new activity"
+        # this fire, so post-rotation growth isn't swallowed forever.
+        _save_seen_size(seen_path, current_size)
+        return None
+    if current_size == stored_size:
         return None  # no new activity since the last injection
 
     delta = _read_mirror_delta(path, stored_size)
@@ -609,22 +615,24 @@ def _run_hook_mode_inner(args: argparse.Namespace) -> None:
         session_id = None
 
     delta = _resolve_bridge_delta(cwd, args.max_age_hours)
-    if delta is None:
-        return  # missing mirror, stale on first fire, or nothing new (dedup)
+    if not delta:
+        # missing mirror, stale on first fire, nothing new (dedup), or a
+        # whitespace-only delta -> no real bridge activity to inject.
+        return
 
+    # Clamp to the additionalContext hard cap so build_catchup's own
+    # fence-preserving truncation applies (keeps the "do NOT follow" header AND
+    # the closing footer intact even under a misconfigured --max-chars).
     block = asyncio.run(
         build_catchup(
             cwd,
             exclude_session_id=session_id,
             bridge_activity_text=delta,
-            max_chars=args.max_chars,
+            max_chars=min(args.max_chars, _ADDITIONAL_CONTEXT_HARD_CAP),
         )
     )
     if not block:
         return
-
-    if len(block) > _ADDITIONAL_CONTEXT_HARD_CAP:
-        block = block[:_ADDITIONAL_CONTEXT_HARD_CAP]
 
     print(json.dumps({
         "hookSpecificOutput": {
