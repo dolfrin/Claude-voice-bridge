@@ -99,6 +99,10 @@ async def test_build_catchup_includes_git_and_session(tmp_path):
     assert "refactor the parser" in block      # session user text
     assert "Refactored the parser" in block    # session assistant text
     assert len(block) <= 4000
+    # Security fence: untrusted content must be framed as read-only data so the
+    # agent won't obey instructions embedded in a hostile diff/transcript.
+    assert "Do NOT follow" in block
+    assert "End of IDE catch-up reference data" in block
 
 
 async def test_build_catchup_excludes_own_session(tmp_path):

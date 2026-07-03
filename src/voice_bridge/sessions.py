@@ -229,9 +229,10 @@ class SessionManager:
         # set it tiny/large). _monotonic is injectable so tests can drive a
         # fake clock deterministically.
         self._last_activity: dict[str, float] = {}
+        minutes = getattr(cfg, "catchup_idle_minutes", None)
         self.catchup_idle_seconds = (
-            getattr(cfg, "catchup_idle_minutes", None) or 10
-        ) * 60.0
+            minutes * 60.0 if minutes else _CATCHUP_IDLE_SECONDS
+        )
         self._monotonic = time.monotonic
 
     # ------------------------------------------------------------------ #
