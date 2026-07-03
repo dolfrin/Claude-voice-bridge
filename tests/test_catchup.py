@@ -9,11 +9,14 @@ never exceeds ``max_chars``.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
+import sys
+import time
 
-from voice_bridge.catchup import build_catchup
+from voice_bridge.catchup import build_catchup, main
 
 
 # --------------------------------------------------------------------------- #
@@ -206,3 +209,377 @@ async def test_build_catchup_never_raises_on_bad_cwd(tmp_path):
         str(missing), projects_root=str(tmp_path / "projects"),
     )
     assert block == ""
+
+
+# --------------------------------------------------------------------------- #
+# include_bridge_mirror / bridge_activity_text
+# --------------------------------------------------------------------------- #
+
+async def test_build_catchup_includes_bridge_mirror_tail(tmp_path):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "voice-bridge-chat.md").write_text(
+        "# Voice Bridge Chat\n\n## turn\n\nTELEGRAM_MIRROR_MARKER_TEXT\n"
+    )
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    block = await build_catchup(
+        str(repo), projects_root=str(projects_root), include_bridge_mirror=True,
+    )
+
+    assert "Telegram bridge activity:" in block
+    assert "TELEGRAM_MIRROR_MARKER_TEXT" in block
+
+
+async def test_build_catchup_without_mirror_file_skips_section(tmp_path):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    block = await build_catchup(
+        str(repo), projects_root=str(projects_root), include_bridge_mirror=True,
+    )
+
+    assert "Telegram bridge activity" not in block
+
+
+async def test_build_catchup_default_ignores_mirror_file(tmp_path):
+    """Forward-compat: existing callers that don't pass include_bridge_mirror
+    must see unchanged behavior even if a mirror file happens to exist."""
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "voice-bridge-chat.md").write_text("SHOULD_NOT_APPEAR_MARKER\n")
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    block = await build_catchup(str(repo), projects_root=str(projects_root))
+
+    assert "SHOULD_NOT_APPEAR_MARKER" not in block
+    assert "Telegram bridge activity" not in block
+
+
+async def test_build_catchup_bridge_activity_text_used_verbatim(tmp_path):
+    """The CLI's dedup layer passes an already-computed delta directly; it
+    must be used as-is instead of re-reading the mirror file."""
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    block = await build_catchup(
+        str(repo),
+        projects_root=str(projects_root),
+        bridge_activity_text="INLINE_DELTA_MARKER",
+    )
+
+    assert "Telegram bridge activity:" in block
+    assert "INLINE_DELTA_MARKER" in block
+
+
+async def test_build_catchup_bridge_activity_text_overrides_file(tmp_path):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "voice-bridge-chat.md").write_text("FULL_FILE_MARKER\n")
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    block = await build_catchup(
+        str(repo),
+        projects_root=str(projects_root),
+        include_bridge_mirror=True,
+        bridge_activity_text="DELTA_ONLY_MARKER",
+    )
+
+    assert "DELTA_ONLY_MARKER" in block
+    assert "FULL_FILE_MARKER" not in block
+
+
+async def test_build_catchup_blank_bridge_activity_text_skips_section(tmp_path):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+
+    block = await build_catchup(
+        str(repo),
+        projects_root=str(projects_root),
+        bridge_activity_text="   \n  ",
+    )
+
+    assert "Telegram bridge activity" not in block
+
+
+# --------------------------------------------------------------------------- #
+# CLI (`python -m voice_bridge.catchup`)
+#
+# ``main()`` internally wraps the async build_catchup with asyncio.run(), so
+# these tests must be plain ``def`` (not ``async def``) — running them inside
+# pytest-asyncio's event loop would make that asyncio.run() raise.
+#
+# HOME is monkeypatched to a tmp dir for every case that reaches build_catchup
+# so the default ``~/.claude/projects`` lookup never touches the real one.
+# --------------------------------------------------------------------------- #
+
+def _set_stdin(monkeypatch, payload: dict) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+
+
+def _seen_path(repo):
+    return repo / ".claude" / ".voice-bridge-catchup-seen.json"
+
+
+# --- SessionStart / basic hook-mode plumbing -------------------------------- #
+
+def test_hook_mode_fresh_mirror_produces_valid_json_output(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "voice-bridge-chat.md").write_text("## turn\n\nhi from telegram\n")
+
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "SessionStart", "cwd": str(repo),
+        "session_id": "s1", "source": "startup",
+    })
+    main(["--hook"])
+
+    out = capsys.readouterr().out.strip()
+    assert out
+    data = json.loads(out)  # must be valid JSON
+    assert data["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    ctx = data["hookSpecificOutput"]["additionalContext"]
+    assert ctx
+    assert len(ctx) <= 9500
+
+
+def test_hook_mode_session_start_compact_prints_nothing_and_skips_dedup(
+    tmp_path, monkeypatch, capsys,
+):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "voice-bridge-chat.md").write_text("fresh activity\n")
+
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "SessionStart", "cwd": str(repo),
+        "session_id": "s1", "source": "compact",
+    })
+    main(["--hook"])
+
+    assert capsys.readouterr().out == ""
+    assert not _seen_path(repo).exists()  # never reached the dedup logic
+
+
+def test_hook_mode_missing_mirror_prints_nothing(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "SessionStart", "cwd": str(repo),
+        "session_id": "s1", "source": "startup",
+    })
+    main(["--hook"])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_hook_mode_malformed_stdin_prints_nothing_and_does_not_raise(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO("not valid json {{{"))
+
+    main(["--hook"])  # must not raise
+
+    assert capsys.readouterr().out == ""
+
+
+def test_hook_mode_missing_cwd_prints_nothing(monkeypatch, capsys):
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "SessionStart", "session_id": "s1", "source": "startup",
+    })
+    main(["--hook"])
+    assert capsys.readouterr().out == ""
+
+
+def test_hook_mode_empty_cwd_prints_nothing(monkeypatch, capsys):
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "SessionStart", "cwd": "", "session_id": "s1",
+        "source": "startup",
+    })
+    main(["--hook"])
+    assert capsys.readouterr().out == ""
+
+
+def test_hook_mode_unsupported_event_prints_nothing(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "voice-bridge-chat.md").write_text("activity\n")
+
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "PreToolUse", "cwd": str(repo), "session_id": "s1",
+    })
+    main(["--hook"])
+    assert capsys.readouterr().out == ""
+
+
+# --- Dedup (the "seen" marker) ----------------------------------------------- #
+
+def test_hook_mode_dedup_across_three_fires(tmp_path, monkeypatch, capsys):
+    """fire 1 (fresh mirror) injects + writes the seen marker; fire 2 (mirror
+    unchanged) is silent; after new turns are appended, fire 3 injects ONLY
+    the new delta and advances the marker."""
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    mirror = claude_dir / "voice-bridge-chat.md"
+    mirror.write_text("## turn 1\n\nFIRST_MARKER\n")
+
+    # Fire 1: first ever, fresh mirror -> injects + creates the seen marker.
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "SessionStart", "cwd": str(repo),
+        "session_id": "s1", "source": "startup",
+    })
+    main(["--hook"])
+    out1 = capsys.readouterr().out.strip()
+    assert out1
+    ctx1 = json.loads(out1)["hookSpecificOutput"]["additionalContext"]
+    assert "FIRST_MARKER" in ctx1
+    seen_file = _seen_path(repo)
+    assert seen_file.exists()
+    assert json.loads(seen_file.read_text())["mirror_size"] == mirror.stat().st_size
+
+    # Fire 2: mirror unchanged -> dedup gate -> nothing.
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "UserPromptSubmit", "cwd": str(repo),
+        "session_id": "s1", "prompt": "hi",
+    })
+    main(["--hook"])
+    assert capsys.readouterr().out == ""
+
+    # Fire 3: new turns appended -> only the delta is injected.
+    with mirror.open("a") as fh:
+        fh.write("\n## turn 2\n\nSECOND_MARKER\n")
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "UserPromptSubmit", "cwd": str(repo),
+        "session_id": "s1", "prompt": "hi again",
+    })
+    main(["--hook"])
+    out3 = capsys.readouterr().out.strip()
+    assert out3
+    data3 = json.loads(out3)
+    assert data3["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    ctx3 = data3["hookSpecificOutput"]["additionalContext"]
+    assert "SECOND_MARKER" in ctx3
+    assert "FIRST_MARKER" not in ctx3
+    assert json.loads(seen_file.read_text())["mirror_size"] == mirror.stat().st_size
+
+
+def test_hook_mode_first_fire_stale_mirror_prints_nothing_but_baselines(
+    tmp_path, monkeypatch, capsys,
+):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    mirror = claude_dir / "voice-bridge-chat.md"
+    mirror.write_text("ancient activity\n")
+    old = time.time() - 3600 * 24  # 24h old > default 12h max-age
+    os.utime(mirror, (old, old))
+
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "SessionStart", "cwd": str(repo),
+        "session_id": "s1", "source": "startup",
+    })
+    main(["--hook"])
+
+    assert capsys.readouterr().out == ""
+    seen_file = _seen_path(repo)
+    assert seen_file.exists()
+    assert json.loads(seen_file.read_text())["mirror_size"] == mirror.stat().st_size
+
+    # New content appended afterwards -> only the new bytes are ever surfaced,
+    # never the ancient backlog that predates the baseline.
+    with mirror.open("a") as fh:
+        fh.write("BRAND_NEW_MARKER\n")
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "SessionStart", "cwd": str(repo),
+        "session_id": "s1", "source": "startup",
+    })
+    main(["--hook"])
+    out = capsys.readouterr().out.strip()
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "BRAND_NEW_MARKER" in ctx
+    assert "ancient activity" not in ctx
+
+
+# --- UserPromptSubmit -------------------------------------------------------- #
+
+def test_hook_mode_user_prompt_submit_echoes_event_name_and_is_dedup_gated(
+    tmp_path, monkeypatch, capsys,
+):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    claude_dir = repo / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "voice-bridge-chat.md").write_text("UPS_MARKER\n")
+
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "UserPromptSubmit", "cwd": str(repo),
+        "session_id": "s1", "prompt": "what changed?",
+    })
+    main(["--hook"])
+    out = capsys.readouterr().out.strip()
+    data = json.loads(out)
+    assert data["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "UPS_MARKER" in data["hookSpecificOutput"]["additionalContext"]
+
+    # Fired again in the same open session with no new bridge activity ->
+    # dedup gate blocks a repeat injection on every prompt.
+    _set_stdin(monkeypatch, {
+        "hook_event_name": "UserPromptSubmit", "cwd": str(repo),
+        "session_id": "s1", "prompt": "anything else?",
+    })
+    main(["--hook"])
+    assert capsys.readouterr().out == ""
+
+
+# --- Plain mode --------------------------------------------------------------- #
+
+def test_plain_mode_prints_block(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    main([str(repo)])
+
+    out = capsys.readouterr().out
+    assert "[IDE catch-up" in out
+    assert "untracked.txt" in out
+
+
+def test_plain_mode_accepts_exclude_flag(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    main([str(repo), "--exclude", "some-session-id"])
+
+    out = capsys.readouterr().out
+    assert "[IDE catch-up" in out
