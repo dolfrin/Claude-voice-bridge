@@ -296,7 +296,8 @@ All keys and their meaning:
 | `TOGETHER_TTS_MODEL` | `cartesia/sonic` | Together TTS model |
 | `TOGETHER_TTS_LANGUAGE` | `auto` | Together TTS language hint; `auto` omits the provider hint |
 | `TTS_BACKEND` | `openai` | `auto`, `openai`, `piper`, or `together` |
-| `TTS_VOICE` | `alloy` | Voice name; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |
+| `TTS_VOICE` | `alloy` | Default voice; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |
+| `TTS_ALERT_VOICE` | — | Optional distinct voice for approval questions and crash notices (falls back to `TTS_VOICE` if unset) |
 | `PIPER_VOICE_PATH` | — | Absolute path to `.onnx` model; required for `piper` and English auto TTS |
 | `WHISPER_MODEL` | `large-v3` | faster-whisper model name |
 | `AUTONOMY_MODE` | `safe` | `full` (run everything) / `safe` (ask for risky ops) / `ask` (ask for all) |
@@ -326,14 +327,16 @@ directories overlap.
 projects:
   - name: app
     cwd: /home/home/Projects/app
+    display_name: App              # optional label shown in Telegram (default: name)
     enabled: true
-    autonomy: safe            # optional; overrides global AUTONOMY_MODE
-    voice: alloy               # optional; overrides global TTS_VOICE
-    model: claude-opus-4-8    # optional Claude model for this project
-    system_prompt_extra: ""   # optional extra instructions appended to system prompt
+    autonomy: safe                 # optional; overrides global AUTONOMY_MODE (safe|full|ask)
+    voice: alloy                   # optional; overrides global TTS_VOICE
+    model: claude-opus-4-8        # optional Claude model (omit for account default)
+    effort: high                   # optional reasoning effort: low|medium|high|xhigh|max
+    verbose: false                 # true = stream live tool-activity while working
+    system_prompt_extra: ""        # optional extra instructions appended to system prompt
 
   - name: api
-    display_name: API              # optional label shown in Telegram
     cwd: /home/home/Projects/api
     enabled: false
 ```
@@ -389,7 +392,7 @@ journalctl --user -u voice-bridge -f
 |  | Command | Effect |
 |---|---|---|
 | 🏠 | `/menu` | Main tappable menu |
-| 🎛 | `/panel` | Full control board: per-project on/off, mode, voice, engine |
+| 🎛 | `/panel` | Full control board: per-project on/off, mode, voice, verbose (🔧); global ALL ON / ALL OFF, engine, 💰 Cost, 🗒 Recap |
 | 🟢 | `/projects` | Active/last-active projects with select and on/off buttons |
 | 📚 | `/projects_all` or `/projects all` | All known projects, including disabled ones |
 | 🔎 | `/projects_refresh` | Scan recent VS Code/Claude projects and add new ones disabled |
@@ -398,9 +401,14 @@ journalctl --user -u voice-bridge -f
 | ⏸ | `/off [project]` | Disable one project, or all projects with no arg |
 | ⛔ | `/stop [project]` | Interrupt and restart active or named project, clearing queued work |
 | 📡 | `/status [project]` | Ask a project for a quick status update |
+| ℹ️ | `/info` | Show per-project model, effort, mode, voice, and verbose setting |
 | 🛡 | `/mode <full\|safe\|ask> [project]` | Set autonomy globally or per project |
+| 🧩 | `/effort <low\|medium\|high\|xhigh\|max> [project]` | Set reasoning effort globally or per project |
 | 🔊 | `/voice list` / `/voice <name> [for <project>]` | List or set TTS voices |
+| 🔧 | `/verbose [on\|off] [project]` | Toggle live tool-activity streaming (default off); omit on/off to enable |
 | 🧠 | `/engine <auto\|openai\|piper\|together>` | Switch TTS backend live |
+| 🗒 | `/recap` | Show what changed across all projects while you were away |
+| 💰 | `/cost` | Show per-project and total token and cost usage |
 
 Telegram turns are mirrored into each project's `.claude/voice-bridge-chat.md`
 so the voice/text conversation is visible from the IDE file tree.
@@ -469,10 +477,14 @@ Every project session gets an in-process MCP server named `bridge` with these to
 | `safe` | Agent asks for confirmation before flagged risky operations (e.g. `git push`) |
 | `ask` | Agent asks before every tool call |
 
-In `safe` and `ask` modes you receive a voice+text question and reply "yes" or
-"no". No reply within
-`APPROVAL_TIMEOUT` seconds auto-denies the operation and the agent is told it was
-skipped.
+In `safe` and `ask` modes you receive a voice+text question showing the command or diff
+and two inline buttons: **✅ Leisti** (Allow) and **❌ Neleisti** (Deny). Tap a button or
+reply "yes" / "no" by text. No reply within `APPROVAL_TIMEOUT` seconds auto-denies the
+operation and the agent is told it was skipped.
+
+If `TTS_ALERT_VOICE` is set, approval questions and crash notices are spoken with that
+distinct voice so they stand out when you are away from your desk. Falls back to
+`TTS_VOICE` when unset.
 
 ---
 
