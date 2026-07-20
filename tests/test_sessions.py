@@ -1332,6 +1332,35 @@ async def test_deliver_recovery_no_double_start_when_called_twice():
     await sm.stop_all()
 
 
+async def test_deliver_recovery_failed_start_emits_error_and_rearms_supervision():
+    # Problem 2b: when the deliver-recovery start fails, the turn must NOT be
+    # silently black-holed (an error Outbound is emitted) AND supervision must
+    # be re-armed (a restart supervisor is scheduled, not left dead).
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    # Every connect fails -> the recovery start inside deliver fails.
+    FakeClaudeSDKClient.fail_connect = True
+    assert sm.is_running("qwing") is False
+
+    await sm.deliver("qwing", "wake up")
+
+    # (a) the turn is surfaced, not silently lost.
+    assert await _wait_for(
+        lambda: any("nepavyko paleisti" in o.text for o in outbound)
+    )
+    # (b) a restart supervisor was scheduled and is live (not dead).
+    assert "qwing" in sm._restart_tasks
+    assert not sm._restart_tasks["qwing"].done()
+
+    await sm.stop_all()
+
+
 # --------------------------------------------------------------------------- #
 # error ResultMessage with no assistant text (problem 3)
 # --------------------------------------------------------------------------- #
@@ -2027,5 +2056,44 @@ async def test_deliver_unchanged_when_catchup_empty(monkeypatch):
     assert await _wait_for(lambda: bool(client.queries))
 
     assert client.queries[0] == "hello"  # empty catch-up -> text unchanged
+
+
+async def test_wakeup_catchup_not_mirrored_to_ide_transcript(monkeypatch):
+    # Task C: the wake-up catch-up is PREPENDED to the text sent to the SDK
+    # (the agent still needs it), but the IDE transcript mirror must receive
+    # ONLY the raw user message. Otherwise the reverse-catchup hook re-injects
+    # the bridge's own catch-up back into the IDE, growing on itself.
+    _patch_catchup(monkeypatch, block="CATCHUP_BLOCK")
+    recorded: list[tuple[str, str]] = []
+
+    async def fake_append(cwd, role, text):
+        recorded.append((role, text))
+
+    monkeypatch.setattr(sessions_mod, "append_transcript", fake_append)
+
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[assistant("ok"), result()]]
+
+    await sm.deliver("qwing", "hello there")
+    assert await _wait_for(
+        lambda: bool(client.queries) and any(r[0] == "user" for r in recorded)
+    )
+
+    # The SDK client received the catch-up-prefixed text (agent needs context).
+    assert client.queries[0] == "CATCHUP_BLOCK\n\n---\n\nhello there"
+    # But the IDE transcript mirror got ONLY the raw user message.
+    user_rows = [text for role, text in recorded if role == "user"]
+    assert user_rows == ["hello there"]
+    assert "CATCHUP_BLOCK" not in user_rows[0]
+
+    await sm.stop_all()
 
     await sm.stop_all()

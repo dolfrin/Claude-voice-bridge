@@ -665,12 +665,39 @@ class _Controls:
         self.mark_last_active(target)
         return f"{target}: interrupted." if stopped else f"{target}: restarted."
 
+    async def _persist_override(self, project: str, field: str, value) -> None:
+        """Best-effort persist of a runtime override (Task A).
+
+        A store write failure must NEVER crash the command or block the
+        in-memory change: it is logged and swallowed. Persisting the change
+        (esp. a demoted autonomy) is what makes it survive a restart instead of
+        silently reverting to — or re-escalating from — the yaml default."""
+        try:
+            await self._store.set_override(project, field, value)
+        except Exception:  # noqa: BLE001 - persist is best-effort
+            logger.exception(
+                "persist override %s=%r for %s failed", field, value, project
+            )
+
+    async def _persist_created(
+        self, name: str, cwd: str, display_name: str | None = None
+    ) -> None:
+        """Best-effort persist of a runtime-created project (Task A).
+
+        Guarded like :meth:`_persist_override` so a store failure never turns a
+        successful /newproject into a reported error."""
+        try:
+            await self._store.add_created_project(name, cwd, display_name)
+        except Exception:  # noqa: BLE001 - persist is best-effort
+            logger.exception("persist created project %s failed", name)
+
     async def set_mode(self, project: str | None, mode: str) -> None:
         targets = [project] if project is not None else list(self._mirror)
         for name in targets:
             if name in self._mirror:
                 self._mirror[name]["mode"] = mode
             await self._sessions.set_mode(name, mode)
+            await self._persist_override(name, "autonomy", mode)
         # Forwarded from Task 8: a live set_mode restarts the session and drops
         # any in-flight turn silently. Tell the user so they can re-issue it.
         if self._telegram is not None:
@@ -689,18 +716,21 @@ class _Controls:
             proj = self._sessions.project(name)
             if proj is not None:
                 proj.voice = voice  # so effective_voice picks it up
+            await self._persist_override(name, "voice", voice)
 
     async def set_verbose(self, project: str | None, on: bool) -> None:
         """Toggle live tool-activity streaming and mirror it for the snapshot.
 
-        In-memory only (verbose is a transient view toggle): flips the flag on
-        the SessionManager's ProjectConfig — where the live turn loop reads it —
-        and updates the mirror so a later /panel can surface it."""
+        Flips the flag on the SessionManager's ProjectConfig — where the live
+        turn loop reads it — updates the mirror so a later /panel can surface
+        it, and PERSISTS the override (Task A) so a restart restores it instead
+        of reverting to the yaml default."""
         targets = [project] if project is not None else list(self._mirror)
         for name in targets:
             if name in self._mirror:
                 self._mirror[name]["verbose"] = on
             await self._sessions.set_verbose(name, on)
+            await self._persist_override(name, "verbose", on)
 
     async def set_effort(self, project: str | None, level: str) -> None:
         """Set per-project reasoning effort and mirror it for the snapshot.
@@ -717,6 +747,7 @@ class _Controls:
             if name in self._mirror:
                 self._mirror[name]["effort"] = level
             await self._sessions.set_effort(name, level)
+            await self._persist_override(name, "effort", level)
 
     def info(self) -> str:
         """SYNC: one line per project with model (config + REAL), effort, mode,
@@ -855,6 +886,9 @@ class _Controls:
             if target.exists():
                 project = ProjectConfig(name=safe, cwd=str(target), enabled=True)
                 await self._register_projects([project])
+                # Persist so this runtime-registered project is reloaded across
+                # restarts instead of vanishing (Task A).
+                await self._persist_created(safe, str(target))
                 await self.toggle(safe, True)
                 await self.select(safe)
                 return f"Projektas {safe} rastas diske ({target}) — užregistravau ir perjungiau į jį."
@@ -864,6 +898,8 @@ class _Controls:
 
             project = ProjectConfig(name=safe, cwd=str(target), enabled=True)
             await self._register_projects([project])
+            # Persist so this freshly created project survives a restart (Task A).
+            await self._persist_created(safe, str(target))
             await self.toggle(safe, True)
             await self.select(safe)
             return f"Sukurtas projektas {safe} ({target}). Siųsk užduotį — dirbsiu jame."
@@ -913,7 +949,50 @@ async def build() -> Wiring:
 
     store = Store(cfg.db_path)
     await store.init()
+
+    # Merge dynamically-created projects persisted from a previous run (Task A):
+    # /newproject projects are not in projects.yaml, so without this they vanish
+    # on restart. One whose directory no longer exists on disk is skipped (log).
+    existing_names = {p.name for p in projects}
+    for row in await store.created_projects():
+        name = row.get("name")
+        cwd = row.get("cwd")
+        if not name or name in existing_names:
+            continue
+        if not cwd or not Path(cwd).is_dir():
+            logger.warning(
+                "build: created project %r cwd missing (%s), skipping", name, cwd
+            )
+            continue
+        projects.append(
+            ProjectConfig(
+                name=name,
+                cwd=cwd,
+                display_name=row.get("display_name"),
+                enabled=True,
+            )
+        )
+        existing_names.add(name)
+
     await store.seed(projects)
+
+    # Apply persisted runtime overrides onto the ProjectConfig objects BEFORE
+    # sessions start (Task A). Precedence: persisted override > yaml — so a
+    # project the user demoted (e.g. autonomy full -> safe) is restored demoted,
+    # never silently RE-ESCALATED back to the yaml default on restart.
+    by_name = {p.name: p for p in projects}
+    for name, override in (await store.overrides()).items():
+        proj = by_name.get(name)
+        if proj is None:
+            continue
+        if "autonomy" in override:
+            proj.autonomy = override["autonomy"]
+        if "voice" in override:
+            proj.voice = override["voice"]
+        if "verbose" in override:
+            proj.verbose = override["verbose"]
+        if "effort" in override:
+            proj.effort = override["effort"]
 
     tts_holder = {"backend": get_tts(cfg)}
     transcriber = Transcriber(cfg.whisper_model)

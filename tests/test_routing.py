@@ -340,3 +340,158 @@ async def test_usage_survives_new_store_instance(tmp_db):
     assert usage["turns"] == 1
     assert usage["input_tokens"] == 42
     assert usage["cost_usd"] == pytest.approx(0.05)
+
+
+# ---------------------------------------------------------------------------
+# Step 8: per-project runtime overrides (autonomy/voice/verbose/effort) (Task A)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_overrides_empty_when_none_set(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.seed([_proj("qwing", enabled=True)])
+
+    assert await store.overrides() == {}
+
+
+@pytest.mark.asyncio
+async def test_set_override_round_trip_only_non_null_fields(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.seed([_proj("qwing", enabled=True)])
+
+    await store.set_override("qwing", "autonomy", "safe")
+    await store.set_override("qwing", "effort", "high")
+
+    assert await store.overrides() == {"qwing": {"autonomy": "safe", "effort": "high"}}
+
+
+@pytest.mark.asyncio
+async def test_set_override_verbose_stored_as_bool(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.set_override("qwing", "verbose", True)
+
+    assert await store.overrides() == {"qwing": {"verbose": True}}
+
+    await store.set_override("qwing", "verbose", False)
+    assert await store.overrides() == {"qwing": {"verbose": False}}
+
+
+@pytest.mark.asyncio
+async def test_set_override_creates_row_preserving_enabled_default(tmp_db):
+    store = Store(tmp_db)
+    await store.init()  # no seed
+    await store.set_override("lazy", "voice", "sage")
+
+    assert await store.overrides() == {"lazy": {"voice": "sage"}}
+    assert await store.is_enabled("lazy") is True  # row created enabled=1
+
+
+@pytest.mark.asyncio
+async def test_set_override_rejects_unknown_field(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    with pytest.raises(ValueError):
+        await store.set_override("qwing", "model", "claude-opus-4-8")
+
+
+@pytest.mark.asyncio
+async def test_override_survives_new_store_instance(tmp_db):
+    s1 = Store(tmp_db)
+    await s1.init()
+    await s1.seed([_proj("qwing", enabled=True)])
+    await s1.set_override("qwing", "autonomy", "safe")
+
+    s2 = Store(tmp_db)
+    await s2.init()
+    assert await s2.overrides() == {"qwing": {"autonomy": "safe"}}
+
+
+# ---------------------------------------------------------------------------
+# Step 9: dynamically-created projects (/newproject persistence) (Task A)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_created_projects_empty_by_default(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.seed([_proj("qwing", enabled=True)])  # a plain seeded project
+
+    assert await store.created_projects() == []
+
+
+@pytest.mark.asyncio
+async def test_add_created_project_round_trip(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_created_project("newapp", "/home/me/Projects/newapp", "New App")
+
+    created = await store.created_projects()
+    assert created == [
+        {"name": "newapp", "cwd": "/home/me/Projects/newapp", "display_name": "New App"}
+    ]
+    # a created project is enabled by default so it boots on the next restart
+    assert await store.is_enabled("newapp") is True
+
+
+@pytest.mark.asyncio
+async def test_add_created_project_preserves_enabled_toggle(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_created_project("newapp", "/p/newapp", None)
+    await store.set_enabled("newapp", False)
+    # re-registering the same created project must not flip a user toggle back on
+    await store.add_created_project("newapp", "/p/newapp", None)
+
+    assert await store.is_enabled("newapp") is False
+
+
+@pytest.mark.asyncio
+async def test_created_projects_survive_new_store_instance(tmp_db):
+    s1 = Store(tmp_db)
+    await s1.init()
+    await s1.add_created_project("newapp", "/p/newapp", None)
+
+    s2 = Store(tmp_db)
+    await s2.init()
+    assert await s2.created_projects() == [
+        {"name": "newapp", "cwd": "/p/newapp", "display_name": None}
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Step 10: schema migration must not destroy an existing (old-schema) db
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_init_migrates_old_projects_table_without_data_loss(tmp_db):
+    # Simulate a pre-existing db created by the OLD schema (no override /
+    # created columns), carrying real user state.
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.executescript(
+            """
+            CREATE TABLE projects (
+                name       TEXT PRIMARY KEY,
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                session_id TEXT
+            );
+            """
+        )
+        await db.execute(
+            "INSERT INTO projects (name, enabled, session_id) VALUES (?, ?, ?)",
+            ("qwing", 0, "sess-old"),
+        )
+        await db.commit()
+
+    # New code migrates additively: existing rows and their state survive.
+    store = Store(tmp_db)
+    await store.init()
+
+    assert await store.is_enabled("qwing") is False
+    assert await store.get_session_id("qwing") == "sess-old"
+    # the new columns exist and read as "no override"
+    assert await store.overrides() == {}
+    await store.set_override("qwing", "autonomy", "safe")
+    assert await store.overrides() == {"qwing": {"autonomy": "safe"}}

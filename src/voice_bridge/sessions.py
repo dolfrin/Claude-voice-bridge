@@ -331,13 +331,20 @@ class SessionManager:
         # idle window cannot mark the project active prematurely.
         now = self._monotonic()
         last = self._last_activity.get(project)
+        # Keep the RAW user message separate from the catch-up-prefixed text:
+        # the SDK gets the prefixed text (the agent needs the catch-up), but the
+        # IDE transcript mirror must receive ONLY the original message (Task C).
+        # Mirroring the combined string would let the reverse-catchup hook
+        # re-inject the bridge's own catch-up back into the IDE, growing on
+        # itself. The queue therefore carries a (sdk_text, mirror_text) pair.
+        mirror_text = text
         if last is None or (now - last) > self.catchup_idle_seconds:
             catchup = await self._maybe_catchup(project)
             if catchup:
                 text = f"{catchup}\n\n---\n\n{text}"
         self._last_activity[project] = self._monotonic()
         position = sess.queue.qsize() + 1
-        await sess.queue.put(text)
+        await sess.queue.put((text, mirror_text))
         if position > 1:
             await self._emit_status(project, f"Queued: {position}.")
 
@@ -370,7 +377,11 @@ class SessionManager:
 
         A per-project lock serializes concurrent recovery starts; any pending
         restart supervisor is cancelled first so it cannot start a second
-        client. A failed start is logged (deliver stays best-effort).
+        client. A failed start must NOT black-hole the turn nor kill
+        supervision: it emits a user-facing error Outbound (so the turn is not
+        silently lost — deliver then finds no session and returns) AND re-arms
+        supervision via :meth:`_schedule_restart` (whose ``_closed``/``_stopping``
+        guards do not block this path), so ``_attempts``/give-up still function.
         """
         if name in self._sessions:
             return
@@ -385,8 +396,25 @@ class SessionManager:
                 # Already holding the per-project lock: call the locked variant
                 # directly (self._start would re-acquire and deadlock).
                 await self._start_locked(name)
-            except Exception:  # noqa: BLE001 - deliver recovery is best-effort
+            except Exception as err:  # noqa: BLE001 - deliver recovery is best-effort
                 logger.exception("deliver recovery: failed to start %s", name)
+                try:
+                    await self._on_outbound(
+                        Outbound(
+                            project=name,
+                            text=f"{name}: nepavyko paleisti — {err}",
+                            spoken="nepavyko paleisti",
+                            alert=True,
+                        )
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception(
+                        "deliver recovery: failed to emit start failure for %s",
+                        name,
+                    )
+                # Re-arm supervision so the project is not left with a dead
+                # supervisor (the earlier _cancel_restart removed it).
+                self._schedule_restart(name)
 
     async def interrupt(self, project: str) -> bool:
         """Cancel the running session, drop queued turns, and restart if enabled."""
@@ -716,12 +744,17 @@ class SessionManager:
         assert sess.client is not None
         client = sess.client
         while True:
-            text = await sess.queue.get()
-            if text is _SHUTDOWN:
+            item = await sess.queue.get()
+            if item is _SHUTDOWN:
                 return
+            # Each queued turn is a (sdk_text, mirror_text) pair: sdk_text may
+            # carry a wake-up catch-up prefix, mirror_text is the raw user
+            # message. The SDK gets the former; the IDE transcript gets the
+            # latter (Task C — do not echo our own catch-up back into the IDE).
+            text, mirror_text = item
             try:
                 await self._emit_status(name, "Working.", transient=True)
-                await append_transcript(sess.project.cwd, "user", text)
+                await append_transcript(sess.project.cwd, "user", mirror_text)
                 await client.query(text)
                 parts: list[str] = []
                 result_error = False

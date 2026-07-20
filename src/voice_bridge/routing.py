@@ -11,9 +11,16 @@ CREATE TABLE IF NOT EXISTS messages (
     project    TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS projects (
-    name       TEXT PRIMARY KEY,
-    enabled    INTEGER NOT NULL DEFAULT 1,
-    session_id TEXT
+    name         TEXT PRIMARY KEY,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    session_id   TEXT,
+    autonomy     TEXT,
+    voice        TEXT,
+    verbose      INTEGER,
+    effort       TEXT,
+    cwd          TEXT,
+    display_name TEXT,
+    created      INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -30,6 +37,28 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 """
 
+# Columns the ``projects`` table must carry. A fresh db gets them from _SCHEMA;
+# an EXISTING db (created by an older schema) is migrated additively in init()
+# via ``ALTER TABLE ... ADD COLUMN`` so no data is lost. Column names here are
+# a fixed internal allow-list — never user input — so interpolating them into
+# DDL/DML is safe.
+_PROJECT_COLUMNS: dict[str, str] = {
+    "autonomy": "TEXT",
+    "voice": "TEXT",
+    "verbose": "INTEGER",
+    "effort": "TEXT",
+    "cwd": "TEXT",
+    "display_name": "TEXT",
+    "created": "INTEGER NOT NULL DEFAULT 0",
+}
+
+# Whitelisted runtime-override fields (see :meth:`Store.set_override`). Each maps
+# a per-project ProjectConfig attribute that a live /mode /voice /verbose /effort
+# command may mutate and that must survive a restart. NOT model (kept yaml-only).
+_OVERRIDE_FIELDS: frozenset[str] = frozenset(
+    {"autonomy", "voice", "verbose", "effort"}
+)
+
 
 class Store:
     """Persistent routing/state store backed by SQLite via aiosqlite."""
@@ -38,10 +67,28 @@ class Store:
         self.db_path = db_path
 
     async def init(self) -> None:
-        """Create tables if they do not exist (idempotent). No seeding."""
+        """Create tables if they do not exist and migrate additively (idempotent).
+
+        A fresh db gets the full schema. An EXISTING db created by an older
+        schema is migrated in place: any missing ``projects`` column from
+        :data:`_PROJECT_COLUMNS` is added via ``ALTER TABLE ... ADD COLUMN``,
+        which preserves every existing row and its state (enabled toggles,
+        session_ids). No seeding.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.executescript(_SCHEMA)
+            await self._migrate_projects(db)
             await db.commit()
+
+    async def _migrate_projects(self, db: aiosqlite.Connection) -> None:
+        """Add any missing override/created columns to an existing projects table."""
+        cur = await db.execute("PRAGMA table_info(projects)")
+        existing = {row[1] for row in await cur.fetchall()}
+        for column, decl in _PROJECT_COLUMNS.items():
+            if column not in existing:
+                await db.execute(
+                    f"ALTER TABLE projects ADD COLUMN {column} {decl}"
+                )
 
     async def seed(self, projects: list[ProjectConfig]) -> None:
         """INSERT OR IGNORE a row per project using its enabled default.
@@ -131,6 +178,93 @@ class Store:
             cur = await db.execute("SELECT name, enabled FROM projects")
             rows = await cur.fetchall()
         return {name: bool(enabled) for name, enabled in rows}
+
+    # ------------------------------------------------------------------
+    # per-project runtime overrides (autonomy/voice/verbose/effort)
+    # ------------------------------------------------------------------
+
+    async def set_override(self, project: str, field: str, value) -> None:
+        """Persist a per-project runtime override (upsert).
+
+        ``field`` must be one of the whitelisted :data:`_OVERRIDE_FIELDS`
+        (raises ``ValueError`` otherwise, since an unexpected field is a
+        programming error). ``verbose`` is normalized to 0/1; ``value=None``
+        clears the override (NULL = "use the yaml/config default"). Creates the
+        project row lazily (enabled defaults to 1) if not yet seeded.
+        """
+        if field not in _OVERRIDE_FIELDS:
+            raise ValueError(f"unknown override field: {field!r}")
+        if field == "verbose" and value is not None:
+            value = 1 if value else 0
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f"INSERT INTO projects (name, {field}) VALUES (?, ?) "
+                f"ON CONFLICT(name) DO UPDATE SET {field}=excluded.{field}",
+                (project, value),
+            )
+            await db.commit()
+
+    async def overrides(self) -> dict[str, dict]:
+        """Return per-project overrides, each dict holding only non-null fields.
+
+        Projects with no override at all are omitted entirely. ``verbose`` is
+        returned as a bool. Precedence is decided by the caller (persisted
+        override > yaml)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT name, autonomy, voice, verbose, effort FROM projects"
+            )
+            rows = await cur.fetchall()
+        out: dict[str, dict] = {}
+        for name, autonomy, voice, verbose, effort in rows:
+            fields: dict = {}
+            if autonomy is not None:
+                fields["autonomy"] = autonomy
+            if voice is not None:
+                fields["voice"] = voice
+            if verbose is not None:
+                fields["verbose"] = bool(verbose)
+            if effort is not None:
+                fields["effort"] = effort
+            if fields:
+                out[name] = fields
+        return out
+
+    # ------------------------------------------------------------------
+    # dynamically-created projects (/newproject persistence)
+    # ------------------------------------------------------------------
+
+    async def add_created_project(
+        self, name: str, cwd: str, display_name: str | None
+    ) -> None:
+        """Persist a runtime-created project so it is reloaded across restarts.
+
+        Marks the row ``created=1`` and records its cwd/display_name. On a
+        re-register of the same name the cwd/display_name are refreshed but the
+        ``enabled`` toggle is preserved (a user who disabled it stays disabled).
+        A brand-new row defaults to enabled=1 so it boots on the next restart.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO projects (name, cwd, display_name, created, enabled) "
+                "VALUES (?, ?, ?, 1, 1) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "cwd=excluded.cwd, display_name=excluded.display_name, created=1",
+                (name, cwd, display_name),
+            )
+            await db.commit()
+
+    async def created_projects(self) -> list[dict]:
+        """Return every ``created=1`` project as ``{name, cwd, display_name}``."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT name, cwd, display_name FROM projects WHERE created = 1"
+            )
+            rows = await cur.fetchall()
+        return [
+            {"name": name, "cwd": cwd, "display_name": display_name}
+            for name, cwd, display_name in rows
+        ]
 
     # ------------------------------------------------------------------
     # session_id

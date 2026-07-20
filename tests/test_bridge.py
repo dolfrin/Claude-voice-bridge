@@ -30,13 +30,18 @@ from voice_bridge.types import Outbound
 class FakeStore:
     """In-memory stand-in for routing.Store covering the methods bridge uses."""
 
-    def __init__(self, by_message=None, last_active=None, enabled=None, usage=None):
+    def __init__(self, by_message=None, last_active=None, enabled=None, usage=None,
+                 overrides=None, created=None):
         self._by_message = dict(by_message or {})
         self._last_active = last_active
         self._enabled = dict(enabled or {})
         self._usage = dict(usage or {})
+        self._overrides = {k: dict(v) for k, v in (overrides or {}).items()}
+        self._created = list(created or [])
         self.mapped: list[tuple[int, str]] = []
         self.last_active_calls: list[str] = []
+        self.override_calls: list[tuple[str, str, object]] = []
+        self.created_calls: list[tuple[str, str, object]] = []
         self.inited = 0
         self.seeded: list[list] = []
 
@@ -71,6 +76,22 @@ class FakeStore:
 
     async def all_usage(self):
         return {k: dict(v) for k, v in self._usage.items()}
+
+    async def set_override(self, project, field, value):
+        self.override_calls.append((project, field, value))
+        self._overrides.setdefault(project, {})[field] = value
+
+    async def overrides(self):
+        return {k: dict(v) for k, v in self._overrides.items()}
+
+    async def add_created_project(self, name, cwd, display_name):
+        self.created_calls.append((name, cwd, display_name))
+        self._created.append(
+            {"name": name, "cwd": cwd, "display_name": display_name}
+        )
+
+    async def created_projects(self):
+        return [dict(row) for row in self._created]
 
 
 class FakeTTS:
@@ -1461,6 +1482,54 @@ async def test_controls_create_project_unexpected_error_returns_message_not_rais
 
 
 @pytest.mark.asyncio
+async def test_controls_create_project_fresh_persists_created(tmp_path, monkeypatch):
+    # Task A: a freshly created project must be persisted (created=1) so it is
+    # reloaded across restarts instead of vanishing.
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda name: None)
+
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+
+    await controls.create_project("newapp")
+
+    target = tmp_path / "Projects" / "newapp"
+    assert (("newapp", str(target), None)) in store.created_calls
+
+
+@pytest.mark.asyncio
+async def test_controls_create_project_existing_on_disk_persists_created(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+    on_disk = tmp_path / "Projects" / "orphan"
+    on_disk.mkdir(parents=True)
+
+    await controls.create_project("orphan")
+
+    assert (("orphan", str(on_disk), None)) in store.created_calls
+
+
+@pytest.mark.asyncio
+async def test_controls_create_project_already_registered_does_not_persist_created(tmp_path, monkeypatch):
+    # An already-registered project (yaml or previously created) is neither
+    # created nor newly registered -> no add_created_project.
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+
+    await controls.create_project("qwing")  # already in the mirror
+
+    assert store.created_calls == []
+
+
+@pytest.mark.asyncio
 async def test_controls_set_voice_updates_mirror_and_project():
     controls, sessions, *_ = _make_controls()
     await controls.seed()
@@ -1556,6 +1625,77 @@ async def test_controls_set_effort_invalid_level_is_ignored():
 
     assert sessions.effort_calls == []
     assert all(r["effort"] is None for r in controls.snapshot())
+
+
+# --------------------------------------------------------------------------- #
+# Task A: persist runtime state on change (set_mode/effort/voice/verbose)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_controls_set_mode_persists_autonomy_override():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    await controls.seed()
+    await controls.set_mode("qwing", "safe")
+    assert ("qwing", "autonomy", "safe") in store.override_calls
+
+
+@pytest.mark.asyncio
+async def test_controls_set_effort_persists_override():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    await controls.seed()
+    await controls.set_effort("qwing", "high")
+    assert ("qwing", "effort", "high") in store.override_calls
+
+
+@pytest.mark.asyncio
+async def test_controls_set_effort_invalid_level_does_not_persist():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    await controls.seed()
+    await controls.set_effort("qwing", "turbo")
+    assert store.override_calls == []
+
+
+@pytest.mark.asyncio
+async def test_controls_set_voice_persists_override():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    await controls.seed()
+    await controls.set_voice("qwing", "sage")
+    assert ("qwing", "voice", "sage") in store.override_calls
+
+
+@pytest.mark.asyncio
+async def test_controls_set_verbose_persists_override():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    await controls.seed()
+    await controls.set_verbose("qwing", True)
+    assert ("qwing", "verbose", True) in store.override_calls
+
+
+@pytest.mark.asyncio
+async def test_controls_set_effort_all_projects_persists_each():
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    await controls.seed()
+    await controls.set_effort(None, "max")
+    persisted = {(p, v) for (p, f, v) in store.override_calls if f == "effort"}
+    assert persisted == {("qwing", "max"), ("othersapp", "max")}
+
+
+@pytest.mark.asyncio
+async def test_controls_persist_failure_never_crashes_command(monkeypatch):
+    # Persist-on-change is best-effort: a store write failure must not crash
+    # the command nor block the in-memory change.
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    await controls.seed()
+
+    async def boom(project, field, value):
+        raise RuntimeError("db down")
+
+    store.set_override = boom
+    # Must not raise despite the failing store.
+    await controls.set_voice("qwing", "sage")
+    # in-memory change still applied
+    assert sessions.project("qwing").voice == "sage"
 
 
 @pytest.mark.asyncio
@@ -1833,3 +1973,136 @@ async def test_build_approval_send_uses_alert_voice_and_token(monkeypatch):
     assert kwargs["approval_token"] == 3
     assert kwargs["voice_label"] == "shimmer"
     assert kwargs["voice_bytes"] == b"ALERT"
+
+
+# --------------------------------------------------------------------------- #
+# Task A: build() reloads created projects + applies persisted overrides
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_build_reloads_created_projects_and_applies_overrides(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+    from voice_bridge.config import ProjectConfig, effective_autonomy
+
+    cfg = FakeCfg()
+    # yaml boots qwing at the DANGEROUS default autonomy "full".
+    yaml_projects = [ProjectConfig(name="qwing", cwd=str(tmp_path), autonomy="full")]
+    created_dir = tmp_path / "newapp"
+    created_dir.mkdir()
+    store = FakeStore(
+        enabled={"qwing": True, "newapp": True},
+        overrides={"qwing": {"autonomy": "safe"}},
+        created=[{"name": "newapp", "cwd": str(created_dir), "display_name": "New App"}],
+    )
+
+    captured: dict = {}
+
+    def capture_sm(projects, *a, **k):
+        captured["projects"] = list(projects)
+        return FakeSessions(projects)
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda path="projects.yaml": yaml_projects)
+    monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
+    monkeypatch.setattr(bridge_mod, "Transcriber", lambda m, language="lt": FakeTranscriber())
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
+    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
+    monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
+    monkeypatch.setattr(bridge_mod, "TelegramIO",
+                        lambda c, oi, controls, on_approval=None: FakeTelegram())
+
+    await build()
+
+    by_name = {p.name: p for p in captured["projects"]}
+    # the created project was reloaded and merged as a ProjectConfig
+    assert "newapp" in by_name
+    assert by_name["newapp"].cwd == str(created_dir)
+    # persisted override wins over yaml: qwing is demoted to safe BEFORE start
+    assert effective_autonomy(by_name["qwing"], cfg) == "safe"
+
+
+@pytest.mark.asyncio
+async def test_build_skips_created_project_missing_on_disk(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+    from voice_bridge.config import ProjectConfig
+
+    cfg = FakeCfg()
+    yaml_projects = [ProjectConfig(name="qwing", cwd=str(tmp_path))]
+    store = FakeStore(
+        enabled={"qwing": True},
+        created=[{"name": "gone", "cwd": str(tmp_path / "gone"), "display_name": None}],
+    )
+
+    captured: dict = {}
+
+    def capture_sm(projects, *a, **k):
+        captured["projects"] = list(projects)
+        return FakeSessions(projects)
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda path="projects.yaml": yaml_projects)
+    monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
+    monkeypatch.setattr(bridge_mod, "Transcriber", lambda m, language="lt": FakeTranscriber())
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
+    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
+    monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
+    monkeypatch.setattr(bridge_mod, "TelegramIO",
+                        lambda c, oi, controls, on_approval=None: FakeTelegram())
+
+    await build()
+
+    names = {p.name for p in captured["projects"]}
+    assert "gone" not in names  # missing on disk -> skipped gracefully
+
+
+@pytest.mark.asyncio
+async def test_persisted_mode_override_survives_rebuild(tmp_path, monkeypatch):
+    """SECURITY: /mode qwing safe then a restart -> qwing's effective autonomy
+    is 'safe', NOT the yaml 'full'. A restart must never silently RE-ESCALATE a
+    project the user demoted. Uses the REAL Store on a tmp db (the actual
+    persist path), stubbing only the heavy runtime components."""
+    import voice_bridge.bridge as bridge_mod
+    from voice_bridge.config import ProjectConfig, effective_autonomy
+
+    db = str(tmp_path / "state.db")
+
+    class Cfg(FakeCfg):
+        db_path = db
+
+    cfg = Cfg()
+    proj_dir = tmp_path / "qwing"
+    proj_dir.mkdir()
+
+    def fresh_projects(path="projects.yaml"):
+        # yaml keeps qwing at the dangerous default "full" every boot.
+        return [ProjectConfig(name="qwing", cwd=str(proj_dir), autonomy="full")]
+
+    captured: dict = {}
+
+    def capture_sm(projects, *a, **k):
+        captured["projects"] = list(projects)
+        return FakeSessions(projects)
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", fresh_projects)
+    # NOTE: bridge_mod.Store is left as the REAL Store (tmp db) on purpose.
+    monkeypatch.setattr(bridge_mod, "Transcriber", lambda m, language="lt": FakeTranscriber())
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
+    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
+    monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
+    monkeypatch.setattr(bridge_mod, "TelegramIO",
+                        lambda c, oi, controls, on_approval=None: FakeTelegram())
+
+    # First boot: qwing runs at the yaml autonomy "full".
+    w1 = await build()
+    assert effective_autonomy(captured["projects"][0], cfg) == "full"
+
+    # User demotes qwing to safe at runtime (/mode qwing safe).
+    await w1.controls.set_mode("qwing", "safe")
+
+    # Restart: rebuild against the SAME db.
+    await build()
+    proj = captured["projects"][0]
+    assert proj.name == "qwing"
+    assert effective_autonomy(proj, cfg) == "safe"  # NOT re-escalated to "full"
