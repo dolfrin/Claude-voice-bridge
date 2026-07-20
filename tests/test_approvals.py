@@ -1133,6 +1133,29 @@ def test_signature_quoted_and_expanded_redirect_targets_are_risky():
     assert is_risky("Bash", {"command": 'echo x > "/dev/null"'}, CWD) is False
 
 
+def test_signature_quoted_redirect_target_with_space_escaping_cwd(tmp_path):
+    # A QUOTED redirect target may contain spaces; a capture that stops at the
+    # first space would truncate `"sub/a b/../../../x"` to an innocuous in-cwd
+    # prefix and miss the `../` escape hidden after the space -> the write lands
+    # outside cwd but signs as the bare verb. The full-word capture must see the
+    # whole path so realpath flags it.
+    (tmp_path / "sub" / "a b").mkdir(parents=True)
+    for cmd in [
+        'git push > "sub/a b/../../../victim.txt"',
+        "git push > 'sub/a b/../../../victim.txt'",
+    ]:
+        assert is_risky("Bash", {"command": cmd}, str(tmp_path)) is True, cmd
+        sig = signature_for("Bash", {"command": cmd}, str(tmp_path))
+        assert sig is not None and sig != "git push", cmd
+    # A concatenated quoted+unquoted word with the escape in the suffix.
+    (tmp_path / "a bc").mkdir()
+    cat = 'git push > "a b"c/../../../victim.txt'
+    assert is_risky("Bash", {"command": cat}, str(tmp_path)) is True
+    assert signature_for("Bash", {"command": cat}, str(tmp_path)) != "git push"
+    # A quoted spaced target that stays INSIDE cwd is not over-flagged.
+    assert is_risky("Bash", {"command": 'echo x > "out file.txt"'}, str(tmp_path)) is False
+
+
 def test_signature_odd_input_never_raises_and_has_no_broad_risky_key():
     # Malformed input must never raise. A Bash call with no/empty command is
     # NON-risky, so it degrades to the harmless "ok:Bash" fallback (only ever

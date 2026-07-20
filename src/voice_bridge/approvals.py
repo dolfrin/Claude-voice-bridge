@@ -92,26 +92,32 @@ _RISKY_COMMAND_PATTERNS.append(
     re.compile(rf"{_READER_CMD_RE}.*{_SENSITIVE_TOKEN_RE}", re.IGNORECASE)
 )
 
-# Redirection target: the first non-whitespace token after `>`/`>>`, stopping
-# at shell metacharacters that would end the token (pipe, semicolon, `&`,
-# another redirection). This intentionally excludes fd-duplication targets
-# like `>&1` — those aren't file paths. (`&>file` — ampersand BEFORE `>` — is
-# caught here because the `>` still precedes the target.) The optional `\|`
-# after `>`/`>>` catches the force-clobber form `>|file` (bypasses noclobber),
-# whose `|` would otherwise end the token before the path is seen.
-_REDIRECT_TARGET_RE = re.compile(r">>?\|?\s*([^\s|;&<>]+)")
+# A redirect target is a full shell WORD: a run of double-quoted chunks,
+# single-quoted chunks, and bare non-delimiter chars, concatenated. Capturing
+# the whole word (not a bare `[^\s…]+`, which truncates at the first space and
+# misses an escape hidden after it, and not just the first quoted chunk, which
+# misses a `"a b"c/../x` concatenation) is what lets the quote-stripped path
+# reach the realpath containment check. Delimiters (whitespace and the shell
+# metachars that end a word/redirection) terminate the word. `_AMP_WORD`'s first
+# element additionally forbids a leading digit/`-` so an fd-dup (`>&1`) is not
+# read as a file.
+_WORD_CHUNK = r'"[^"]*"|\'[^\']*\'|[^\s"\'|;&<>]'
+_REDIRECT_WORD = r"(?:" + _WORD_CHUNK + r")+"
+_AMP_WORD = (
+    r'(?:"[^"]*"|\'[^\']*\'|[^\s"\'|;&<>0-9-])(?:' + _WORD_CHUNK + r")*"
+)
+_SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
+
+# Redirection target after `>`/`>>` (optional `\|` force-clobber `>|file`).
+# `&>file` (ampersand BEFORE `>`) is caught here because the `>` still precedes
+# the target; `>&file` (ampersand AFTER) needs the separate amp pattern.
+_REDIRECT_TARGET_RE = re.compile(r">>?\|?\s*(" + _REDIRECT_WORD + r")")
 
 # `>&word` (ampersand AFTER `>`) redirects BOTH stdout+stderr to `word` when
-# `word` is a FILENAME, not an fd number: `echo x >&/etc/passwd` truncates the
-# file. `_REDIRECT_TARGET_RE` misses it (the char after `>` is `&`, which ends
-# its token), so it gets its own pattern. A leading digit or `-` means fd
-# duplication (`>&1`, `>&2`, `>&-`) — not a file — so those are excluded.
-_REDIRECT_AMP_TARGET_RE = re.compile(r">&\s*([^\s|;&<>0-9-][^\s|;&<>]*)")
-
-# Pseudo-files that discard/duplicate output rather than persist or exfil
-# data. `cmd > /dev/null 2>&1` is one of the most common shell idioms and
-# would otherwise be flagged purely for being an absolute path.
-_SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
+# `word` is a FILENAME, not an fd number (`echo x >&/etc/passwd` truncates it).
+# `_REDIRECT_TARGET_RE` misses it (the char after `>` is `&`), so it gets its
+# own pattern; fd-duplication (`>&1`/`>&2`/`>&-`) is excluded via `_AMP_WORD`.
+_REDIRECT_AMP_TARGET_RE = re.compile(r">&\s*(" + _AMP_WORD + r")")
 
 
 def _has_risky_redirect(command: str, cwd: str) -> bool:
@@ -332,7 +338,7 @@ def _risky_redirect_targets(command: str, cwd: str) -> list[str]:
         for match in pattern.finditer(command):
             raw = match.group(1)
             # Bash strips quotes and expands ~/$VAR BEFORE opening the file, so
-            # the raw captured token differs from the path actually written:
+            # the raw captured word differs from the path actually written:
             # `> "/etc/passwd"` opens /etc/passwd, `> ~/.bashrc` opens $HOME/….
             # Normalize (drop the quote chars bash removes) before classifying.
             target = raw.replace('"', "").replace("'", "")
