@@ -218,31 +218,40 @@ def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
 #
 # SECURITY — signature granularity is the crux of the always-allow feature.
 # A policy key is (project, signature); a signature must be a STABLE,
-# action-SPECIFIC descriptor of what the user approved — never just the tool
-# name (which would be catastrophically broad, e.g. "always allow Bash" =
-# allow everything). The rules below are chosen so that:
+# action-SPECIFIC descriptor of what the user approved. It is matched against
+# the INCOMING call's signature, so the invariant that keeps a grant from
+# authorizing more than the user approved is:
 #
-#   * the SAME action recurs to the SAME signature ("git push" == "git push
-#     origin main") so an always-allow actually recurs, AND
-#   * DISTINCT dangerous actions get DISTINCT signatures ("git push" != "rm"),
-#     AND — the subtle one —
-#   * a COMPOUND command carries EVERY risky element in its signature, so
-#     allowing a plain "git push" can never silently allow "git push && rm -rf"
-#     (that command's signature includes the extra "rm").
+#   COMPLETENESS — a NON-None signature must encode EVERY reason `is_risky`
+#   flagged the call. Any input producing the same signature must be risky for
+#   the SAME reasons, to the SAME specific targets. If a call's full risk basis
+#   cannot be captured in a stable, generalizable key, `signature_for` returns
+#   **None** ("not eligible") and the always-allow button degrades to
+#   allow-once (persists nothing) — never a broad grant.
 #
-# Granularity per tool:
-#   * Bash  -> the SORTED SET of the risky phrases that made it risky (the
-#              matched _RISKY_COMMAND_PATTERNS, the exfil short-flag, the risky
-#              redirect targets). A non-risky command (only reachable in ask
-#              mode, where everything is prompted) keys on its leading verb
-#              (+subcommand for git/npm/... style tools) — specific enough to
-#              be useful without pinning every argument.
-#   * send_file -> "send_file" (the egress channel itself is the risk; a
-#                  per-path key would be unusably fine and the tool already
-#                  blocks out-of-cwd/sensitive targets).
-#   * Write/Edit/... -> the tool name (path-OUT-of-cwd is the risk these gate;
-#                       a per-path signature would rarely recur, and the user
-#                       is opting into "let this tool write where it asked").
+# This is why the earlier "sorted set of matched risky phrases" design was
+# unsafe: it saw only the risky SUBSTRINGS, so a compound
+# `git push && python evil.py` signed identically to a plain `git push` (the
+# extra interpreter segment was invisible), and `send_file`/`Read` keyed on a
+# constant that ignored WHICH file. Those are now all None (allow-once).
+#
+# Eligibility (a NON-None signature) is granted ONLY when generalizing the grant
+# is safe:
+#   * NON-risky call (only reachable in ASK mode, where everything is prompted
+#     and there is no risk boundary): a convenient coarse key is fine — Bash
+#     keys on its leading verb (+subcommand), other tools on the tool name. A
+#     safe-mode risky VARIANT of the same call recomputes to a stricter/None
+#     key, so an ask-mode grant cannot leak into safe mode.
+#   * RISKY Bash: eligible ONLY as a SINGLE, simple invocation of an
+#     allowlisted operation verb (_GENERALIZABLE_VERBS) — no compounding
+#     (`&&`/`||`/`;`/`|`/`&`/`$(...)`/backticks), no exfil flag, no interpreter
+#     or path-executable leading verb, no `VAR=val` prefix, no out-of-cwd path
+#     key. Key = verb(+subcommand) + any risky redirect target (a specific
+#     path). Anything else -> None.
+#   * RISKY send_file -> None (egress channel; target varies and in-cwd secrets
+#     are gated only by this prompt — never generalize).
+#   * RISKY path-gated tool (Read/Write/Edit/...) -> None (risky here means a
+#     path escaped cwd; a tool-name key would authorize the whole filesystem).
 
 # git/npm/etc. carry their meaning in verb+subcommand, so the leading-verb
 # fallback keeps the subcommand for these (an ask-mode "git status" vs
@@ -251,6 +260,39 @@ _SUBCOMMAND_VERBS = {
     "git", "npm", "yarn", "pnpm", "pip", "pip3", "docker", "kubectl",
     "cargo", "go", "apt", "apt-get", "brew", "snap", "terraform", "systemctl",
 }
+
+# Allowlist (FAIL-SAFE) of RISKY leading verbs whose risk is the OPERATION, not
+# the argument, so generalizing an always-allow across their arguments is
+# acceptable ("always allow git push" / "npm install" / "systemctl restart").
+# A risky Bash command whose leading verb is NOT here is never eligible for a
+# persisted policy (allow-once only) — so a missed verb fails toward asking, and
+# egress/interpreter verbs (curl/ssh/scp/rsync/python/bash/…, whose ARGUMENT is
+# the destination or the payload) are deliberately excluded.
+_GENERALIZABLE_VERBS = {
+    "git", "rm", "rmdir", "mv", "chmod", "chown",
+    "npm", "yarn", "pnpm", "pip", "pip3", "apt", "apt-get", "brew", "snap",
+    "docker", "kubectl", "terraform", "vercel", "netlify", "deploy",
+    "mkfs", "dd", "shutdown", "reboot", "systemctl",
+}
+
+# fd-duplication / stream-merge redirects that legitimately contain '&' or '>'
+# WITHOUT introducing a second command (2>&1, >&2, &>file, 1>&2). Scrubbed
+# before the compound scan so an everyday `cmd ... 2>&1` is not misread.
+_FD_DUP_RE = re.compile(r"\d*>&\d*|&>>?")
+
+# After fd-dup forms are scrubbed, ANY of these introduces a second
+# command/expansion: pipe, sequencing, boolean chaining, background, command or
+# process substitution, backticks, or a newline. (Plain `$VAR`/`${VAR}`
+# parameter expansion is NOT here — bash does not re-parse operators out of an
+# expansion without `eval`.) A signature can only faithfully describe a SINGLE
+# simple command, so a risky compound one is never policy-eligible.
+_COMPOUND_RE = re.compile(r"[;|&]|\$\(|`|<\(|>\(|\n")
+
+
+def _is_compound_command(command: str) -> bool:
+    """True if *command* composes/substitutes more than one command."""
+    scrubbed = _FD_DUP_RE.sub(" ", command)
+    return bool(_COMPOUND_RE.search(scrubbed))
 
 
 def _norm_ws(text: str) -> str:
@@ -295,45 +337,85 @@ def _leading_verb(command: str) -> str:
     return verb
 
 
-def _bash_signature(command: str) -> str:
-    """Derive a stable, risk-reflecting signature for a Bash command."""
+def _bash_risky_signature(command: str) -> str | None:
+    """Signature for a Bash command already known to be RISKY, or None.
+
+    Returns None (=> not policy-eligible, allow-once only) unless *command* is a
+    SINGLE simple invocation of an allowlisted operation verb, so that a grant
+    can never unlock a compound / exfil / interpreter / path-escape variant. On
+    success the key is verb(+subcommand) plus any risky redirect target (a
+    specific path, so the grant does not generalize across targets)."""
+    if _is_compound_command(command):
+        return None
+    # Exfil channels: the destination varies per call and IS the risk.
+    if _EXFIL_SHORT_FLAG_RE.search(command):
+        return None
     lowered = command.lower()
-    tags: list[str] = []
-    for pattern in _RISKY_COMMAND_PATTERNS:
-        match = pattern.search(lowered)
-        if match:
-            tags.append(_norm_ws(match.group(0)))
-    flag = _EXFIL_SHORT_FLAG_RE.search(command)
-    if flag:
-        tags.append("exfil " + _norm_ws(flag.group(1)).lower())
+    tokens = lowered.split()
+    if not tokens:
+        return None
+    first = tokens[0]
+    # A path-executable (./x, /usr/bin/x, ../x) runs a specific file, and a
+    # `VAR=val cmd` env prefix hides the real verb — neither is generalizable.
+    if "/" in first or "=" in first:
+        return None
+    if first not in _GENERALIZABLE_VERBS:
+        return None
+    tags = [_leading_verb(lowered)]
     for target in _risky_redirect_targets(command):
         tags.append("> " + target.lower())
-    if tags:
-        # Sorted set: order-independent and de-duplicated, and it reflects
-        # EVERY risky element so a compound command never collapses onto one
-        # of its parts (the SAFETY crux documented above).
-        return " + ".join(sorted(set(tags)))
-    # No risky element: only reachable in ask mode. Key on the leading verb.
-    return _leading_verb(lowered)
+    return " + ".join(sorted(set(tags)))
 
 
-def signature_for(tool_name: str, tool_input: dict) -> str:
-    """Return the stable always-allow policy signature for a tool call.
+def signature_for(tool_name: str, tool_input: dict, cwd: str) -> str | None:
+    """Return the always-allow policy signature for a tool call, or None.
 
-    See the module comment above for the granularity rationale. Never raises
-    (a malformed model-generated ``tool_input`` degrades to the tool name)."""
+    None means the call is NOT eligible for a persisted always-allow policy
+    (the button degrades to allow-once). See the module comment above for the
+    completeness invariant and the per-tool eligibility rules. Never raises: any
+    failure to classify degrades to None (fail-safe — no grant)."""
+    # send_file is an egress channel: the target varies per call and in-cwd
+    # secrets are gated only by this prompt, so it is NEVER policy-eligible — in
+    # ANY mode, sensitive or not. Decided before is_risky so a NON-risky
+    # (innocuous) send can't persist a broad "send_file" grant either.
+    if tool_name == SEND_FILE_TOOL_NAME:
+        return None
     try:
+        risky = is_risky(tool_name, tool_input, cwd)
+    except Exception:  # noqa: BLE001 - can't classify -> not eligible
+        logger.exception("signature_for: is_risky failed for %s", tool_name)
+        return None
+    try:
+        if not risky:
+            # Only reachable when a NON-risky call is prompted, i.e. ASK mode.
+            # Not a safe-mode boundary, so a coarse convenient key is fine; a
+            # safe-mode risky variant of the same call recomputes to a
+            # stricter/None key, so this cannot leak into safe mode.
+            if tool_name == "Bash":
+                command = tool_input.get("command")
+                if isinstance(command, str) and command.strip():
+                    return _leading_verb(command.lower())
+                return "Bash"
+            return tool_name
+        # RISKY: the signature must FULLY capture the risk basis or be None.
         if tool_name == "Bash":
+            # Risky via an out-of-cwd path KEY (not the command text) can't be
+            # faithfully signed from the command -> not eligible.
+            for key in _PATH_INPUT_KEYS:
+                path = tool_input.get(key)
+                if isinstance(path, str) and path and not _inside_cwd(path, cwd):
+                    return None
             command = tool_input.get("command")
             if isinstance(command, str) and command.strip():
-                return _bash_signature(command)
-            return "Bash"
-        if tool_name == SEND_FILE_TOOL_NAME:
-            return "send_file"
-        return tool_name
+                return _bash_risky_signature(command)
+            return None
+        # Every path-gated tool (Read/Write/Edit/NotebookEdit/…) is risky HERE
+        # only because a path escaped cwd; a tool-name key would authorize the
+        # whole filesystem, so it is never eligible. (send_file handled above.)
+        return None
     except Exception:  # noqa: BLE001 - a signature must never break approval
         logger.exception("signature_for failed for %s", tool_name)
-        return tool_name
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -534,15 +616,28 @@ class ApprovalManager:
         # "always allow" (apv:{token}:2) tap can persist the right policy. Kept
         # in lockstep with _pending_by_token (registered in request, popped in
         # its finally).
-        self._policy_by_token: dict[int, tuple[str, str]] = {}
+        self._policy_by_token: dict[int, tuple[str, str | None]] = {}
         self._token_counter = 0
 
     def _next_token(self) -> int:
         self._token_counter += 1
         return self._token_counter
 
-    async def request(self, project: str, tool_name: str, tool_input: dict) -> bool:
-        """Ask user for permission; returns True if approved, False if denied or timed out."""
+    async def request(
+        self,
+        project: str,
+        tool_name: str,
+        tool_input: dict,
+        policy_signature: str | None = None,
+    ) -> bool:
+        """Ask user for permission; returns True if approved, False if denied or timed out.
+
+        *policy_signature* is the always-allow key for this call (from
+        :func:`signature_for`, computed by the caller which holds the cwd), or
+        None when the call is NOT policy-eligible. It is stashed per token so an
+        "always allow" (apv:{token}:2) tap can persist the right policy — and a
+        None means that tap degrades to allow-once (persists nothing). Callers
+        that omit it get None (fail-safe: no broad grant)."""
         preview = format_approval_preview(tool_name, tool_input)
         text = _format_question(project, preview)
         spoken = format_approval_spoken(project, tool_name, tool_input)
@@ -559,7 +654,7 @@ class ApprovalManager:
             existing.set_result(False)
         self._pending[message_id] = future
         self._pending_by_token[token] = future
-        self._policy_by_token[token] = (project, signature_for(tool_name, tool_input))
+        self._policy_by_token[token] = (project, policy_signature)
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
         except asyncio.TimeoutError:
@@ -597,14 +692,16 @@ class ApprovalManager:
         future = self._pending.get(message_id)
         return future is not None and not future.done()
 
-    def policy_for_token(self, token: int) -> tuple[str, str] | None:
+    def policy_for_token(self, token: int) -> tuple[str, str | None] | None:
         """Return the (project, signature) for a pending approval token.
 
         Used by the "always allow" (apv:{token}:2) callback to know WHICH
         policy to persist. Returns None for an unknown/already-resolved token
-        (the mapping is popped in :meth:`request`'s finally). Callers must read
-        this SYNCHRONOUSLY before awaiting anything, since the pending
-        request's cleanup runs on the next loop turn."""
+        (the mapping is popped in :meth:`request`'s finally); the inner
+        ``signature`` is None when the call is NOT policy-eligible (so the tap
+        degrades to allow-once). Callers must read this SYNCHRONOUSLY before
+        awaiting anything, since the pending request's cleanup runs on the next
+        loop turn."""
         return self._policy_by_token.get(token)
 
 
@@ -644,10 +741,13 @@ def make_can_use_tool(
         if mode == "safe" and not is_risky(tool_name, tool_input, project.cwd):
             return PermissionResultAllow()
 
-        # A prompt WOULD happen now (mode == "ask", or safe + risky). An
-        # always-allow policy for this exact action short-circuits it.
-        if store is not None:
-            signature = signature_for(tool_name, tool_input)
+        # A prompt WOULD happen now (mode == "ask", or safe + risky). Compute
+        # the always-allow signature ONCE (with cwd) and reuse it both to check
+        # for an existing policy and to stash on the pending approval. A None
+        # signature = NOT policy-eligible: never matches a policy and never
+        # persists one (allow-once only).
+        signature = signature_for(tool_name, tool_input, project.cwd)
+        if store is not None and signature is not None:
             try:
                 if await store.has_policy(project.name, signature):
                     return PermissionResultAllow()
@@ -658,7 +758,9 @@ def make_can_use_tool(
                     signature,
                 )
 
-        approved = await manager.request(project.name, tool_name, tool_input)
+        approved = await manager.request(
+            project.name, tool_name, tool_input, policy_signature=signature
+        )
         if approved:
             return PermissionResultAllow()
         return PermissionResultDeny(message="User denied or timed out")

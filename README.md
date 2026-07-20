@@ -491,11 +491,17 @@ skipped.
 
 **Always allow** approves this call *and* remembers a per-project policy keyed on a
 stable, action-specific signature of what made the call ask — e.g. `git push`, `rm`,
-`npm install`, `send_file` — so future *matching* calls in the same project auto-approve
-without asking. The signature is deliberately specific: allowing `git push` never also
-allows `rm`, and a compound `git push && rm -rf` carries both risks so it can't be
-unlocked by an earlier plain-`git push` grant. Grants persist across restarts; review and
-revoke them anytime with `/policies` (list) and `/policies clear [project]`.
+`npm install`, `systemctl restart` — so future *matching* calls in the same project
+auto-approve without asking. The signature is deliberately specific: allowing `git push`
+never also allows `rm`. To keep a single tap from ever silently widening `safe` mode,
+"always allow" is offered **only** for a single, simple invocation of a known operation
+verb; if the call can't be generalized safely it falls back to a one-time allow (persists
+nothing) and the message says so. Not persisted (allow-once only): compound/chained
+commands (`&&`, `||`, `;`, `|`, `$(…)`), interpreters and path-executables (`python x`,
+`./x`), exfil/egress (`curl -d`, `scp`, `ssh`, sending files), secret reads (`cat .env`),
+and anything reading or writing outside the project directory. Grants persist across
+restarts; review and revoke them anytime with `/policies` (list) and `/policies clear
+[project]`.
 
 If `TTS_ALERT_VOICE` is set, approval questions and crash notices are spoken with that
 distinct voice so they stand out when you are away from your desk. Falls back to

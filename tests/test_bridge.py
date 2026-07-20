@@ -1285,7 +1285,7 @@ async def test_make_on_always_allow_persists_pending_policy():
             return ("qwing", "git push") if token == 7 else None
 
     fn = make_on_always_allow(_Approvals(), store)
-    await fn(7)
+    assert await fn(7) is True  # persisted -> honest "Visada" label
 
     assert ("add", "qwing", "git push") in store.policy_calls
     assert await store.has_policy("qwing", "git push") is True
@@ -1302,8 +1302,25 @@ async def test_make_on_always_allow_noop_for_unknown_token():
             return None
 
     fn = make_on_always_allow(_Approvals(), store)
-    await fn(123)  # unknown token -> nothing persisted, no raise
+    assert await fn(123) is False  # unknown token -> nothing persisted, no raise
 
+    assert store.policy_calls == []
+
+
+@pytest.mark.asyncio
+async def test_make_on_always_allow_skips_none_signature():
+    # A NOT-policy-eligible call carries signature None; the tap degrades to
+    # allow-once (nothing persisted) and the hook returns False.
+    from voice_bridge.bridge import make_on_always_allow
+
+    store = FakeStore()
+
+    class _Approvals:
+        def policy_for_token(self, token):
+            return ("qwing", None)
+
+    fn = make_on_always_allow(_Approvals(), store)
+    assert await fn(7) is False
     assert store.policy_calls == []
 
 
@@ -1320,8 +1337,8 @@ async def test_make_on_always_allow_swallows_store_failure():
             return ("qwing", "git push")
 
     fn = make_on_always_allow(_Approvals(), _BoomStore())
-    # a persist failure must never raise out of the always-allow callback
-    await fn(7)
+    # a persist failure must never raise; it degrades to allow-once (False)
+    assert await fn(7) is False
 
 
 @pytest.mark.asyncio

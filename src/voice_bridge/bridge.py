@@ -285,30 +285,41 @@ def make_outbound(
 
 def make_on_always_allow(
     approvals: ApprovalManager, store: Store
-) -> Callable[[int], Awaitable[None]]:
+) -> Callable[[int], Awaitable[bool]]:
     """Build the "✅♾ Visada leisti" persist hook wired into TelegramIO.
 
     Given a just-resolved approval *token*, look up the (project, signature)
     the ApprovalManager stashed for it and persist an always-allow policy so
     future matching calls auto-approve. Reads ``policy_for_token`` SYNCHRONOUSLY
     (before any await) since the resolved request cleans the mapping up on the
-    next loop turn. Best-effort: the approval is ALREADY resolved as allow, so a
-    store failure degrades to allow-once and is logged, never raised.
+    next loop turn.
+
+    Returns True only when a policy was actually persisted, so the caller can
+    show an honest label. Returns False when the call is NOT policy-eligible
+    (signature is None) or the store write fails — both degrade to allow-once
+    (the approval is ALREADY resolved as allow); a store failure is logged,
+    never raised.
     """
 
-    async def on_always_allow(token: int) -> None:
+    async def on_always_allow(token: int) -> bool:
         info = approvals.policy_for_token(token)
         if info is None:
-            return
+            return False
         project, signature = info
+        if signature is None:
+            # Not eligible for a persisted policy (compound/exfil/egress/
+            # out-of-cwd/interpreter). Allow-once only.
+            return False
         try:
             await store.add_policy(project, signature)
+            return True
         except Exception:  # noqa: BLE001 - persist is best-effort (allow-once)
             logger.exception(
                 "add_policy failed for %s/%s; grant is allow-once only",
                 project,
                 signature,
             )
+            return False
 
     return on_always_allow
 

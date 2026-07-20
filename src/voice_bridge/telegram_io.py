@@ -246,7 +246,7 @@ class TelegramIO:
         on_user_message: Callable[[dict], Awaitable[None]],
         controls: Controls,
         on_approval: Callable[[int, bool], bool] | None = None,
-        on_always_allow: Callable[[int], Awaitable[None]] | None = None,
+        on_always_allow: Callable[[int], Awaitable[bool]] | None = None,
     ) -> None:
         self.cfg = cfg
         self.on_user_message = on_user_message
@@ -848,17 +848,22 @@ class TelegramIO:
             # not actually resolve a live approval.
             await self._answer_quietly(query, "nebeaktualu")
             return
+        persisted = False
         if always and self._on_always_allow is not None:
             # Persist the policy. The approval is ALREADY resolved as allow, so
             # a persist failure degrades to allow-once — it must never raise
-            # out of the callback (never-crash posture).
+            # out of the callback (never-crash posture). The hook returns False
+            # when the call is not policy-eligible (signature None), so the
+            # label stays honest rather than claiming a persistent grant.
             try:
-                await self._on_always_allow(token)
+                persisted = await self._on_always_allow(token)
             except Exception:  # noqa: BLE001 - persist is best-effort
                 logger.exception("always-allow persist failed for token %s", token)
         await self._answer_quietly(query)
-        if always:
+        if always and persisted:
             label = "✅♾ Visada leista"
+        elif always:
+            label = "✅ Leista (šįkart — nuolatinis šiam veiksmui negalimas)"
         elif approved:
             label = "✅ Leista"
         else:

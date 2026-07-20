@@ -795,6 +795,7 @@ async def test_approval_callback_always_allow_resolves_and_persists():
 
     async def on_always_allow(token):
         persisted.append(token)
+        return True  # a policy WAS persisted (eligible signature)
 
     io = TelegramIO(
         make_cfg(), AsyncMock(), FakeControls(),
@@ -816,6 +817,40 @@ async def test_approval_callback_always_allow_resolves_and_persists():
     assert persisted == [7]
     edited = query.edit_message_text.await_args.args[0]
     assert "Visada" in edited
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_always_allow_not_eligible_shows_allow_once():
+    # When the call is NOT policy-eligible, on_always_allow returns False; the
+    # approval is still resolved as allow, but the label must NOT claim a
+    # persistent grant.
+    resolved: list[tuple[int, bool]] = []
+
+    def on_approval(token, approved):
+        resolved.append((token, approved))
+        return True
+
+    async def on_always_allow(token):
+        return False  # not eligible -> nothing persisted
+
+    io = TelegramIO(
+        make_cfg(), AsyncMock(), FakeControls(),
+        on_approval=on_approval, on_always_allow=on_always_allow,
+    )
+    query = AsyncMock()
+    query.data = "apv:9:2"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert resolved == [(9, True)]  # still allowed (once)
+    edited = query.edit_message_text.await_args.args[0]
+    assert "Visada" not in edited
+    assert "šįkart" in edited
 
 
 @pytest.mark.asyncio
