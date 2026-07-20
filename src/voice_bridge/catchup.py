@@ -41,19 +41,22 @@ logger = logging.getLogger(__name__)
 _GIT_TIMEOUT = 5.0
 
 # Per-part size caps (chars). The final block is additionally hard-capped to
-# ``max_chars`` as a belt-and-suspenders guarantee.
+# ``max_chars`` as a belt-and-suspenders guarantee, so these can be generous:
+# a small-budget caller (e.g. the 9500-char hook) is still bounded by that
+# final cap, while the bridge's large-budget deliver path gets a full handover.
 _STATUS_CAP = 1000
 _DIFF_CAP = 2000
 _LOG_CAP = 500
-_SESSION_CAP = 1500
-_USER_MSG_CAP = 300
-_ASSISTANT_MSG_CAP = 700
+_SESSION_CAP = 12000
+_USER_MSG_CAP = 600
+_ASSISTANT_MSG_CAP = 2000
 
 # Transcript tail budget: never read a whole multi-MB session file — only the
 # last chunk, which holds the most recent turns.
-_TAIL_BYTES = 64 * 1024
-_TAIL_LINES = 200
-_MAX_USER_MSGS = 3
+_TAIL_BYTES = 128 * 1024
+_TAIL_LINES = 400
+# Max recent turns (user + assistant, interleaved) to surface from the tail.
+_MAX_TURNS = 40
 
 # Bridge mirror (``.claude/voice-bridge-chat.md``) tail budget: same idea,
 # scaled down since it's Markdown chat turns, not a JSONL transcript.
@@ -277,10 +280,17 @@ def _safe_mtime(path: str) -> float:
 
 
 def _extract_gist(path: str) -> str:
-    """Tail-read one transcript and render its last few user turns + last
-    assistant text. Defensive: malformed lines are skipped; never raises."""
-    users: list[str] = []
-    last_assistant = ""
+    """Tail-read one transcript and render the recent conversation — the last
+    several user AND assistant turns IN ORDER, not just a lone final message.
+
+    The earlier version kept only the last 3 user messages plus the single
+    most-recent assistant message (clipped hard), so a multi-step piece of work
+    reached the bridge as a truncated snippet with no back-and-forth. Here we
+    keep the interleaved turns so the handover carries the actual context; the
+    whole gist is bounded to ``_SESSION_CAP`` (and the assembled block to the
+    caller's ``max_chars``). Defensive: malformed lines are skipped; the newest
+    turns are preferred when the budget is tight. Never raises."""
+    turns: list[str] = []
     for line in _read_tail_lines(path):
         line = line.strip()
         if not line:
@@ -298,23 +308,21 @@ def _extract_gist(path: str) -> str:
         if etype == "user":
             text = _message_text(msg.get("content"))
             if text:
-                users.append(text)
+                turns.append("- User: " + _clip(text, _USER_MSG_CAP))
         elif etype == "assistant":
             text = _message_text(msg.get("content"))
             if text:
-                last_assistant = text
+                turns.append("- Assistant: " + _clip(text, _ASSISTANT_MSG_CAP))
 
-    users = users[-_MAX_USER_MSGS:]
-    lines_out: list[str] = []
-    for user in users:
-        lines_out.append("- User: " + _clip(user, _USER_MSG_CAP))
-    if last_assistant:
-        lines_out.append(
-            "- Assistant: " + _clip(last_assistant, _ASSISTANT_MSG_CAP)
-        )
-    if not lines_out:
+    if not turns:
         return ""
-    return _clip("\n".join(lines_out), _SESSION_CAP)
+    # Keep the most recent turns. Cap the count, then drop from the FRONT
+    # (oldest) until the joined text fits the session budget, so the latest
+    # exchange always survives rather than being tail-clipped away.
+    turns = turns[-_MAX_TURNS:]
+    while len(turns) > 1 and len("\n".join(turns)) > _SESSION_CAP:
+        turns.pop(0)
+    return _clip("\n".join(turns), _SESSION_CAP)
 
 
 def _message_text(content: object) -> str:

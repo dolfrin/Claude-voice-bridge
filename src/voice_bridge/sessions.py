@@ -108,6 +108,13 @@ _RESTART_MAX_ATTEMPTS = 5
 # a config knob (CATCHUP_IDLE_MINUTES) and an instance attr both override it.
 _CATCHUP_IDLE_SECONDS = 600.0
 
+# Budget (chars) for the IDE catch-up PREPENDED to a wake-up turn. Unlike the
+# ``catchup --hook`` path (bounded by Claude Code's 10k additionalContext cap),
+# this is plain turn text, so it can be large enough for a FULL handover of the
+# recent IDE session instead of a truncated snippet. ~16k chars ≈ a few k
+# tokens of context — enough to actually catch up, still bounded.
+_CATCHUP_MAX_CHARS = 16000
+
 # Opt-in verbose tool-activity streaming (per project, default OFF). When a
 # project is verbose, each ToolUseBlock the agent runs is rendered to a compact
 # one-line preview and COALESCED into a buffer, flushed as ONE text-only
@@ -349,7 +356,11 @@ class SessionManager:
         except Exception:  # noqa: BLE001 - store hiccup must not break deliver
             session_id = None
         try:
-            return await build_catchup(cfg.cwd, exclude_session_id=session_id)
+            return await build_catchup(
+                cfg.cwd,
+                exclude_session_id=session_id,
+                max_chars=_CATCHUP_MAX_CHARS,
+            )
         except Exception:  # noqa: BLE001 - build_catchup never raises, but guard
             logger.exception("catchup build failed for %s", project)
             return ""
