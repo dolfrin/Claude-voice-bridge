@@ -34,10 +34,21 @@ from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-# Cap on the dedup set so a long-lived bridge process cannot accumulate hashes
-# forever. Oldest hashes are evicted first (FIFO) — a duplicate only ever
-# arrives right after its twin, so a modest window is plenty.
+# Cap on the dedup map so a long-lived bridge process cannot accumulate hashes
+# forever. Oldest (least-recently-seen) hashes are evicted first.
 _SEEN_MAX = 512
+
+# Dedup is TIME-WINDOWED, not permanent. The hook can emit two files for ONE
+# logical event (an AskUserQuestion fires both PreToolUse and PermissionRequest)
+# — those twins arrive milliseconds apart and must collapse. But repeated
+# IDENTICAL notifications that are genuinely separate in time (every "✅ baigė"
+# on turn completion, the verbatim-repeating "waiting for your input") must NOT
+# be swallowed forever after the first. So a hash counts as a duplicate only
+# when the new event's own ``ts`` is within this window of the last time that
+# same hash was seen; a later identical event lands outside the window and is
+# emitted. (Keyed on the event ts, so it holds even when the twin is drained on
+# a later tick.)
+_DEDUP_WINDOW_S = 15.0
 
 
 def read_spool(spool_dir) -> list[dict]:
@@ -96,18 +107,19 @@ async def run_inbox(
 
     1. :func:`read_spool` (parse + delete) — guarded so even a surprise error
        there just skips this tick rather than killing the loop.
-    2. For each event whose ``hash`` is not already in ``seen``, ``await
-       emit(event)`` inside try/except — a failing emit (TTS/Telegram down) is
-       logged and the loop continues with the next event.
-    3. Record the hash in the BOUNDED ``seen`` set (oldest evicted past
-       ``_SEEN_MAX``) — AFTER the emit attempt, whether it succeeded or not: the
-       spool file is already gone, so re-emitting a duplicate file for the same
-       logical event would only spam. A genuinely new event carries a new hash.
+    2. For each event that is not a recent duplicate (same ``hash`` seen within
+       ``_DEDUP_WINDOW_S`` by event ``ts``), ``await emit(event)`` inside
+       try/except — a failing emit (TTS/Telegram down) is logged and the loop
+       continues with the next event.
+    3. Record ``seen[hash] = ts`` (bounded, oldest evicted past ``_SEEN_MAX``)
+       AFTER the emit attempt, whether it succeeded or not: the spool file is
+       already gone, so re-emitting the SAME file would only spam. Time-windowed
+       so a later IDENTICAL event (a fresh "✅ baigė") still emits.
     4. ``await sleep_fn(interval)``.
 
-    ``seen`` is an ``OrderedDict`` used as an insertion-ordered bounded set
-    (hash -> None); the caller may pass one in to share/inspect it, else a fresh
-    one is created. ``sleep_fn`` is injected so tests drive the loop with no real
+    ``seen`` is an ``OrderedDict`` mapping hash -> last-seen event ts, ordered by
+    recency; the caller may pass one in to share/inspect it, else a fresh one is
+    created. ``sleep_fn`` is injected so tests drive the loop with no real
     sleeping (the bridge passes ``asyncio.sleep``).
     """
     if seen is None:
@@ -122,14 +134,20 @@ async def run_inbox(
 
         for event in events:
             h = event.get("hash")
-            if h is not None and h in seen:
-                continue
+            ts = event.get("ts")
+            has_ts = isinstance(ts, (int, float))
+            if h is not None and has_ts:
+                last = seen.get(h)
+                if last is not None and ts - last < _DEDUP_WINDOW_S:
+                    # A near-simultaneous twin of an already-emitted event.
+                    continue
             try:
                 await emit(event)
             except Exception:  # noqa: BLE001 - one bad emit must not kill the loop
                 logger.exception("inbox: emit failed for event %r", h)
-            if h is not None:
-                seen[h] = None
+            if h is not None and has_ts:
+                seen[h] = ts
+                seen.move_to_end(h)  # most-recently-seen last (FIFO evicts oldest)
                 while len(seen) > _SEEN_MAX:
                     seen.popitem(last=False)
 

@@ -168,6 +168,27 @@ async def test_run_inbox_dedups_same_hash_across_drains(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_inbox_identical_event_later_in_time_is_emitted_again(tmp_path):
+    # HIGH regression: dedup is TIME-WINDOWED, not permanent. A repeated
+    # identical notification (e.g. every "✅ baigė" on turn completion) that is
+    # genuinely separated in time must emit again — only near-simultaneous twins
+    # collapse.
+    _write_event(tmp_path, hash="H", ts=1, text="baige", name="first")
+    got = []
+
+    async def emit(ev):
+        got.append(ev["ts"])
+
+    def on_sleep(i):
+        if i == 1:
+            # same hash, but far outside the dedup window -> a fresh completion
+            _write_event(tmp_path, hash="H", ts=1000, text="baige", name="later")
+
+    await _drive(tmp_path, emit, iterations=2, on_sleep=on_sleep)
+    assert got == [1, 1000]  # both emitted (not swallowed forever)
+
+
+@pytest.mark.asyncio
 async def test_run_inbox_bad_emit_does_not_stop_loop(tmp_path):
     _write_event(tmp_path, hash="boom", ts=1, name="boom")
     _write_event(tmp_path, hash="ok", ts=2, name="ok")
