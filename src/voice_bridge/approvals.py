@@ -107,18 +107,11 @@ _SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 def _has_risky_redirect(command: str) -> bool:
     """Flag `>`/`>>` redirection to an absolute path, a path that escapes
     cwd (`../`), or a sensitive-looking target. Plain relative targets like
-    `> out.txt` stay safe, and so do the standard /dev/null-style sinks."""
-    for match in _REDIRECT_TARGET_RE.finditer(command):
-        target = match.group(1)
-        if target in _SAFE_REDIRECT_TARGETS:
-            continue
-        if target.startswith("/"):
-            return True
-        if target.startswith("..") or "../" in target:
-            return True
-        if re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE):
-            return True
-    return False
+    `> out.txt` stay safe, and so do the standard /dev/null-style sinks.
+
+    Delegates to :func:`_risky_redirect_targets` so the risk test and the
+    signature derivation (which needs the actual targets) stay in lockstep."""
+    return bool(_risky_redirect_targets(command))
 
 
 # Tools that touch the filesystem with an explicit path.
@@ -217,6 +210,130 @@ def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
                     return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Policy signatures (always-allow feature)
+# ---------------------------------------------------------------------------
+#
+# SECURITY — signature granularity is the crux of the always-allow feature.
+# A policy key is (project, signature); a signature must be a STABLE,
+# action-SPECIFIC descriptor of what the user approved — never just the tool
+# name (which would be catastrophically broad, e.g. "always allow Bash" =
+# allow everything). The rules below are chosen so that:
+#
+#   * the SAME action recurs to the SAME signature ("git push" == "git push
+#     origin main") so an always-allow actually recurs, AND
+#   * DISTINCT dangerous actions get DISTINCT signatures ("git push" != "rm"),
+#     AND — the subtle one —
+#   * a COMPOUND command carries EVERY risky element in its signature, so
+#     allowing a plain "git push" can never silently allow "git push && rm -rf"
+#     (that command's signature includes the extra "rm").
+#
+# Granularity per tool:
+#   * Bash  -> the SORTED SET of the risky phrases that made it risky (the
+#              matched _RISKY_COMMAND_PATTERNS, the exfil short-flag, the risky
+#              redirect targets). A non-risky command (only reachable in ask
+#              mode, where everything is prompted) keys on its leading verb
+#              (+subcommand for git/npm/... style tools) — specific enough to
+#              be useful without pinning every argument.
+#   * send_file -> "send_file" (the egress channel itself is the risk; a
+#                  per-path key would be unusably fine and the tool already
+#                  blocks out-of-cwd/sensitive targets).
+#   * Write/Edit/... -> the tool name (path-OUT-of-cwd is the risk these gate;
+#                       a per-path signature would rarely recur, and the user
+#                       is opting into "let this tool write where it asked").
+
+# git/npm/etc. carry their meaning in verb+subcommand, so the leading-verb
+# fallback keeps the subcommand for these (an ask-mode "git status" vs
+# "git diff" stay distinct) but not for a plain "ls".
+_SUBCOMMAND_VERBS = {
+    "git", "npm", "yarn", "pnpm", "pip", "pip3", "docker", "kubectl",
+    "cargo", "go", "apt", "apt-get", "brew", "snap", "terraform", "systemctl",
+}
+
+
+def _norm_ws(text: str) -> str:
+    """Collapse internal whitespace to single spaces (stable across spacing)."""
+    return " ".join(text.split())
+
+
+def _risky_redirect_targets(command: str) -> list[str]:
+    """The redirect targets in *command* that :func:`_has_risky_redirect` flags.
+
+    Kept in sync with :func:`_has_risky_redirect` (which now delegates here) so
+    the risk test and the signature derivation can never diverge.
+    """
+    targets: list[str] = []
+    for match in _REDIRECT_TARGET_RE.finditer(command):
+        target = match.group(1)
+        if target in _SAFE_REDIRECT_TARGETS:
+            continue
+        if (
+            target.startswith("/")
+            or target.startswith("..")
+            or "../" in target
+            or re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE)
+        ):
+            targets.append(target)
+    return targets
+
+
+def _leading_verb(command: str) -> str:
+    """Leading verb (+subcommand for a small set of multi-word tools).
+
+    ``command`` is expected already lowercased. Only reached for NON-risky
+    Bash commands (ask mode); risky ones are keyed on their risky phrases."""
+    tokens = command.split()
+    if not tokens:
+        return "bash"
+    verb = tokens[0]
+    if verb in _SUBCOMMAND_VERBS:
+        for token in tokens[1:]:
+            if not token.startswith("-"):
+                return f"{verb} {token}"
+    return verb
+
+
+def _bash_signature(command: str) -> str:
+    """Derive a stable, risk-reflecting signature for a Bash command."""
+    lowered = command.lower()
+    tags: list[str] = []
+    for pattern in _RISKY_COMMAND_PATTERNS:
+        match = pattern.search(lowered)
+        if match:
+            tags.append(_norm_ws(match.group(0)))
+    flag = _EXFIL_SHORT_FLAG_RE.search(command)
+    if flag:
+        tags.append("exfil " + _norm_ws(flag.group(1)).lower())
+    for target in _risky_redirect_targets(command):
+        tags.append("> " + target.lower())
+    if tags:
+        # Sorted set: order-independent and de-duplicated, and it reflects
+        # EVERY risky element so a compound command never collapses onto one
+        # of its parts (the SAFETY crux documented above).
+        return " + ".join(sorted(set(tags)))
+    # No risky element: only reachable in ask mode. Key on the leading verb.
+    return _leading_verb(lowered)
+
+
+def signature_for(tool_name: str, tool_input: dict) -> str:
+    """Return the stable always-allow policy signature for a tool call.
+
+    See the module comment above for the granularity rationale. Never raises
+    (a malformed model-generated ``tool_input`` degrades to the tool name)."""
+    try:
+        if tool_name == "Bash":
+            command = tool_input.get("command")
+            if isinstance(command, str) and command.strip():
+                return _bash_signature(command)
+            return "Bash"
+        if tool_name == SEND_FILE_TOOL_NAME:
+            return "send_file"
+        return tool_name
+    except Exception:  # noqa: BLE001 - a signature must never break approval
+        logger.exception("signature_for failed for %s", tool_name)
+        return tool_name
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +530,11 @@ class ApprovalManager:
         # and a message_id could coincide), so they are kept in SEPARATE dicts.
         self._pending: dict[int, asyncio.Future[bool]] = {}
         self._pending_by_token: dict[int, asyncio.Future[bool]] = {}
+        # token -> (project, signature) for the pending approval, so an
+        # "always allow" (apv:{token}:2) tap can persist the right policy. Kept
+        # in lockstep with _pending_by_token (registered in request, popped in
+        # its finally).
+        self._policy_by_token: dict[int, tuple[str, str]] = {}
         self._token_counter = 0
 
     def _next_token(self) -> int:
@@ -437,6 +559,7 @@ class ApprovalManager:
             existing.set_result(False)
         self._pending[message_id] = future
         self._pending_by_token[token] = future
+        self._policy_by_token[token] = (project, signature_for(tool_name, tool_input))
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
         except asyncio.TimeoutError:
@@ -444,6 +567,7 @@ class ApprovalManager:
         finally:
             self._pending.pop(message_id, None)
             self._pending_by_token.pop(token, None)
+            self._policy_by_token.pop(token, None)
 
     def resolve(self, message_id: int, approved: bool) -> bool:
         """Resolve a pending future by message_id (quote-reply path).
@@ -473,6 +597,16 @@ class ApprovalManager:
         future = self._pending.get(message_id)
         return future is not None and not future.done()
 
+    def policy_for_token(self, token: int) -> tuple[str, str] | None:
+        """Return the (project, signature) for a pending approval token.
+
+        Used by the "always allow" (apv:{token}:2) callback to know WHICH
+        policy to persist. Returns None for an unknown/already-resolved token
+        (the mapping is popped in :meth:`request`'s finally). Callers must read
+        this SYNCHRONOUSLY before awaiting anything, since the pending
+        request's cleanup runs on the next loop turn."""
+        return self._policy_by_token.get(token)
+
 
 # ---------------------------------------------------------------------------
 # canUseTool factory
@@ -483,12 +617,21 @@ def make_can_use_tool(
     project: ProjectConfig,
     cfg: Config,
     manager: "ApprovalManager",
+    store=None,
 ) -> Callable:
     """Build an SDK canUseTool callback honoring effective_autonomy.
 
     full -> allow all (no question); ask -> request all; safe -> request only risky.
     Signature follows the claude-agent-sdk C12 API:
         async def can_use_tool(tool_name, tool_input, context) -> Allow | Deny
+
+    When *store* is provided (a routing.Store), an always-allow POLICY
+    short-circuits the prompt whenever one WOULD have been shown: right before
+    prompting (ask mode, or safe mode with a risky tool) the store is consulted
+    for a policy matching (project, :func:`signature_for`); a hit auto-approves
+    with no prompt. ``full`` mode is untouched and never consults policies. A
+    store error while checking FAILS SAFE — it falls through to prompting,
+    never auto-allowing.
     """
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny  # noqa: PLC0415
 
@@ -501,7 +644,20 @@ def make_can_use_tool(
         if mode == "safe" and not is_risky(tool_name, tool_input, project.cwd):
             return PermissionResultAllow()
 
-        # mode == "ask", or mode == "safe" with a risky tool
+        # A prompt WOULD happen now (mode == "ask", or safe + risky). An
+        # always-allow policy for this exact action short-circuits it.
+        if store is not None:
+            signature = signature_for(tool_name, tool_input)
+            try:
+                if await store.has_policy(project.name, signature):
+                    return PermissionResultAllow()
+            except Exception:  # noqa: BLE001 - FAIL SAFE: ask, never auto-allow
+                logger.exception(
+                    "has_policy check failed for %s/%s; falling back to prompt",
+                    project.name,
+                    signature,
+                )
+
         approved = await manager.request(project.name, tool_name, tool_input)
         if approved:
             return PermissionResultAllow()

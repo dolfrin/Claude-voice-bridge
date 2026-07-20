@@ -13,6 +13,7 @@ from voice_bridge.approvals import (
     is_risky,
     make_can_use_tool,
     parse_yes_no,
+    signature_for,
 )
 from voice_bridge.config import Config, ProjectConfig
 from voice_bridge.notify_tool import SEND_FILE_TOOL_NAME
@@ -943,3 +944,213 @@ def test_is_risky_send_file_symlink_normal_in_cwd_still_false(tmp_path):
     os.symlink(real, link)
 
     assert is_risky(SEND_FILE_TOOL_NAME, {"path": "alias.py"}, str(tmp_path)) is False
+
+
+# ---------------------------------------------------------------------------
+# signature_for: stable, action-specific policy keys (always-allow feature)
+# ---------------------------------------------------------------------------
+
+
+def test_signature_bash_git_push_is_stable_across_args():
+    # "git push" and "git push origin main" collapse to the SAME signature —
+    # that's the point: an always-allow of a push applies to future pushes.
+    sig_a = signature_for("Bash", {"command": "git push"})
+    sig_b = signature_for("Bash", {"command": "git push origin main"})
+    assert sig_a == sig_b
+
+
+def test_signature_bash_distinct_dangerous_commands_differ():
+    # SAFETY: "always allow git push" must NOT also allow rm — distinct
+    # dangerous commands get distinct signatures.
+    push = signature_for("Bash", {"command": "git push origin main"})
+    remove = signature_for("Bash", {"command": "rm -rf build"})
+    assert push != remove
+
+
+def test_signature_bash_npm_install_is_stable():
+    a = signature_for("Bash", {"command": "npm install"})
+    b = signature_for("Bash", {"command": "npm install left-pad"})
+    assert a == b
+    assert a != signature_for("Bash", {"command": "pip install requests"})
+
+
+def test_signature_bash_compound_reflects_every_risk():
+    # SAFETY crux: a compound "git push && rm -rf" carries BOTH risks, so its
+    # signature differs from a plain "git push" — allowing the plain push can
+    # never silently allow the compound-with-rm.
+    plain = signature_for("Bash", {"command": "git push"})
+    compound = signature_for("Bash", {"command": "git push && rm -rf /"})
+    assert plain != compound
+
+
+def test_signature_bash_order_independent_for_compound():
+    a = signature_for("Bash", {"command": "git push && rm -rf x"})
+    b = signature_for("Bash", {"command": "rm -rf x && git push"})
+    assert a == b
+
+
+def test_signature_send_file_is_stable():
+    assert signature_for(SEND_FILE_TOOL_NAME, {"path": ".env"}) == "send_file"
+    assert signature_for(SEND_FILE_TOOL_NAME, {"path": "other.txt"}) == "send_file"
+
+
+def test_signature_write_and_edit_use_tool_name():
+    assert signature_for("Write", {"file_path": "/etc/hosts"}) == "Write"
+    assert signature_for("Edit", {"file_path": "/etc/hosts"}) == "Edit"
+    assert signature_for("Write", {"file_path": "/etc/hosts"}) != signature_for(
+        "Edit", {"file_path": "/etc/hosts"}
+    )
+
+
+def test_signature_is_a_nonempty_string_for_odd_input():
+    # Never raise into the approval flow on malformed input.
+    assert isinstance(signature_for("Bash", {}), str)
+    assert isinstance(signature_for("Bash", {"command": None}), str)
+    assert isinstance(signature_for("Grep", {"pattern": "x"}), str)
+
+
+# ---------------------------------------------------------------------------
+# ApprovalManager: policy_for_token threads (project, signature) to the callback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_request_exposes_policy_for_token():
+    async def send_question(project, text, spoken, token):
+        return 5
+
+    mgr = ApprovalManager(send_question, timeout=5)
+
+    async def inspect_then_resolve():
+        await asyncio.sleep(0)  # let request() register the pending approval
+        # While pending, the manager exposes (project, signature) for the
+        # always-allow callback.
+        assert mgr.policy_for_token(1) == ("qwing", "git push")
+        assert mgr.resolve_token(1, True) is True
+
+    task = asyncio.create_task(inspect_then_resolve())
+    await mgr.request("qwing", "Bash", {"command": "git push origin main"})
+    await task
+    # after resolution the mapping is cleaned up
+    assert mgr.policy_for_token(1) is None
+
+
+def test_policy_for_token_unknown_is_none():
+    async def send_question(project, text, spoken, token):
+        return 1
+
+    mgr = ApprovalManager(send_question, timeout=5)
+    assert mgr.policy_for_token(999) is None
+
+
+# ---------------------------------------------------------------------------
+# make_can_use_tool: an always-allow policy short-circuits the prompt
+# ---------------------------------------------------------------------------
+
+
+class _FakePolicyStore:
+    """Records has_policy queries; returns preset membership (or raises)."""
+
+    def __init__(self, policies=None, boom=False):
+        self._policies = set(policies or [])
+        self.boom = boom
+        self.queries: list[tuple[str, str]] = []
+
+    async def has_policy(self, project, signature) -> bool:
+        self.queries.append((project, signature))
+        if self.boom:
+            raise RuntimeError("db down")
+        return (project, signature) in self._policies
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_safe_policy_auto_allows_without_asking():
+    store = _FakePolicyStore(policies={("qwing", "git push")})
+    mgr = _FakeManager(decision=False)
+    fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr, store)
+    result = await fn("Bash", {"command": "git push origin main"}, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    # the policy short-circuited the prompt: request() was never called
+    assert mgr.calls == []
+    assert store.queries == [("qwing", "git push")]
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_safe_no_policy_still_asks():
+    store = _FakePolicyStore(policies=set())
+    mgr = _FakeManager(decision=True)
+    fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr, store)
+    result = await fn("Bash", {"command": "git push origin main"}, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert len(mgr.calls) == 1  # prompted
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_safe_different_signature_still_asks():
+    # A policy for "git push" must NOT auto-allow a DIFFERENT risky command.
+    store = _FakePolicyStore(policies={("qwing", "git push")})
+    mgr = _FakeManager(decision=True)
+    fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr, store)
+    result = await fn("Bash", {"command": "rm -rf build"}, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert len(mgr.calls) == 1  # prompted (rm signature not policy-covered)
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_full_mode_unaffected_by_policy():
+    store = _FakePolicyStore(policies={("qwing", "rm")})
+    mgr = _FakeManager(decision=False)
+    fn = make_can_use_tool(_proj(autonomy="full"), _cfg(), mgr, store)
+    result = await fn("Bash", {"command": "rm -rf build"}, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert mgr.calls == []
+    # full mode allows outright, never even consults policies
+    assert store.queries == []
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_safe_policy_does_not_touch_non_risky():
+    # A non-risky call in safe mode auto-allows WITHOUT consulting the policy
+    # store at all (no prompt would ever happen, so no short-circuit needed).
+    store = _FakePolicyStore(policies={("qwing", "git status")})
+    mgr = _FakeManager(decision=False)
+    fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr, store)
+    result = await fn("Bash", {"command": "git status"}, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert mgr.calls == []
+    assert store.queries == []
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_ask_mode_policy_short_circuits():
+    # In ask mode EVERY call is prompted; a policy short-circuits there too.
+    store = _FakePolicyStore(policies={("qwing", "git status")})
+    mgr = _FakeManager(decision=True)
+    fn = make_can_use_tool(_proj(autonomy="ask"), _cfg(), mgr, store)
+    result = await fn("Bash", {"command": "git status"}, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert mgr.calls == []  # short-circuited
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_policy_store_error_fails_safe_and_asks():
+    # FAIL-SAFE: a has_policy error must fall THROUGH to prompting, never
+    # auto-allow.
+    store = _FakePolicyStore(boom=True)
+    mgr = _FakeManager(decision=False)
+    fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr, store)
+    result = await fn("Bash", {"command": "git push origin main"}, None)
+    # decision=False -> deny; the point is request() WAS called (asked)
+    assert _decision_kind(result) == "PermissionResultDeny"
+    assert len(mgr.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_without_store_behaves_as_before():
+    # store defaults to None -> no policy machinery; existing 3-arg callers
+    # (and their behavior) are unchanged.
+    mgr = _FakeManager(decision=True)
+    fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr)
+    result = await fn("Bash", {"command": "git push origin main"}, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert len(mgr.calls) == 1

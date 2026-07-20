@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS usage (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd              REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS approval_policy (
+    project   TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    PRIMARY KEY (project, signature)
+);
 """
 
 # Columns the ``projects`` table must carry. A fresh db gets them from _SCHEMA;
@@ -365,6 +370,75 @@ class Store:
             )
             rows = await cur.fetchall()
         return {row[0]: _usage_row_to_dict(row[1:]) for row in rows}
+
+
+    # ------------------------------------------------------------------
+    # always-allow approval policies (SECURITY): (project, signature) pairs
+    # ------------------------------------------------------------------
+    #
+    # A policy short-circuits an approval prompt that WOULD otherwise be shown
+    # for a matching risky/asked tool call in the same project. The
+    # ``signature`` is a stable, action-specific descriptor derived by
+    # :func:`voice_bridge.approvals.signature_for` (e.g. ``"git push"``,
+    # ``"rm"``, ``"send_file"``) — never just the tool name — so a grant stays
+    # scoped to what the user actually approved. The key space is deliberately
+    # small (a project + a short signature string); no arbitrary user text is
+    # interpolated into DDL. All methods are best-effort at the call site: a
+    # write failure must never break the approval flow, and a failed
+    # ``has_policy`` read must fail SAFE (caller falls through to prompting).
+
+    async def add_policy(self, project: str, signature: str) -> None:
+        """Record an always-allow policy for (project, signature) (idempotent)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO approval_policy (project, signature) "
+                "VALUES (?, ?)",
+                (project, signature),
+            )
+            await db.commit()
+
+    async def has_policy(self, project: str, signature: str) -> bool:
+        """Return True if an always-allow policy exists for (project, signature)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT 1 FROM approval_policy WHERE project = ? AND signature = ?",
+                (project, signature),
+            )
+            row = await cur.fetchone()
+        return row is not None
+
+    async def list_policies(self) -> list[tuple[str, str]]:
+        """Return every always-allow policy as ``(project, signature)``, sorted."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT project, signature FROM approval_policy "
+                "ORDER BY project, signature"
+            )
+            rows = await cur.fetchall()
+        return [(project, signature) for project, signature in rows]
+
+    async def clear_policy(
+        self, project: str | None = None, signature: str | None = None
+    ) -> None:
+        """Revoke always-allow policies.
+
+        ``project=None`` clears ALL policies; ``project`` alone clears every
+        policy for that project; ``project`` + ``signature`` clears one exact
+        policy. This is the revocation half of the /policies command.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            if project is None:
+                await db.execute("DELETE FROM approval_policy")
+            elif signature is None:
+                await db.execute(
+                    "DELETE FROM approval_policy WHERE project = ?", (project,)
+                )
+            else:
+                await db.execute(
+                    "DELETE FROM approval_policy WHERE project = ? AND signature = ?",
+                    (project, signature),
+                )
+            await db.commit()
 
 
 def _usage_row_to_dict(row) -> dict:

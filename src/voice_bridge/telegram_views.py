@@ -44,6 +44,7 @@ _BOT_COMMANDS = [
     BotCommand("engine", "🧠 Change TTS backend"),
     BotCommand("recap", "🗒 What happened while away"),
     BotCommand("cost", "💰 Token & cost usage"),
+    BotCommand("policies", "♾ Always-allow grants"),
 ]
 
 
@@ -120,7 +121,30 @@ def build_menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⛔ Stop", callback_data="menu:stop"),
             InlineKeyboardButton("🔎 Refresh", callback_data="menu:refresh"),
         ],
+        [
+            InlineKeyboardButton("♾ Policies", callback_data="menu:policies"),
+        ],
     ])
+
+
+def _format_policies(policies: list[tuple[str, str]]) -> str:
+    """Render the always-allow policy list as a plain-text (no-HTML) message.
+
+    Kept HTML-free so it can be sent with no ``parse_mode``: a signature like
+    ``"echo > /etc/y"`` carries ``>``/``&`` metacharacters that would break an
+    HTML-parsed send. Each line is ``• {project}: {signature}``.
+    """
+    if not policies:
+        return (
+            "Nėra išsaugotų „visada leisti“ politikų.\n"
+            "Jos atsiranda paspaudus „✅♾ Visada leisti“ ties patvirtinimu."
+        )
+    lines = ["♾ Visada-leisti politikos:"]
+    for project, signature in policies:
+        lines.append(f"• {project}: {signature}")
+    lines.append("")
+    lines.append("Atšaukti: /policies clear [projektas]")
+    return "\n".join(lines)
 
 
 def _project_list_rows(

@@ -495,3 +495,114 @@ async def test_init_migrates_old_projects_table_without_data_loss(tmp_db):
     assert await store.overrides() == {}
     await store.set_override("qwing", "autonomy", "safe")
     assert await store.overrides() == {"qwing": {"autonomy": "safe"}}
+
+
+# ---------------------------------------------------------------------------
+# Step 11: always-allow approval policies (project, signature)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_policies_empty_by_default(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    assert await store.list_policies() == []
+    assert await store.has_policy("qwing", "git push") is False
+
+
+@pytest.mark.asyncio
+async def test_add_has_list_policy_round_trip(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_policy("qwing", "git push")
+    await store.add_policy("qwing", "npm install")
+
+    assert await store.has_policy("qwing", "git push") is True
+    assert await store.has_policy("qwing", "npm install") is True
+    # a different signature / project is NOT covered
+    assert await store.has_policy("qwing", "rm") is False
+    assert await store.has_policy("other", "git push") is False
+
+    assert await store.list_policies() == [
+        ("qwing", "git push"),
+        ("qwing", "npm install"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_add_policy_is_idempotent(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_policy("qwing", "git push")
+    await store.add_policy("qwing", "git push")  # duplicate must not raise/duplicate
+
+    assert await store.list_policies() == [("qwing", "git push")]
+
+
+@pytest.mark.asyncio
+async def test_clear_policy_all(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_policy("qwing", "git push")
+    await store.add_policy("other", "rm")
+
+    await store.clear_policy()  # no args -> clear everything
+
+    assert await store.list_policies() == []
+
+
+@pytest.mark.asyncio
+async def test_clear_policy_by_project(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_policy("qwing", "git push")
+    await store.add_policy("qwing", "rm")
+    await store.add_policy("other", "rm")
+
+    await store.clear_policy("qwing")
+
+    assert await store.list_policies() == [("other", "rm")]
+
+
+@pytest.mark.asyncio
+async def test_clear_policy_by_project_and_signature(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_policy("qwing", "git push")
+    await store.add_policy("qwing", "rm")
+
+    await store.clear_policy("qwing", "git push")
+
+    assert await store.list_policies() == [("qwing", "rm")]
+
+
+@pytest.mark.asyncio
+async def test_policies_survive_new_store_instance(tmp_db):
+    s1 = Store(tmp_db)
+    await s1.init()
+    await s1.add_policy("qwing", "git push")
+
+    s2 = Store(tmp_db)
+    await s2.init()
+    assert await s2.has_policy("qwing", "git push") is True
+    assert await s2.list_policies() == [("qwing", "git push")]
+
+
+@pytest.mark.asyncio
+async def test_init_adds_policy_table_to_old_db(tmp_db):
+    # An old db with no approval_policy table must gain it on init (no data loss).
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.executescript(
+            """
+            CREATE TABLE projects (
+                name TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1
+            );
+            """
+        )
+        await db.commit()
+
+    store = Store(tmp_db)
+    await store.init()
+    # table now exists and is usable
+    await store.add_policy("qwing", "git push")
+    assert await store.has_policy("qwing", "git push") is True

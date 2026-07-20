@@ -136,6 +136,13 @@ class FakeControls:
         self.calls.append(("cost_summary",))
         return self.cost_text
 
+    async def list_policies(self):
+        self.calls.append(("list_policies",))
+        return list(getattr(self, "_policies", []))
+
+    async def clear_policies(self, project=None):
+        self.calls.append(("clear_policies", project))
+
     def snapshot(self):
         return self._snapshot
 
@@ -578,9 +585,11 @@ async def test_send_question_attaches_approval_buttons():
     assert mid == 610
     markup = bot.send_message.await_args.kwargs["reply_markup"]
     buttons = [b for row in markup.inline_keyboard for b in row]
-    assert [b.callback_data for b in buttons] == ["apv:7:1", "apv:7:0"]
+    # third button (code 2) = always-allow, next to allow-once/deny
+    assert [b.callback_data for b in buttons] == ["apv:7:1", "apv:7:0", "apv:7:2"]
     assert "Leisti" in buttons[0].text
     assert "Neleisti" in buttons[1].text
+    assert "Visada" in buttons[2].text
     # no token -> no voice send in this case
     bot.send_voice.assert_not_awaited()
 
@@ -630,7 +639,7 @@ async def test_send_question_truncates_huge_preview_keeps_buttons_attached():
 
     markup = bot.send_message.await_args.kwargs["reply_markup"]
     buttons = [b for row in markup.inline_keyboard for b in row]
-    assert [b.callback_data for b in buttons] == ["apv:9:1", "apv:9:0"]
+    assert [b.callback_data for b in buttons] == ["apv:9:1", "apv:9:0", "apv:9:2"]
 
 
 @pytest.mark.asyncio
@@ -770,6 +779,178 @@ async def test_approval_callback_from_non_whitelisted_user_is_ignored():
     # the whitelist gates the approval callback: a non-owner tap is ignored
     assert resolved == []
     query.edit_message_text.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
+# Always-allow (code 2): resolve as allow AND persist a policy
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_approval_callback_always_allow_resolves_and_persists():
+    resolved: list[tuple[int, bool]] = []
+    persisted: list[int] = []
+
+    def on_approval(token, approved):
+        resolved.append((token, approved))
+        return True
+
+    async def on_always_allow(token):
+        persisted.append(token)
+
+    io = TelegramIO(
+        make_cfg(), AsyncMock(), FakeControls(),
+        on_approval=on_approval, on_always_allow=on_always_allow,
+    )
+    query = AsyncMock()
+    query.data = "apv:7:2"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    # code 2 resolves the approval as ALLOW ...
+    assert resolved == [(7, True)]
+    # ... and persists the policy for this token
+    assert persisted == [7]
+    edited = query.edit_message_text.await_args.args[0]
+    assert "Visada" in edited
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_allow_once_does_not_persist():
+    resolved: list[tuple[int, bool]] = []
+    persisted: list[int] = []
+
+    def on_approval(token, approved):
+        resolved.append((token, approved))
+        return True
+
+    async def on_always_allow(token):
+        persisted.append(token)
+
+    io = TelegramIO(
+        make_cfg(), AsyncMock(), FakeControls(),
+        on_approval=on_approval, on_always_allow=on_always_allow,
+    )
+    query = AsyncMock()
+    query.data = "apv:7:1"  # allow-once
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert resolved == [(7, True)]
+    assert persisted == []  # allow-once never persists a policy
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_always_allow_stale_token_no_persist():
+    persisted: list[int] = []
+
+    def on_approval(token, approved):
+        return False  # stale / already resolved
+
+    async def on_always_allow(token):
+        persisted.append(token)
+
+    io = TelegramIO(
+        make_cfg(), AsyncMock(), FakeControls(),
+        on_approval=on_approval, on_always_allow=on_always_allow,
+    )
+    query = AsyncMock()
+    query.data = "apv:99:2"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    # a stale always-allow tap persists NOTHING and does not edit the message
+    assert persisted == []
+    query.edit_message_text.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
+# /policies: visibility + revocation of always-allow grants (owner-gated)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_policies_lists_current_policies():
+    controls = FakeControls()
+    controls._policies = [("qwing", "git push"), ("qwing", "rm")]
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/policies")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_policies(update, MagicMock(args=[]))
+
+    assert ("list_policies",) in controls.calls
+    sent = msg.reply_text.await_args.args[0]
+    assert "qwing" in sent and "git push" in sent and "rm" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_policies_empty_message():
+    controls = FakeControls()
+    controls._policies = []
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/policies")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_policies(update, MagicMock(args=[]))
+
+    sent = msg.reply_text.await_args.args[0]
+    assert isinstance(sent, str) and sent  # a non-empty "nothing yet" message
+
+
+@pytest.mark.asyncio
+async def test_cmd_policies_clear_all():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/policies clear")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_policies(update, MagicMock(args=["clear"]))
+
+    assert ("clear_policies", None) in controls.calls
+    msg.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_policies_clear_one_project():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/policies clear qwing")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_policies(update, MagicMock(args=["clear", "qwing"]))
+
+    assert ("clear_policies", "qwing") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_policies_non_owner_ignored():
+    controls = FakeControls()
+    controls._policies = [("qwing", "git push")]
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    msg = make_message(user_id=999, text="/policies")  # not the owner
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_policies(update, MagicMock(args=[]))
+
+    assert controls.calls == []
+    msg.reply_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1231,6 +1412,7 @@ def test_build_menu_markup_has_primary_actions():
         "menu:handoff",
         "menu:stop",
         "menu:refresh",
+        "menu:policies",
     ]
 
 
@@ -1827,6 +2009,27 @@ async def test_menu_projects_callback_edits_to_projects_list():
     assert "<b>qwing</b>" in kwargs["text"]
     assert "<b>othersapp</b>" not in kwargs["text"]
     assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "sel:0"
+
+
+@pytest.mark.asyncio
+async def test_menu_policies_callback_lists_grants():
+    controls = FakeControls()
+    controls._policies = [("qwing", "git push")]
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = MagicMock()
+    query.from_user = MagicMock(id=42)
+    query.data = "menu:policies"
+    query.answer = AsyncMock()
+    query.message = MagicMock()
+    query.message.reply_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("list_policies",) in controls.calls
+    sent = query.message.reply_text.await_args.args[0]
+    assert "qwing" in sent and "git push" in sent
 
 
 @pytest.mark.asyncio
@@ -2658,7 +2861,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
-            "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info"} == registered_names
+            "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info", "policies"} == registered_names
 
 
 @pytest.mark.asyncio

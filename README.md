@@ -414,6 +414,7 @@ journalctl --user -u voice-bridge -f
 | 🧠 | `/engine <auto\|openai\|piper\|together>` | Switch TTS backend live |
 | 🗒 | `/recap` | Show what changed across all projects while you were away |
 | 💰 | `/cost` | Show per-project and total token and cost usage |
+| ♾ | `/policies` / `/policies clear [project]` | List, or revoke (all / one project's), the always-allow grants |
 
 Telegram turns are mirrored into each project's `.claude/voice-bridge-chat.md`
 so the voice/text conversation is visible from the IDE file tree.
@@ -483,9 +484,18 @@ Every project session gets an in-process MCP server named `bridge` with these to
 | `ask` | Agent asks before every tool call |
 
 In `safe` and `ask` modes you receive a voice+text question showing the command or diff
-and two inline buttons: **✅ Leisti** (Allow) and **❌ Neleisti** (Deny). Tap a button or
-reply "yes" / "no" by text. No reply within `APPROVAL_TIMEOUT` seconds auto-denies the
-operation and the agent is told it was skipped.
+and three inline buttons: **✅ Leisti** (Allow once), **❌ Neleisti** (Deny), and
+**✅♾ Visada leisti** (Always allow). Tap a button or reply "yes" / "no" by text. No reply
+within `APPROVAL_TIMEOUT` seconds auto-denies the operation and the agent is told it was
+skipped.
+
+**Always allow** approves this call *and* remembers a per-project policy keyed on a
+stable, action-specific signature of what made the call ask — e.g. `git push`, `rm`,
+`npm install`, `send_file` — so future *matching* calls in the same project auto-approve
+without asking. The signature is deliberately specific: allowing `git push` never also
+allows `rm`, and a compound `git push && rm -rf` carries both risks so it can't be
+unlocked by an earlier plain-`git push` grant. Grants persist across restarts; review and
+revoke them anytime with `/policies` (list) and `/policies clear [project]`.
 
 If `TTS_ALERT_VOICE` is set, approval questions and crash notices are spoken with that
 distinct voice so they stand out when you are away from your desk. Falls back to

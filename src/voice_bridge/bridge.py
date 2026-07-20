@@ -279,6 +279,41 @@ def make_outbound(
 
 
 # --------------------------------------------------------------------------- #
+# Always-allow persistence hook
+# --------------------------------------------------------------------------- #
+
+
+def make_on_always_allow(
+    approvals: ApprovalManager, store: Store
+) -> Callable[[int], Awaitable[None]]:
+    """Build the "✅♾ Visada leisti" persist hook wired into TelegramIO.
+
+    Given a just-resolved approval *token*, look up the (project, signature)
+    the ApprovalManager stashed for it and persist an always-allow policy so
+    future matching calls auto-approve. Reads ``policy_for_token`` SYNCHRONOUSLY
+    (before any await) since the resolved request cleans the mapping up on the
+    next loop turn. Best-effort: the approval is ALREADY resolved as allow, so a
+    store failure degrades to allow-once and is logged, never raised.
+    """
+
+    async def on_always_allow(token: int) -> None:
+        info = approvals.policy_for_token(token)
+        if info is None:
+            return
+        project, signature = info
+        try:
+            await store.add_policy(project, signature)
+        except Exception:  # noqa: BLE001 - persist is best-effort (allow-once)
+            logger.exception(
+                "add_policy failed for %s/%s; grant is allow-once only",
+                project,
+                signature,
+            )
+
+    return on_always_allow
+
+
+# --------------------------------------------------------------------------- #
 # Inbound closure
 # --------------------------------------------------------------------------- #
 
@@ -540,6 +575,16 @@ class _Controls:
         return "\n".join(parts) if parts else "Nieko naujo."
 
     # -- Cost / token usage (B3c) -------------------------------------------
+
+    # -- Always-allow policies (visibility / revocation) --------------------
+
+    async def list_policies(self) -> list[tuple[str, str]]:
+        """Every always-allow (project, signature) grant, for /policies."""
+        return await self._store.list_policies()
+
+    async def clear_policies(self, project: str | None = None) -> None:
+        """Revoke always-allow grants: all, or just one project's."""
+        await self._store.clear_policy(project)
 
     async def cost_summary(self) -> str:
         """Per-project + TOTAL token/cost summary, read fresh from the store.
@@ -1118,7 +1163,11 @@ async def build() -> Wiring:
     )
 
     telegram = TelegramIO(
-        cfg, inbound, controls, on_approval=approvals.resolve_token
+        cfg,
+        inbound,
+        controls,
+        on_approval=approvals.resolve_token,
+        on_always_allow=make_on_always_allow(approvals, store),
     )
     telegram_ref["io"] = telegram
     controls.attach_telegram(telegram)

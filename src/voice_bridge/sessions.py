@@ -520,7 +520,11 @@ class SessionManager:
             can_use_tool = None
         else:
             permission_mode = "default"
-            can_use_tool = make_can_use_tool(project, self._cfg, self._approvals)
+            # Pass the store so an always-allow policy can short-circuit a
+            # prompt that would otherwise be shown (safe+risky / ask).
+            can_use_tool = make_can_use_tool(
+                project, self._cfg, self._approvals, self._store
+            )
 
         return ClaudeAgentOptions(
             cwd=project.cwd,

@@ -64,6 +64,7 @@ from .telegram_views import (
     _MODES,
     _clean_choices,
     _find_project_row,
+    _format_policies,
     _friendly_path,
     _project_list_rows,
     _tail_for_telegram,
@@ -110,6 +111,8 @@ class Controls(Protocol):
     def recap(self) -> str: ...
     def info(self) -> str: ...
     async def cost_summary(self) -> str: ...
+    async def list_policies(self) -> list[tuple[str, str]]: ...
+    async def clear_policies(self, project: str | None) -> None: ...
 
 
 _PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
@@ -243,6 +246,7 @@ class TelegramIO:
         on_user_message: Callable[[dict], Awaitable[None]],
         controls: Controls,
         on_approval: Callable[[int, bool], bool] | None = None,
+        on_always_allow: Callable[[int], Awaitable[None]] | None = None,
     ) -> None:
         self.cfg = cfg
         self.on_user_message = on_user_message
@@ -251,6 +255,11 @@ class TelegramIO:
         # approval was resolved, False if it was already answered / timed out.
         # Wired in bridge to ApprovalManager.resolve_token.
         self._on_approval = on_approval
+        # "Always allow" (apv:{token}:2) persist hook: given the resolved
+        # token, records an always-allow policy so future MATCHING calls
+        # auto-approve. Wired in bridge; a failure here must never break the
+        # (already-resolved-as-allow) approval — it degrades to allow-once.
+        self._on_always_allow = on_always_allow
         self.app: Application | None = None
         self._pending_off_sends: dict[str, tuple[str, str]] = {}
         self._pending_off_seq = 0
@@ -430,12 +439,20 @@ class TelegramIO:
         bot = self.app.bot
         reply_markup = None
         if approval_token is not None:
-            reply_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "✅ Leisti", callback_data=f"apv:{approval_token}:1"),
-                InlineKeyboardButton(
-                    "❌ Neleisti", callback_data=f"apv:{approval_token}:0"),
-            ]])
+            # Allow-once (1) / Deny (0) on the first row; the more powerful
+            # always-allow (2) sits on its own row so it is harder to fat-finger.
+            reply_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ Leisti", callback_data=f"apv:{approval_token}:1"),
+                    InlineKeyboardButton(
+                        "❌ Neleisti", callback_data=f"apv:{approval_token}:0"),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "✅♾ Visada leisti", callback_data=f"apv:{approval_token}:2"),
+                ],
+            ])
         text = _truncate_approval_preview(text)
         msg = await _send_with_retry(
             lambda: bot.send_message(
@@ -804,31 +821,48 @@ class TelegramIO:
         await self._edit_callback_markup(query, new_markup)
 
     async def _handle_approval_callback(self, query, index_str: str) -> None:
-        """Resolve an inline Allow/Deny tap by approval token.
+        """Resolve an inline approval tap by token.
 
-        ``index_str`` is ``"{token}:{approved}"`` (``1`` = allow, ``0`` = deny).
-        A token with no live pending (already answered via quote-reply, or timed
+        ``index_str`` is ``"{token}:{code}"`` where ``code`` is ``0`` = deny,
+        ``1`` = allow-once, ``2`` = allow + persist an always-allow policy. A
+        token with no live pending (already answered via quote-reply, or timed
         out) answers with a "no longer relevant" toast and leaves the message
-        untouched. A resolved tap edits the message to show the outcome and
-        removes the buttons.
+        untouched — and persists NOTHING. A resolved tap edits the message to
+        show the outcome and removes the buttons.
         """
         try:
-            token_str, approved_str = index_str.split(":", 1)
+            token_str, code_str = index_str.split(":", 1)
             token = int(token_str)
         except (ValueError, TypeError):
             await self._answer_quietly(query)
             return
-        approved = approved_str == "1"
+        always = code_str == "2"
+        approved = code_str in ("1", "2")
         resolved = (
             self._on_approval(token, approved)
             if self._on_approval is not None
             else False
         )
         if not resolved:
+            # Stale/already-answered: no policy is persisted for a tap that did
+            # not actually resolve a live approval.
             await self._answer_quietly(query, "nebeaktualu")
             return
+        if always and self._on_always_allow is not None:
+            # Persist the policy. The approval is ALREADY resolved as allow, so
+            # a persist failure degrades to allow-once — it must never raise
+            # out of the callback (never-crash posture).
+            try:
+                await self._on_always_allow(token)
+            except Exception:  # noqa: BLE001 - persist is best-effort
+                logger.exception("always-allow persist failed for token %s", token)
         await self._answer_quietly(query)
-        label = "✅ Leista" if approved else "❌ Neleista"
+        if always:
+            label = "✅♾ Visada leista"
+        elif approved:
+            label = "✅ Leista"
+        else:
+            label = "❌ Neleista"
         try:
             await query.edit_message_text(label)
         except BadRequest as exc:
@@ -880,6 +914,11 @@ class TelegramIO:
                 self._format_handoff_text(""),
                 build_menu_markup(),
             )
+        elif action == "policies":
+            # Reply with a fresh PLAIN message (like cost/recap) so the
+            # HTML-free policy text is never parsed as HTML, and the menu stays.
+            policies = await self.controls.list_policies()
+            await query.message.reply_text(_format_policies(policies))
 
     async def _edit_callback_markup(self, query, new_markup: InlineKeyboardMarkup) -> None:
         try:
@@ -1215,6 +1254,30 @@ class TelegramIO:
             return
         await msg.reply_text(await self.controls.cost_summary())
 
+    async def _cmd_policies(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show or revoke always-allow policies (SECURITY visibility).
+
+        ``/policies`` lists every ``(project, signature)`` the user has granted
+        via the "✅♾ Visada leisti" button. ``/policies clear`` revokes ALL of
+        them; ``/policies clear <project>`` revokes just that project's. This is
+        the escape hatch for a security setting, so it is owner-gated like every
+        other command.
+        """
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        args = list(context.args or [])
+        if args and args[0] == "clear":
+            target = args[1] if len(args) > 1 else None
+            await self.controls.clear_policies(target)
+            scope = target or "visi projektai"
+            await msg.reply_text(f"Visada-leisti politikos išvalytos: {scope}")
+            return
+        policies = await self.controls.list_policies()
+        await msg.reply_text(_format_policies(policies))
+
     async def _cmd_handoff(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1298,6 +1361,8 @@ class TelegramIO:
             CommandHandler("recap", self._cmd_recap, filters=only_me))
         app.add_handler(
             CommandHandler("cost", self._cmd_cost, filters=only_me))
+        app.add_handler(
+            CommandHandler("policies", self._cmd_policies, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(
             only_me & filters.VOICE, self._handle_voice))

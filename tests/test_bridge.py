@@ -42,6 +42,8 @@ class FakeStore:
         self.last_active_calls: list[str] = []
         self.override_calls: list[tuple[str, str, object]] = []
         self.created_calls: list[tuple[str, str, object]] = []
+        self._policies: set[tuple[str, str]] = set()
+        self.policy_calls: list[tuple] = []
         self.inited = 0
         self.seeded: list[list] = []
 
@@ -92,6 +94,26 @@ class FakeStore:
 
     async def created_projects(self):
         return [dict(row) for row in self._created]
+
+    # always-allow policies
+    async def add_policy(self, project, signature):
+        self.policy_calls.append(("add", project, signature))
+        self._policies.add((project, signature))
+
+    async def has_policy(self, project, signature):
+        return (project, signature) in self._policies
+
+    async def list_policies(self):
+        return sorted(self._policies)
+
+    async def clear_policy(self, project=None, signature=None):
+        self.policy_calls.append(("clear", project, signature))
+        if project is None:
+            self._policies.clear()
+        elif signature is None:
+            self._policies = {p for p in self._policies if p[0] != project}
+        else:
+            self._policies.discard((project, signature))
 
 
 class FakeTTS:
@@ -1230,6 +1252,79 @@ async def test_controls_select_marks_last_active_without_enabling_project():
 
 
 @pytest.mark.asyncio
+async def test_controls_list_policies_delegates_to_store():
+    controls, sessions, store, *_ = _make_controls()
+    await store.add_policy("qwing", "git push")
+    await store.add_policy("qwing", "rm")
+
+    assert await controls.list_policies() == [("qwing", "git push"), ("qwing", "rm")]
+
+
+@pytest.mark.asyncio
+async def test_controls_clear_policies_all_and_by_project():
+    controls, sessions, store, *_ = _make_controls()
+    await store.add_policy("qwing", "git push")
+    await store.add_policy("other", "rm")
+
+    await controls.clear_policies("qwing")
+    assert ("clear", "qwing", None) in store.policy_calls
+    assert await store.list_policies() == [("other", "rm")]
+
+    await controls.clear_policies(None)
+    assert await store.list_policies() == []
+
+
+@pytest.mark.asyncio
+async def test_make_on_always_allow_persists_pending_policy():
+    from voice_bridge.bridge import make_on_always_allow
+
+    store = FakeStore()
+
+    class _Approvals:
+        def policy_for_token(self, token):
+            return ("qwing", "git push") if token == 7 else None
+
+    fn = make_on_always_allow(_Approvals(), store)
+    await fn(7)
+
+    assert ("add", "qwing", "git push") in store.policy_calls
+    assert await store.has_policy("qwing", "git push") is True
+
+
+@pytest.mark.asyncio
+async def test_make_on_always_allow_noop_for_unknown_token():
+    from voice_bridge.bridge import make_on_always_allow
+
+    store = FakeStore()
+
+    class _Approvals:
+        def policy_for_token(self, token):
+            return None
+
+    fn = make_on_always_allow(_Approvals(), store)
+    await fn(123)  # unknown token -> nothing persisted, no raise
+
+    assert store.policy_calls == []
+
+
+@pytest.mark.asyncio
+async def test_make_on_always_allow_swallows_store_failure():
+    from voice_bridge.bridge import make_on_always_allow
+
+    class _BoomStore:
+        async def add_policy(self, project, signature):
+            raise RuntimeError("db down")
+
+    class _Approvals:
+        def policy_for_token(self, token):
+            return ("qwing", "git push")
+
+    fn = make_on_always_allow(_Approvals(), _BoomStore())
+    # a persist failure must never raise out of the always-allow callback
+    await fn(7)
+
+
+@pytest.mark.asyncio
 async def test_controls_enable_and_deliver_starts_project_then_sends_text():
     controls, sessions, store, *_ = _make_controls()
     await controls.seed()
@@ -1882,7 +1977,7 @@ async def test_build_wires_and_run_loop(monkeypatch):
     monkeypatch.setattr(bridge_mod, "SessionManager",
                         lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda cfg, on_user_message, controls, on_approval=None: telegram)
+                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None: telegram)
 
     wired = await build()
     assert store.inited == 1
@@ -1926,7 +2021,7 @@ async def test_build_inbound_forwards_disabled_project_prompt(monkeypatch):
     monkeypatch.setattr(
         bridge_mod,
         "TelegramIO",
-        lambda cfg, on_user_message, controls, on_approval=None: telegram,
+        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None: telegram,
     )
 
     wired = await build()
@@ -1961,8 +2056,10 @@ async def test_build_approval_send_uses_alert_voice_and_token(monkeypatch):
         captured["send_question"] = send_question
         return approvals
 
-    def capture_tg(cfg_, on_user_message, controls, on_approval=None):
+    def capture_tg(cfg_, on_user_message, controls, on_approval=None,
+                   on_always_allow=None):
         captured["on_approval"] = on_approval
+        captured["on_always_allow"] = on_always_allow
         return telegram
 
     monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
@@ -1980,6 +2077,8 @@ async def test_build_approval_send_uses_alert_voice_and_token(monkeypatch):
 
     # on_approval is wired to the approvals' token resolver
     assert captured["on_approval"] == approvals.resolve_token
+    # the always-allow persist hook is wired too
+    assert callable(captured["on_always_allow"])
 
     send_question = captured["send_question"]
     mid = await send_question(
@@ -2032,7 +2131,7 @@ async def test_build_reloads_created_projects_and_applies_overrides(tmp_path, mo
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
 
     await build()
 
@@ -2070,7 +2169,7 @@ async def test_build_skips_created_project_missing_on_disk(tmp_path, monkeypatch
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
 
     await build()
 
@@ -2114,7 +2213,7 @@ async def test_persisted_mode_override_survives_rebuild(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
 
     # First boot: qwing runs at the yaml autonomy "full".
     w1 = await build()
