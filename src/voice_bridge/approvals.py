@@ -95,8 +95,16 @@ _RISKY_COMMAND_PATTERNS.append(
 # Redirection target: the first non-whitespace token after `>`/`>>`, stopping
 # at shell metacharacters that would end the token (pipe, semicolon, `&`,
 # another redirection). This intentionally excludes fd-duplication targets
-# like `>&1` — those aren't file paths.
+# like `>&1` — those aren't file paths. (`&>file` — ampersand BEFORE `>` — is
+# caught here because the `>` still precedes the target.)
 _REDIRECT_TARGET_RE = re.compile(r">>?\s*([^\s|;&<>]+)")
+
+# `>&word` (ampersand AFTER `>`) redirects BOTH stdout+stderr to `word` when
+# `word` is a FILENAME, not an fd number: `echo x >&/etc/passwd` truncates the
+# file. `_REDIRECT_TARGET_RE` misses it (the char after `>` is `&`, which ends
+# its token), so it gets its own pattern. A leading digit or `-` means fd
+# duplication (`>&1`, `>&2`, `>&-`) — not a file — so those are excluded.
+_REDIRECT_AMP_TARGET_RE = re.compile(r">&\s*([^\s|;&<>0-9-][^\s|;&<>]*)")
 
 # Pseudo-files that discard/duplicate output rather than persist or exfil
 # data. `cmd > /dev/null 2>&1` is one of the most common shell idioms and
@@ -239,9 +247,11 @@ def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
 # is safe:
 #   * NON-risky call (only reachable in ASK mode, where everything is prompted
 #     and there is no risk boundary): a convenient coarse key is fine — Bash
-#     keys on its leading verb (+subcommand), other tools on the tool name. A
-#     safe-mode risky VARIANT of the same call recomputes to a stricter/None
-#     key, so an ask-mode grant cannot leak into safe mode.
+#     keys on its leading verb (+subcommand), other tools on the tool name —
+#     but it is NAMESPACED with an "ok:" prefix that risky keys never carry, so
+#     an ask-mode grant can NEVER collide with a risky signature (crucial for
+#     CONDITIONALLY-risky verbs like `dd`, risky only with `if=`, whose risky
+#     and non-risky forms would otherwise share the bare key "dd").
 #   * RISKY Bash: eligible ONLY as a SINGLE, simple invocation of an
 #     allowlisted operation verb (_GENERALIZABLE_VERBS) — no compounding
 #     (`&&`/`||`/`;`/`|`/`&`/`$(...)`/backticks), no exfil flag, no interpreter
@@ -307,17 +317,18 @@ def _risky_redirect_targets(command: str) -> list[str]:
     the risk test and the signature derivation can never diverge.
     """
     targets: list[str] = []
-    for match in _REDIRECT_TARGET_RE.finditer(command):
-        target = match.group(1)
-        if target in _SAFE_REDIRECT_TARGETS:
-            continue
-        if (
-            target.startswith("/")
-            or target.startswith("..")
-            or "../" in target
-            or re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE)
-        ):
-            targets.append(target)
+    for pattern in (_REDIRECT_TARGET_RE, _REDIRECT_AMP_TARGET_RE):
+        for match in pattern.finditer(command):
+            target = match.group(1)
+            if target in _SAFE_REDIRECT_TARGETS:
+                continue
+            if (
+                target.startswith("/")
+                or target.startswith("..")
+                or "../" in target
+                or re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE)
+            ):
+                targets.append(target)
     return targets
 
 
@@ -388,15 +399,23 @@ def signature_for(tool_name: str, tool_input: dict, cwd: str) -> str | None:
     try:
         if not risky:
             # Only reachable when a NON-risky call is prompted, i.e. ASK mode.
-            # Not a safe-mode boundary, so a coarse convenient key is fine; a
-            # safe-mode risky variant of the same call recomputes to a
-            # stricter/None key, so this cannot leak into safe mode.
+            # Not a safe-mode boundary, so a coarse convenient key is fine.
+            #
+            # NON-risky keys are NAMESPACED with an "ok:" prefix that risky keys
+            # never carry, so a non-risky grant can NEVER collide with a risky
+            # signature. This is load-bearing: some verbs are only
+            # CONDITIONALLY risky (e.g. `dd` is risky only with `if=`, and is
+            # not a subcommand verb, so both `dd --version` and `dd if=/dev/sda`
+            # would otherwise collapse to the bare key "dd"). The prefix
+            # guarantees an ask-mode `dd --version` grant can never auto-allow a
+            # safe-mode `dd if=…` disk wipe — for this and any future
+            # conditionally-risky allowlisted verb.
             if tool_name == "Bash":
                 command = tool_input.get("command")
                 if isinstance(command, str) and command.strip():
-                    return _leading_verb(command.lower())
-                return "Bash"
-            return tool_name
+                    return "ok:" + _leading_verb(command.lower())
+                return "ok:Bash"
+            return "ok:" + tool_name
         # RISKY: the signature must FULLY capture the risk basis or be None.
         if tool_name == "Bash":
             # Risky via an out-of-cwd path KEY (not the command text) can't be

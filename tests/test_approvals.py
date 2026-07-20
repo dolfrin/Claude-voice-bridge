@@ -1047,25 +1047,56 @@ def test_signature_out_of_cwd_path_tools_not_eligible():
 
 def test_signature_in_cwd_path_tool_keys_on_tool_name_for_ask_mode():
     # A NON-risky (in-cwd) path tool is only prompted in ASK mode; a coarse
-    # tool-name key is fine there (not a safe-mode boundary).
-    assert signature_for("Read", {"file_path": f"{CWD}/a.py"}, CWD) == "Read"
+    # tool-name key is fine there (not a safe-mode boundary), NAMESPACED "ok:".
+    assert signature_for("Read", {"file_path": f"{CWD}/a.py"}, CWD) == "ok:Read"
 
 
 def test_signature_non_risky_bash_keys_on_leading_verb():
-    # Ask-mode convenience: a non-risky command keys on its leading verb.
-    assert signature_for("Bash", {"command": "git status"}, CWD) == "git status"
-    assert signature_for("Bash", {"command": "ls -la"}, CWD) == "ls"
+    # Ask-mode convenience: a non-risky command keys on its leading verb, with
+    # the "ok:" namespace so it can never equal a risky key.
+    assert signature_for("Bash", {"command": "git status"}, CWD) == "ok:git status"
+    assert signature_for("Bash", {"command": "ls -la"}, CWD) == "ok:ls"
+
+
+def test_signature_non_risky_and_risky_forms_of_a_verb_never_collide():
+    # `dd` is risky ONLY with `if=` and is not a subcommand verb, so both forms
+    # would collapse to the bare key "dd" without the namespace. The non-risky
+    # form must key on "ok:dd" and the risky form on "dd" — never equal, so an
+    # ask-mode `dd --version` grant can't auto-allow a safe-mode `dd if=` wipe.
+    non_risky = signature_for("Bash", {"command": "dd --version"}, CWD)
+    risky = signature_for("Bash", {"command": "dd if=/dev/sda of=/dev/sdb"}, CWD)
+    assert non_risky == "ok:dd"
+    assert risky == "dd"
+    assert non_risky != risky
+
+
+def test_signature_amp_redirect_to_file_is_detected():
+    # `>&FILE` (ampersand AFTER `>`) writes both streams to FILE; it must be a
+    # RISKY redirect (both for is_risky and for the signature's target tag), so
+    # it can't slip past the per-target granularity a `git push` grant relies on.
+    assert is_risky("Bash", {"command": "echo hi >&/etc/cron.d/pwn"}, CWD) is True
+    # A benign leading verb + this redirect is now risky -> not eligible (echo
+    # is not an allowlisted op) -> None (prompts), not a coarse "ok:echo".
+    assert signature_for("Bash", {"command": "echo hi >&/etc/cron.d/pwn"}, CWD) is None
+    # With an allowlisted verb the target is captured, so the signature differs
+    # from a plain "git push" grant (no silent auto-allow).
+    amp = signature_for("Bash", {"command": "git push >&/etc/cron.d/pwn"}, CWD)
+    assert amp is not None and amp != "git push" and "/etc/cron.d/pwn" in amp
+    # fd-duplication (`2>&1`, `>&2`, `>&-`) is NOT a file redirect.
+    assert is_risky("Bash", {"command": "ls >&2"}, CWD) is False
+    assert signature_for("Bash", {"command": "git push 2>&1"}, CWD) == "git push"
 
 
 def test_signature_odd_input_never_raises_and_has_no_broad_risky_key():
     # Malformed input must never raise. A Bash call with no/empty command is
-    # NON-risky, so it degrades to the harmless "Bash" fallback (only ever
+    # NON-risky, so it degrades to the harmless "ok:Bash" fallback (only ever
     # matches other empty-command bash calls, in ask mode) — a RISKY call never
-    # reaches this fallback (it is specific or None).
-    assert signature_for("Bash", {}, CWD) == "Bash"
-    assert signature_for("Bash", {"command": None}, CWD) == "Bash"
-    # A non-risky odd tool call (ask mode) keys on the tool name.
-    assert signature_for("Grep", {"pattern": "x"}, CWD) == "Grep"
+    # reaches this fallback (it is specific or None), and the "ok:" namespace
+    # keeps it disjoint from every risky key.
+    assert signature_for("Bash", {}, CWD) == "ok:Bash"
+    assert signature_for("Bash", {"command": None}, CWD) == "ok:Bash"
+    # A non-risky odd tool call (ask mode) keys on the namespaced tool name.
+    assert signature_for("Grep", {"pattern": "x"}, CWD) == "ok:Grep"
 
 
 # ---------------------------------------------------------------------------
@@ -1186,7 +1217,8 @@ async def test_can_use_tool_safe_policy_does_not_touch_non_risky():
 @pytest.mark.asyncio
 async def test_can_use_tool_ask_mode_policy_short_circuits():
     # In ask mode EVERY call is prompted; a policy short-circuits there too.
-    store = _FakePolicyStore(policies={("qwing", "git status")})
+    # (Non-risky keys are namespaced "ok:".)
+    store = _FakePolicyStore(policies={("qwing", "ok:git status")})
     mgr = _FakeManager(decision=True)
     fn = make_can_use_tool(_proj(autonomy="ask"), _cfg(), mgr, store)
     result = await fn("Bash", {"command": "git status"}, None)
