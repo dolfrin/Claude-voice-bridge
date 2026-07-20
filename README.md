@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Telegram](https://img.shields.io/badge/telegram-bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)
 ![Claude](https://img.shields.io/badge/claude-agent_sdk-D97757?style=for-the-badge)
-![Tests](https://img.shields.io/badge/tests-320_passed-2EA043?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-918_passed-2EA043?style=for-the-badge)
 ![License](https://img.shields.io/badge/license-PolyForm_Noncommercial-blue?style=for-the-badge)
 
 Control long-running [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview)
