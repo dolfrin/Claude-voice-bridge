@@ -639,7 +639,10 @@ class TelegramIO:
                 if turning_off:
                     # Disabling drops this project's queued turns; note it
                     # instead of a silent redraw (audit finding #2).
-                    text = f"{project} off — laukusios užduotys atmestos.\n\n" + text
+                    text = (
+                        f"{html.escape(project)} off — laukusios užduotys atmestos.\n\n"
+                        + text
+                    )
                 await self._edit_callback_text(
                     query,
                     text,
