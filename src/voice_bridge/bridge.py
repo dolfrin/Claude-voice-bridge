@@ -22,9 +22,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 import signal
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from .attachments import format_attachment_prompt, save_attachments
@@ -414,6 +416,35 @@ def _consume_urgent_prefix(text: str) -> tuple[bool, str]:
 # Controls (panel surface) — C2
 # --------------------------------------------------------------------------- #
 
+# /newproject folder-name sanitizer (SECURITY). Only a bare, safe folder
+# name may ever reach the filesystem: no '/', no spaces, no other
+# punctuation, no path traversal ('..'), and no dotfile/flag-like name.
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_PROJECT_NAME_MAX_LEN = 64
+
+
+def _sanitize_project_name(name: str) -> str:
+    """Return *name* if it is a safe bare project folder name, else ``""``.
+
+    Allowed characters are exactly ``[A-Za-z0-9._-]``; the whole string must
+    match (so a stray ``/`` or space anywhere rejects it outright — never
+    silently rewritten). Also rejects empty, ``.``, ``..``, a name starting
+    with ``.`` or ``-``, and anything longer than
+    :data:`_PROJECT_NAME_MAX_LEN` chars. Never raises: a non-string input
+    degrades to rejection.
+    """
+    if not isinstance(name, str):
+        return ""
+    if not name or len(name) > _PROJECT_NAME_MAX_LEN:
+        return ""
+    if name in {".", ".."}:
+        return ""
+    if name[0] in {".", "-"}:
+        return ""
+    if not _PROJECT_NAME_RE.match(name):
+        return ""
+    return name
+
 
 class _Controls:
     """In-memory Controls implementation backing /panel and slash commands.
@@ -707,12 +738,24 @@ class _Controls:
         if not new_projects:
             return 0
 
+        await self._register_projects(new_projects)
+        return len(new_projects)
+
+    async def _register_projects(self, projects: list[ProjectConfig]) -> None:
+        """Register *projects* the same way :meth:`refresh_projects` does:
+        runtime SessionManager registration, store seeding, and a mirror
+        entry per project (all reflecting current store/effective state).
+        Shared by :meth:`refresh_projects` and :meth:`create_project` so the
+        two paths can never drift apart.
+        """
+        if not projects:
+            return
         if hasattr(self._sessions, "add_projects"):
-            self._sessions.add_projects(new_projects)
-        await self._store.seed(new_projects)
+            self._sessions.add_projects(projects)
+        await self._store.seed(projects)
         enabled = await self._store.enabled_map()
         last_active = await self._store.get_last_active()
-        for project in new_projects:
+        for project in projects:
             self._mirror[project.name] = {
                 "display_name": getattr(project, "display_name", None) or project.name,
                 "enabled": enabled.get(project.name, project.enabled),
@@ -725,7 +768,84 @@ class _Controls:
                 "model": getattr(project, "model", None),
                 "effort": getattr(project, "effort", None),
             }
-        return len(new_projects)
+
+    async def _git_init(self, path: Path) -> None:
+        """Best-effort ``git init`` in a freshly created project directory.
+
+        Guarded like :meth:`sessions.SessionManager._open_vscode`: a missing
+        ``git`` binary or a failing exec is logged and swallowed — it must
+        never fail project creation."""
+        git = shutil.which("git")
+        if git is None:
+            logger.warning(
+                "create_project: 'git' not on PATH, skipping git init for %s", path
+            )
+            return
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                git,
+                "init",
+                cwd=str(path),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode != 0:
+                logger.warning("git init exited with %s for %s", proc.returncode, path)
+        except OSError:
+            logger.exception("git init failed for %s", path)
+
+    async def create_project(self, name: str) -> str:
+        """/newproject: create a brand-new project folder and switch to it.
+
+        SECURITY: *name* is sanitized to a bare ``[A-Za-z0-9._-]`` folder
+        name (see :func:`_sanitize_project_name`) before it ever touches the
+        filesystem — no path traversal, no absolute paths, nothing shell-
+        adjacent. An invalid name creates nothing and returns an error
+        string.
+
+        If ``~/Projects/<name>`` already exists: an already-registered
+        project is just enabled + selected; one that exists on disk but is
+        unregistered is registered (like :meth:`refresh_projects` would)
+        then enabled + selected. Otherwise the directory is created,
+        ``git init`` is attempted (non-fatal), the project is registered,
+        then enabled + selected so the user's NEXT message routes straight
+        to it. Never raises: any unexpected failure is caught and returned
+        as an error string.
+        """
+        try:
+            safe = _sanitize_project_name(name)
+            if not safe:
+                return (
+                    f"Netinkamas projekto pavadinimas: {name!r}. Leidžiama tik "
+                    "raidės, skaičiai, taškas, brūkšnys ir apatinis brūkšnys "
+                    "(be tarpų ir kelio simbolių)."
+                )
+
+            target = Path.home() / "Projects" / safe
+
+            if target.exists():
+                if safe in self._mirror:
+                    await self.toggle(safe, True)
+                    await self.select(safe)
+                    return f"Projektas {safe} jau užregistruotas — perjungiau į jį."
+                project = ProjectConfig(name=safe, cwd=str(target), enabled=True)
+                await self._register_projects([project])
+                await self.toggle(safe, True)
+                await self.select(safe)
+                return f"Projektas {safe} rastas diske ({target}) — užregistravau ir perjungiau į jį."
+
+            target.mkdir(parents=True)
+            await self._git_init(target)
+
+            project = ProjectConfig(name=safe, cwd=str(target), enabled=True)
+            await self._register_projects([project])
+            await self.toggle(safe, True)
+            await self.select(safe)
+            return f"Sukurtas projektas {safe} ({target}). Siųsk užduotį — dirbsiu jame."
+        except Exception as err:  # noqa: BLE001 - /newproject must never crash the bot
+            logger.exception("create_project failed for %r", name)
+            return f"Nepavyko sukurti projekto {name}: {err}"
 
     async def set_engine(self, name: str) -> None:
         # C4: rebuild the live TTS backend so subsequent sends use it.

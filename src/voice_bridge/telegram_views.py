@@ -30,6 +30,7 @@ _BOT_COMMANDS = [
     BotCommand("projects", "🟢 Active projects"),
     BotCommand("projects_all", "📚 All projects"),
     BotCommand("projects_refresh", "🔎 Discover new projects"),
+    BotCommand("newproject", "🆕 Create a new project"),
     BotCommand("handoff", "🧾 Latest project handoff"),
     BotCommand("status", "📡 Ask project status"),
     BotCommand("info", "ℹ️ Model, effort & settings"),

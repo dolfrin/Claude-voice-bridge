@@ -94,6 +94,7 @@ class Controls(Protocol):
     async def select(self, project: str) -> None: ...
     async def enable_and_deliver(self, project: str, text: str) -> None: ...
     async def refresh_projects(self) -> int: ...
+    async def create_project(self, name: str) -> str: ...
     async def set_mode(self, project: str | None, mode: str) -> None: ...
     async def set_effort(self, project: str | None, level: str) -> None: ...
     async def set_verbose(self, project: str | None, on: bool) -> None: ...
@@ -800,6 +801,21 @@ class TelegramIO:
             reply_markup=build_projects_list_markup(snapshot, show_all=True),
         )
 
+    async def _cmd_newproject(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """``/newproject <name>``: create a brand-new project folder and
+        switch to it so the user's next message routes straight there."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        if not context.args:
+            await msg.reply_text("Naudojimas: /newproject <vardas>")
+            return
+        name = context.args[0]
+        result = await self.controls.create_project(name)
+        await msg.reply_text(result)
+
     async def _cmd_on(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1016,6 +1032,8 @@ class TelegramIO:
             CommandHandler("projects_all", self._cmd_projects_all, filters=only_me))
         app.add_handler(
             CommandHandler("projects_refresh", self._cmd_projects_refresh, filters=only_me))
+        app.add_handler(
+            CommandHandler("newproject", self._cmd_newproject, filters=only_me))
         app.add_handler(
             CommandHandler("handoff", self._cmd_handoff, filters=only_me))
         app.add_handler(

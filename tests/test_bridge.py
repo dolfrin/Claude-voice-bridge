@@ -11,6 +11,7 @@ import pytest
 
 from voice_bridge.bridge import (
     _Controls,
+    _sanitize_project_name,
     build,
     make_inbound,
     make_outbound,
@@ -1152,6 +1153,175 @@ async def test_controls_refresh_projects_discovers_new_disabled_project(monkeypa
     snap = {row["project"]: row for row in controls.snapshot()}
     assert snap["fresh"]["enabled"] is False
     assert snap["fresh"]["cwd"] == "/home/home/Projects/Fresh"
+
+
+# --------------------------------------------------------------------------- #
+# _sanitize_project_name (SECURITY, /newproject)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("name", [
+    "myproject",
+    "My-Project_2.0",
+    "a",
+    "a" * 64,
+    "under_score",
+    "dots.and-dashes_9",
+])
+def test_sanitize_project_name_accepts_safe_names(name):
+    assert _sanitize_project_name(name) == name
+
+
+@pytest.mark.parametrize("name", [
+    "",
+    ".",
+    "..",
+    "../evil",
+    "/abs",
+    "a b",
+    ".hidden",
+    "-flag",
+    "a" * 65,
+    "foo/bar",
+    "foo\nbar",
+])
+def test_sanitize_project_name_rejects_unsafe_names(name):
+    assert _sanitize_project_name(name) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Controls.create_project (/newproject)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_controls_create_project_invalid_name_creates_nothing(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+
+    result = await controls.create_project("../evil")
+
+    assert "Netinkamas" in result
+    assert not (tmp_path / "Projects").exists()
+    assert sessions.names() == ["qwing", "othersapp"]
+
+
+@pytest.mark.asyncio
+async def test_controls_create_project_fresh_creates_dir_git_init_and_selects(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda name: "/usr/bin/git")
+    git_calls = []
+
+    class FakeProc:
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*args, **kwargs):
+        git_calls.append((args, kwargs))
+        return FakeProc()
+
+    monkeypatch.setattr(bridge_mod.asyncio, "create_subprocess_exec", fake_exec)
+
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+
+    result = await controls.create_project("newapp")
+
+    target = tmp_path / "Projects" / "newapp"
+    assert target.is_dir()
+    assert git_calls and git_calls[0][0][:2] == ("/usr/bin/git", "init")
+    assert git_calls[0][1]["cwd"] == str(target)
+    assert "newapp" in sessions.names()
+    assert store.seeded and store.seeded[-1][0].name == "newapp"
+    assert ("newapp", True) in sessions.enabled_calls
+    snap = {row["project"]: row for row in controls.snapshot()}
+    assert snap["newapp"]["last_active"] is True
+    assert snap["newapp"]["cwd"] == str(target)
+    assert "newapp" in result
+    assert str(target) in result
+
+
+@pytest.mark.asyncio
+async def test_controls_create_project_missing_git_binary_is_non_fatal(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda name: None)
+
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+
+    result = await controls.create_project("nogit")
+
+    target = tmp_path / "Projects" / "nogit"
+    assert target.is_dir()
+    assert "nogit" in sessions.names()
+    assert "nogit" in result
+
+
+@pytest.mark.asyncio
+async def test_controls_create_project_existing_registered_selects_without_mkdir(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+    # "qwing" is already a registered project in the mirror (from _make_controls)
+    project_dir = tmp_path / "Projects" / "qwing"
+    project_dir.mkdir(parents=True)
+
+    result = await controls.create_project("qwing")
+
+    assert "jau užregistruotas" in result
+    snap = {row["project"]: row for row in controls.snapshot()}
+    assert snap["qwing"]["last_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_controls_create_project_existing_on_disk_unregistered(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+
+    on_disk = tmp_path / "Projects" / "orphan"
+    on_disk.mkdir(parents=True)
+
+    result = await controls.create_project("orphan")
+
+    assert "rastas diske" in result
+    assert "orphan" in sessions.names()
+    snap = {row["project"]: row for row in controls.snapshot()}
+    assert snap["orphan"]["cwd"] == str(on_disk)
+    assert snap["orphan"]["last_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_controls_create_project_unexpected_error_returns_message_not_raise(tmp_path, monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+
+    def boom_mkdir(self, *a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bridge_mod.Path, "mkdir", boom_mkdir)
+
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+
+    result = await controls.create_project("boom")
+
+    assert "Nepavyko sukurti projekto boom" in result
+    assert "boom" not in sessions.names()
 
 
 @pytest.mark.asyncio

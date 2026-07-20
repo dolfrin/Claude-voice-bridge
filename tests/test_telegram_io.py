@@ -101,6 +101,10 @@ class FakeControls:
         )
         return 1
 
+    async def create_project(self, name):
+        self.calls.append(("create_project", name))
+        return f"Sukurtas projektas {name} (/home/home/Projects/{name}). Siųsk užduotį — dirbsiu jame."
+
     async def set_mode(self, project, mode):
         self.calls.append(("set_mode", project, mode))
 
@@ -1576,6 +1580,47 @@ async def test_cmd_projects_refresh_scans_and_lists_all_projects():
     assert kwargs["reply_markup"].inline_keyboard[2][0].callback_data == "sel:2"
 
 
+# --------------------------------------------------------------------------
+# /newproject
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_newproject_calls_create_project_and_replies():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/newproject foo")
+
+    await io._cmd_newproject(upd, make_ctx(["foo"]))
+
+    assert ("create_project", "foo") in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "foo" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_newproject_no_arg_shows_usage():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/newproject")
+
+    await io._cmd_newproject(upd, make_ctx([]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "/newproject" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_newproject_non_owner_ignored():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    upd = make_cmd_update("/newproject foo", user_id=999)
+
+    await io._cmd_newproject(upd, make_ctx(["foo"]))
+
+    assert controls.calls == []
+    upd.message.reply_text.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_cmd_on_with_project_calls_toggle_true():
     controls = FakeControls()
@@ -2000,22 +2045,22 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.bot.set_my_commands.assert_awaited_once()
     fake_app.start.assert_awaited_once()
     fake_app.updater.start_polling.assert_awaited_once()
-    # at least: menu, panel, projects, projects_all, projects_refresh, handoff,
-    # on, off, stop, mode, effort, voice, verbose, engine, status, recap, cost,
-    # info, callback, text, voice, attachments.
-    assert len(added) >= 21
+    # at least: menu, panel, projects, projects_all, projects_refresh,
+    # newproject, handoff, on, off, stop, mode, effort, voice, verbose,
+    # engine, status, recap, cost, info, callback, text, voice, attachments.
+    assert len(added) >= 22
 
     cmd_names = set()
     for h in added:
         cmds = getattr(h, "commands", None)
         if cmds:
             cmd_names |= set(cmds)
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off", "stop",
+    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "on", "off", "stop",
             "mode", "effort", "voice", "engine", "status", "recap", "cost", "info"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off", "stop",
+    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
             "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info"} == registered_names
 
 
