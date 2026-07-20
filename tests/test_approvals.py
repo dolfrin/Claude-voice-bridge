@@ -15,6 +15,7 @@ from voice_bridge.approvals import (
     parse_yes_no,
 )
 from voice_bridge.config import Config, ProjectConfig
+from voice_bridge.notify_tool import SEND_FILE_TOOL_NAME
 
 
 CWD = "/home/home/Projects/qwing"
@@ -813,5 +814,68 @@ async def test_can_use_tool_safe_auto_allows_safe_cases(tool_name, tool_input):
     mgr = _FakeManager(decision=False)
     fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr)
     result = await fn(tool_name, tool_input, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert mgr.calls == []
+
+
+# ---------------------------------------------------------------------------
+# S2: safe mode must gate send_file egress of sensitive/out-of-cwd files
+# ---------------------------------------------------------------------------
+#
+# Audit finding: is_risky only ran its sensitive-token regex against a Bash
+# `command` key. send_file's input has no `command` (just a `path`), so in
+# `safe` autonomy mode ANY in-cwd path — including `.env`, keys, credentials —
+# was auto-approved for upload to the user's Telegram with no approval.
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".env",
+        f"{CWD}/.env",
+        "~/.ssh/id_rsa",
+        "id_rsa.pem",
+        "credentials.json",
+        "/etc/other/absolute/outside.txt",
+        "../outside/secret.py",
+    ],
+)
+def test_is_risky_send_file_sensitive_or_outside_true(path):
+    assert is_risky(SEND_FILE_TOOL_NAME, {"path": path}, CWD) is True
+
+
+def test_is_risky_send_file_normal_in_cwd_false():
+    assert is_risky(SEND_FILE_TOOL_NAME, {"path": "src/main.py"}, CWD) is False
+
+
+def test_is_risky_send_file_file_path_key_also_checked():
+    # Robustness: tolerate an alternate `file_path` key, not just `path`.
+    assert is_risky(SEND_FILE_TOOL_NAME, {"file_path": ".env"}, CWD) is True
+
+
+def test_is_risky_send_file_missing_path_false():
+    # No path at all -> nothing to gate; falls through to other checks.
+    assert is_risky(SEND_FILE_TOOL_NAME, {"caption": "hi"}, CWD) is False
+
+
+def test_is_risky_other_tools_unaffected_by_send_file_gate():
+    # The send_file-specific sensitive-token check must not leak onto other
+    # tools that happen to read a normal in-cwd file.
+    assert is_risky("Read", {"file_path": f"{CWD}/.env"}, CWD) is False
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_safe_asks_for_sensitive_send_file():
+    mgr = _FakeManager(decision=True)
+    fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr)
+    result = await fn(SEND_FILE_TOOL_NAME, {"path": ".env"}, None)
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert len(mgr.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_can_use_tool_safe_allows_normal_send_file():
+    mgr = _FakeManager(decision=False)
+    fn = make_can_use_tool(_proj(autonomy="safe"), _cfg(), mgr)
+    result = await fn(SEND_FILE_TOOL_NAME, {"path": "src/main.py"}, None)
     assert _decision_kind(result) == "PermissionResultAllow"
     assert mgr.calls == []

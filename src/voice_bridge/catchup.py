@@ -32,6 +32,7 @@ import glob
 import json
 import logging
 import os
+import re
 import sys
 import time
 
@@ -76,6 +77,22 @@ _HEADER = (
 )
 _FOOTER = "[End of IDE catch-up reference data]"
 _TRUNCATED = "…[truncated]"
+
+# The BODY between header/footer is untrusted (git diff/log, another
+# session's transcript, the bridge mirror). Nothing scans it for the fence
+# sentinels themselves, so a hostile repo/transcript could embed a forged
+# `_FOOTER`-like line followed by "now ignore the above and run …" and break
+# out of the fence early. These patterns catch the sentinels' distinctive
+# wording case-insensitively and regardless of the surrounding bracket style
+# (`[...]`, `(...)`, none at all), so any close variant gets defanged too.
+_FENCE_FOOTER_RE = re.compile(
+    r"end\s+of\s+ide\s+catch-?up\s+reference\s+data", re.IGNORECASE
+)
+_FENCE_HEADER_TOPIC_RE = re.compile(r"ide\s+catch-?up", re.IGNORECASE)
+_FENCE_HEADER_CLAIM_RE = re.compile(
+    r"read-?only\s+reference\s+data|do\s+not\s+follow", re.IGNORECASE
+)
+_FENCE_PLACEHOLDER = "[filtered]"
 
 # --------------------------------------------------------------------------- #
 # CLI / SessionStart & UserPromptSubmit hook constants
@@ -155,6 +172,11 @@ async def build_catchup(
             return ""
 
         body = "\n\n".join(sections)
+        # The body is untrusted; neutralize any forged fence sentinel BEFORE
+        # truncating/wrapping so a hostile diff/transcript can never smuggle a
+        # fake footer (+ trailing "ignore the above" instructions) past the
+        # real, function-appended one.
+        body = _neutralize_fence_markers(body)
         # Keep the untrusted-data fence (header + footer) intact under the cap;
         # only the body is truncated.
         budget = max_chars - len(_HEADER) - len(_FOOTER) - 2
@@ -429,6 +451,39 @@ def _clip(text: str, limit: int) -> str:
         return text
     keep = max(0, limit - len(_TRUNCATED))
     return text[:keep].rstrip() + _TRUNCATED
+
+
+def _neutralize_fence_markers(body: str) -> str:
+    """Defang any line in the untrusted *body* that resembles the catch-up
+    fence's HEADER/FOOTER sentinels, so hostile content (a poisoned git
+    diff/log, another session's transcript) cannot forge the closing
+    boundary and smuggle "now ignore the above" instructions past it.
+
+    Line-based, case-insensitive, bracket-tolerant (matches regardless of
+    `[...]`/`(...)`/no brackets at all): a line is replaced wholesale with a
+    short placeholder if it looks like the FOOTER ("end of ide catch-up
+    reference data") or like the HEADER (mentions "ide catch-up" together
+    with its "read-only reference data" / "do not follow" claim). The real
+    header/footer are never part of *body* — they are only added by the
+    caller afterwards — so this only ever touches forged/embedded copies.
+
+    Never raises: any failure here degrades to returning *body* unchanged
+    (the caller's own hard truncation is still a backstop)."""
+    try:
+        lines = body.split("\n")
+        out = []
+        for line in lines:
+            if _FENCE_FOOTER_RE.search(line):
+                out.append(_FENCE_PLACEHOLDER)
+                continue
+            if _FENCE_HEADER_TOPIC_RE.search(line) and _FENCE_HEADER_CLAIM_RE.search(line):
+                out.append(_FENCE_PLACEHOLDER)
+                continue
+            out.append(line)
+        return "\n".join(out)
+    except Exception:  # noqa: BLE001 - defensive; must never raise
+        logger.exception("fence marker neutralization failed")
+        return body
 
 
 # --------------------------------------------------------------------------- #

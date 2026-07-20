@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from voice_bridge.config import Config, ProjectConfig, effective_autonomy
+from voice_bridge.notify_tool import SEND_FILE_TOOL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,10 @@ def _has_risky_redirect(command: str) -> bool:
 # Tools that touch the filesystem with an explicit path.
 _PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 
+# send_file's input schema uses "path" (see notify_tool._build_send_file_tool),
+# but both keys are checked so this stays robust to a caller-side rename.
+_SEND_FILE_PATH_KEYS = ("path", "file_path")
+
 
 def _resolve(path: str, cwd: str) -> str:
     """Resolve `path` against `cwd` to a real, symlink-free absolute path.
@@ -165,6 +170,23 @@ def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
         if isinstance(path, str) and path:
             if not _inside_cwd(path, cwd):
                 return True
+
+    # send_file uploads a project file to the user's Telegram — it's an
+    # egress channel, not a local read/write, so an in-cwd path is not
+    # automatically safe the way it is for Read/Write/Edit: `.env`, keys,
+    # and credentials live inside cwd too. Flag it if the target LOOKS
+    # sensitive (same token regex as the Bash reader-command check above)
+    # even though there is no `command` key here to match against, OR if it
+    # resolves outside cwd (belt-and-suspenders; already caught above for
+    # the "path"/"file_path" keys, but explicit here for clarity/robustness).
+    if tool_name == SEND_FILE_TOOL_NAME:
+        for key in _SEND_FILE_PATH_KEYS:
+            target = tool_input.get(key)
+            if isinstance(target, str) and target:
+                if re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE):
+                    return True
+                if not _inside_cwd(target, cwd):
+                    return True
 
     return False
 
