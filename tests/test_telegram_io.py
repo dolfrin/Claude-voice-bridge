@@ -1858,6 +1858,249 @@ async def test_cmd_engine_rejects_invalid():
     upd.message.reply_text.assert_awaited()
 
 
+# --------------------------------------------------------------------------
+# unknown-project guard: /on /off /stop /mode /effort /verbose /voice must
+# reject a project name that isn't in controls.snapshot() instead of
+# silently "succeeding" (audit finding #1).
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_on_unknown_project_replies_and_skips_toggle():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/on nope")
+
+    await io._cmd_on(upd, make_ctx(["nope"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "nope" in sent
+    assert "qwing" in sent and "othersapp" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_off_unknown_project_replies_and_skips_toggle():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/off nope")
+
+    await io._cmd_off(upd, make_ctx(["nope"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "nope" in sent
+    assert "qwing" in sent and "othersapp" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_stop_unknown_project_replies_and_skips_interrupt():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/stop nope")
+
+    await io._cmd_stop(upd, make_ctx(["nope"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "nope" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_mode_unknown_project_replies_and_skips_set_mode():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/mode full nope")
+
+    await io._cmd_mode(upd, make_ctx(["full", "nope"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "nope" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_effort_unknown_project_replies_and_skips_set_effort():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/effort high nope")
+
+    await io._cmd_effort(upd, make_ctx(["high", "nope"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "nope" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_verbose_unknown_project_replies_and_skips_set_verbose():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/verbose on nope")
+
+    await io._cmd_verbose(upd, make_ctx(["on", "nope"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "nope" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_voice_unknown_project_replies_and_skips_set_voice():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice shimmer for nope")
+
+    await io._cmd_voice(upd, make_ctx(["shimmer", "for", "nope"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "nope" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_on_valid_project_still_works():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/on qwing")
+
+    await io._cmd_on(upd, make_ctx(["qwing"]))
+
+    assert ("toggle", "qwing", True) in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "Nežinomas" not in sent
+
+
+# --------------------------------------------------------------------------
+# /off must acknowledge that pending/queued work for the disabled project
+# was dropped, not just silently reply "x off" (audit finding #2).
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_off_valid_project_notes_dropped_turns():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/off qwing")
+
+    await io._cmd_off(upd, make_ctx(["qwing"]))
+
+    assert ("toggle", "qwing", False) in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "qwing" in sent
+    assert "atmestos" in sent or "dropped" in sent.lower()
+
+
+@pytest.mark.asyncio
+async def test_cmd_off_no_arg_also_notes_dropped_turns():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/off")
+
+    await io._cmd_off(upd, make_ctx([]))
+
+    assert ("toggle", None, False) in controls.calls
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "atmestos" in sent or "dropped" in sent.lower()
+
+
+@pytest.mark.asyncio
+async def test_callback_projects_picker_toggle_off_notes_dropped_turns():
+    # ptgl:0 flips qwing (index 0, currently enabled=True) OFF.
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    query = AsyncMock()
+    query.data = "ptgl:0"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+
+    await io._handle_callback(update, MagicMock())
+
+    assert ("toggle", "qwing", False) in controls.calls
+    kwargs = query.edit_message_text.await_args.kwargs
+    text = query.edit_message_text.await_args.args[0] if query.edit_message_text.await_args.args else kwargs.get("text", "")
+    assert "atmestos" in text or "dropped" in text.lower()
+
+
+# --------------------------------------------------------------------------
+# /voice must validate the name against the engine's known voices instead
+# of silently accepting anything (audit finding #3).
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_voice_invalid_name_rejects_and_lists_valid_voices():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice totallybogusvoice")
+
+    await io._cmd_voice(upd, make_ctx(["totallybogusvoice"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "alloy" in sent  # lists valid openai voices
+
+
+@pytest.mark.asyncio
+async def test_cmd_voice_invalid_name_for_project_rejects():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice totallybogusvoice for qwing")
+
+    await io._cmd_voice(upd, make_ctx(["totallybogusvoice", "for", "qwing"]))
+
+    assert controls.calls == []
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "qwing" in sent or "alloy" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_voice_valid_name_still_sets_voice():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice shimmer")
+
+    await io._cmd_voice(upd, make_ctx(["shimmer"]))
+
+    assert ("set_voice", None, "shimmer") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_voice_valid_name_for_project_still_works():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice shimmer for qwing")
+
+    await io._cmd_voice(upd, make_ctx(["shimmer", "for", "qwing"]))
+
+    assert ("set_voice", "qwing", "shimmer") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_voice_list_still_unchanged():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice list")
+
+    await io._cmd_voice(upd, make_ctx(["list"]))
+
+    sent = upd.message.reply_text.await_args.args[0]
+    assert "alloy" in sent and "echo" in sent
+    assert controls.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cmd_voice_accepts_piper_voice_when_engine_is_auto():
+    # "auto" only advertises the OpenAI voice list via available_voices(),
+    # but AutoTTS can fall back to piper/together at runtime, so validation
+    # for an "auto" project must accept the union of concrete backends.
+    controls = FakeControls()
+    controls._snapshot[0]["engine"] = "auto"
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    upd = make_cmd_update("/voice default for qwing")
+
+    await io._cmd_voice(upd, make_ctx(["default", "for", "qwing"]))
+
+    assert ("set_voice", "qwing", "default") in controls.calls
+
+
 @pytest.mark.asyncio
 async def test_cmd_handoff_replies_with_active_project_transcript(tmp_path):
     controls = FakeControls()

@@ -632,11 +632,17 @@ class TelegramIO:
                 )
                 return
             elif action == "ptgl":
+                turning_off = row["enabled"]
                 await self.controls.toggle(project, not row["enabled"])
                 snap = self.controls.snapshot()
+                text = format_projects(snap)
+                if turning_off:
+                    # Disabling drops this project's queued turns; note it
+                    # instead of a silent redraw (audit finding #2).
+                    text = f"{project} off — laukusios užduotys atmestos.\n\n" + text
                 await self._edit_callback_text(
                     query,
-                    format_projects(snap),
+                    text,
                     build_projects_list_markup(snap),
                 )
                 return
@@ -758,6 +764,55 @@ class TelegramIO:
             if "message is not modified" not in str(exc).lower():
                 raise
 
+    # --- project-arg validation ------------------------------------------
+    # Shared by every command that takes an optional ``[project]`` arg
+    # (/on /off /stop /mode /effort /verbose /voice). Before this helper
+    # existed, a typo'd or stale project name was passed straight to the
+    # Controls mutator, which silently no-ops on an unknown key while the
+    # command still replied as if it worked (audit finding #1).
+    def _known_projects(self) -> list[str]:
+        return [row["project"] for row in self.controls.snapshot()]
+
+    def _resolve_project_arg(
+        self, name: str | None
+    ) -> tuple[str | None, str | None]:
+        """Validate an optional project-name slash-command argument.
+
+        ``name`` is ``None`` when the command was given no project arg at
+        all (meaning "all projects" — always valid, no lookup needed).
+        When a name IS given but doesn't match any ``project`` key in
+        ``controls.snapshot()``, this returns an error reply naming it
+        unknown and listing the known projects; the caller MUST send that
+        reply and return WITHOUT calling any Controls mutator.
+
+        Returns ``(project, error)`` where exactly one of the two is not
+        ``None``.
+        """
+        if name is None:
+            return None, None
+        known = self._known_projects()
+        if name not in known:
+            return None, f"Nežinomas projektas: {name}. Yra: {', '.join(known)}"
+        return name, None
+
+    def _voice_choices_for_engine(self, engine: str) -> list[str]:
+        """Voices accepted by ``/voice <name>`` for the given ``engine``.
+
+        ``available_voices("auto")`` only returns the OpenAI list (AutoTTS's
+        preferred choice), but at runtime "auto" can fall back to piper or
+        together, so validating an "auto" project's voice against just the
+        OpenAI list would reject perfectly legitimate names. Union the
+        concrete backends' voices instead.
+        """
+        if engine != "auto":
+            return available_voices(engine)
+        choices: list[str] = []
+        for backend in ("openai", "piper", "together"):
+            for voice in available_voices(backend):
+                if voice not in choices:
+                    choices.append(voice)
+        return choices
+
     # --- text slash commands --------------------------------------------
     async def _cmd_projects(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -822,7 +877,11 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        project = context.args[0] if context.args else None
+        arg = context.args[0] if context.args else None
+        project, error = self._resolve_project_arg(arg)
+        if error:
+            await msg.reply_text(error)
+            return
         await self.controls.toggle(project, True)
         await msg.reply_text(f"{project or 'all'} on")
 
@@ -832,9 +891,18 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        project = context.args[0] if context.args else None
+        arg = context.args[0] if context.args else None
+        project, error = self._resolve_project_arg(arg)
+        if error:
+            await msg.reply_text(error)
+            return
         await self.controls.toggle(project, False)
-        await msg.reply_text(f"{project or 'all'} off")
+        # Disabling drops that project's queued turns; say so instead of a
+        # bare "x off" that hides the fact that pending work was discarded
+        # (audit finding #2).
+        await msg.reply_text(
+            f"{project or 'all'} off — laukusios užduotys atmestos."
+        )
 
     async def _cmd_stop(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -842,7 +910,11 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        project = context.args[0] if context.args else None
+        arg = context.args[0] if context.args else None
+        project, error = self._resolve_project_arg(arg)
+        if error:
+            await msg.reply_text(error)
+            return
         result = await self.controls.interrupt(project)
         await msg.reply_text(result)
 
@@ -856,7 +928,11 @@ class TelegramIO:
             await msg.reply_text("usage: /mode <full|safe|ask> [project]")
             return
         mode = context.args[0]
-        project = context.args[1] if len(context.args) > 1 else None
+        arg = context.args[1] if len(context.args) > 1 else None
+        project, error = self._resolve_project_arg(arg)
+        if error:
+            await msg.reply_text(error)
+            return
         await self.controls.set_mode(project, mode)
         await msg.reply_text(f"mode {mode} for {project or 'all'}")
 
@@ -876,7 +952,11 @@ class TelegramIO:
             )
             return
         level = context.args[0]
-        project = context.args[1] if len(context.args) > 1 else None
+        arg = context.args[1] if len(context.args) > 1 else None
+        project, error = self._resolve_project_arg(arg)
+        if error:
+            await msg.reply_text(error)
+            return
         await self.controls.set_effort(project, level)
         await msg.reply_text(f"effort {level} for {project or 'all'}")
 
@@ -901,11 +981,13 @@ class TelegramIO:
             return
         args = list(context.args or [])
         on = True
-        project = None
         if args and args[0].lower() in {"on", "off"}:
             on = args.pop(0).lower() == "on"
-        if args:
-            project = args[0]
+        arg = args[0] if args else None
+        project, error = self._resolve_project_arg(arg)
+        if error:
+            await msg.reply_text(error)
+            return
         await self.controls.set_verbose(project, on)
         state = "on" if on else "off"
         await msg.reply_text(f"verbose {state} for {project or 'all'}")
@@ -924,9 +1006,28 @@ class TelegramIO:
             await msg.reply_text("voices: " + ", ".join(available_voices(engine)))
             return
         voice = args[0]
-        project = None
+        arg = None
         if len(args) >= 3 and args[1] == "for":
-            project = args[2]
+            arg = args[2]
+        project, error = self._resolve_project_arg(arg)
+        if error:
+            await msg.reply_text(error)
+            return
+        # An invalid voice name would set silently and make every later
+        # synth fail with no feedback, so validate against the target
+        # engine's known voices before calling the mutator (audit finding
+        # #3). ``project=None`` means "all", so fall back to whichever
+        # project's row would be picked as "active" (or the first one) to
+        # find the engine, matching how /voice list already resolves it.
+        snapshot = self.controls.snapshot()
+        row = _find_project_row(snapshot, project or "")
+        engine = row.get("engine", "openai") if row else "openai"
+        valid_voices = self._voice_choices_for_engine(engine)
+        if voice not in valid_voices:
+            await msg.reply_text(
+                f"Nežinomas balsas: {voice}. Yra: " + ", ".join(valid_voices)
+            )
+            return
         await self.controls.set_voice(project, voice)
         await msg.reply_text(f"voice {voice} for {project or 'all'}")
 
