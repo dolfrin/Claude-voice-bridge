@@ -416,6 +416,7 @@ journalctl --user -u voice-bridge -f
 | 💰 | `/cost` | Show per-project and total token and cost usage |
 | ♾ | `/policies` / `/policies clear [project]` | List, or revoke (all / one project's), the always-allow grants |
 | ⏰ | `/schedule` / `/schedule <project> <HH:MM> <prompt>` / `/schedule remove\|on\|off <id>` | List, add, or toggle/remove a daily recurring prompt delivered to a project at a local time |
+| ❓ | `/help` | Routing rules (name-prefix, last-active, quote-reply, `!` urgent), how to answer approvals/questions from the phone, and the command list |
 
 Telegram turns are mirrored into each project's `.claude/voice-bridge-chat.md`
 so the voice/text conversation is visible from the IDE file tree.
@@ -595,6 +596,59 @@ without it). Add it to your `~/.claude/settings.json`, merging into any existing
 The script hard-codes an absolute path to this checkout's venv `python`
 (`.venv/bin/python`) at its top — edit that line if your checkout lives elsewhere. If
 that interpreter isn't there, the script exits `0` immediately and injects nothing.
+
+### IDE notifications through the bridge (unified inbox)
+
+When Claude Code finishes a turn, asks a question, or requests permission in your **IDE**
+session, that notification can be routed **through the bridge** — so it arrives in the same
+Telegram channel as your project turns, with the same project attribution, and (for a
+question or a permission ask) is **spoken** with TTS. The bridge owns TTS, and an IDE hook
+runs in a *separate* Claude Code process that cannot speak on its own, so the two are
+decoupled by a **spool directory**: the hook writes one small JSON file per event, and the
+bridge drains it every few seconds, formats it, synthesizes voice when urgent, and sends
+it. If the bridge is down the spool simply accumulates and drains when it comes back.
+
+One committed Python hook,
+[`hooks/voice-bridge-notify.py`](hooks/voice-bridge-notify.py), handles every event. It
+reads the hook JSON from stdin, classifies it (Stop / Notification /
+PreToolUse[`AskUserQuestion`] / PermissionRequest), writes the spool file **atomically**
+(`.tmp` then rename, so the drainer never reads a half-written file), and **always exits
+0** printing nothing — it can never block or fail the tool call. Questions and permission
+asks are marked `urgent` (spoken); a finished turn and a generic notification are
+text-only, to avoid audio noise.
+
+Wire it in your `~/.claude/settings.json`, merging into any existing hooks of the same
+name rather than replacing them:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "/home/YOU/claude-voice-bridge/hooks/voice-bridge-notify.py" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "/home/YOU/claude-voice-bridge/hooks/voice-bridge-notify.py" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "/home/YOU/claude-voice-bridge/hooks/voice-bridge-notify.py" } ] }
+    ],
+    "PermissionRequest": [
+      { "hooks": [ { "type": "command", "command": "/home/YOU/claude-voice-bridge/hooks/voice-bridge-notify.py" } ] }
+    ]
+  }
+}
+```
+
+The hook needs no Python packages (stdlib only), so any `python3` on `PATH` runs it; make
+it executable (`chmod +x`) or invoke it as `python3 /path/to/voice-bridge-notify.py`. The
+spool directory defaults to `~/.claude/.voice-bridge-inbox/`; override it with the
+`VOICE_BRIDGE_INBOX_DIR` environment variable (set it for **both** the hook's Claude Code
+sessions and the bridge service so the two agree).
+
+This **supersedes** the three earlier per-event bash hooks (`notify-stop.sh`,
+`notify-notification.sh`, `notify-question.sh`), which each POSTed to Telegram directly
+with no TTS. They are harmless if left on disk, but once the unified hook is wired you can
+remove them from `settings.json` to avoid duplicate messages.
 
 ---
 

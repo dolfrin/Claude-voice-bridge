@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import signal
@@ -42,6 +43,7 @@ from .config import (
     load_projects,
 )
 from .discovery import discover_projects, merge_projects
+from .inbox import run_inbox
 from .routing import Store
 from .sanitizer import prepare_outbound, to_spoken
 from .scheduler import run_scheduler
@@ -1121,6 +1123,63 @@ def _make_schedule_notify(
 
 
 # --------------------------------------------------------------------------- #
+# Unified-inbox wiring (I3)
+# --------------------------------------------------------------------------- #
+
+
+def _inbox_spool_dir() -> str:
+    """Spool directory the IDE notify hook writes and the drainer reads.
+
+    Env override (``VOICE_BRIDGE_INBOX_DIR``) else ``~/.claude/.voice-bridge-inbox``
+    — the SAME resolution the hook uses, so both ends agree without shared code.
+    """
+    override = os.environ.get("VOICE_BRIDGE_INBOX_DIR")
+    if override:
+        return override
+    return str(Path.home() / ".claude" / ".voice-bridge-inbox")
+
+
+def _make_inbox_emit(
+    tts_holder: dict,
+    telegram: "TelegramIO",
+    cfg: Config,
+    sessions: "SessionManager",
+) -> Callable[[dict], Awaitable[None]]:
+    """Build the inbox ``emit`` closure: turn a spooled IDE event into an outbound.
+
+    Every event becomes a Telegram message ``[{project}] {text}`` (via the plain
+    ``send_question`` path — deliberately NOT the full outbound path, so an IDE
+    notification never pollutes ``/recap`` or hijacks last-active routing). When
+    the event is ``urgent`` (a question or permission ask) it is ALSO spoken,
+    synthesized through the SAME ``tts_holder``/``_synthesize`` path approval
+    questions use — with the ALERT voice when one is configured — so a prompt
+    that needs an answer reaches you hands-free. Non-urgent events (stop /
+    notification) are text-only to avoid audio noise.
+
+    Robust by construction: ``_synthesize`` already swallows TTS failures
+    (text still sends), and a project that is not a known bridge project
+    (``sessions.project`` → None) just falls back to the global voice.
+    """
+
+    async def emit(event: dict) -> None:
+        project = event.get("project") or "IDE"
+        text = event.get("text") or ""
+        voice_label: str | None = None
+        voice_bytes: bytes | None = None
+        if event.get("urgent"):
+            proj = sessions.project(project)
+            voice_label = _resolve_voice(cfg, proj, alert=True)
+            voice_bytes = await _synthesize(
+                tts_holder, to_spoken(text), voice_label, project
+            )
+        await telegram.send_question(
+            project, text, voice_label=voice_label, voice_bytes=voice_bytes
+        )
+
+    return emit
+
+
+# --------------------------------------------------------------------------- #
 # Wiring + lifecycle
 # --------------------------------------------------------------------------- #
 
@@ -1136,6 +1195,7 @@ class Wiring:
     controls: _Controls
     outbound: Callable[[Outbound], Awaitable[None]]
     inbound: Callable[[dict], Awaitable[None]]
+    tts_holder: dict
 
 
 async def build() -> Wiring:
@@ -1345,6 +1405,7 @@ async def build() -> Wiring:
         controls=controls,
         outbound=outbound,
         inbound=inbound,
+        tts_holder=tts_holder,
     )
 
 
@@ -1352,10 +1413,11 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
     """Start sessions, start telegram polling (returns), wait for *stop*, shut down.
 
     ``telegram.run()`` does NOT block (C3); this function owns the run-forever
-    wait via ``stop``. The I4 scheduler runs as a long-lived background task
-    alongside polling: it shares the same ``stop`` event (so it exits cleanly on
-    shutdown) and is ALSO cancelled/awaited in ``finally`` so a mid-``sleep``
-    tick can't delay shutdown. Shutdown is symmetric and runs in ``finally``.
+    wait via ``stop``. The I4 scheduler AND the I3 unified-inbox drainer each run
+    as a long-lived background task alongside polling: both share the same
+    ``stop`` event (so they exit cleanly on shutdown) and are ALSO
+    cancelled/awaited in ``finally`` so a mid-``sleep`` tick can't delay
+    shutdown. Shutdown is symmetric and runs in ``finally``.
     """
     await wiring.sessions.start_all()
     await wiring.telegram.run()
@@ -1369,14 +1431,28 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
             sleep_fn=asyncio.sleep,
         )
     )
+    inbox_task = asyncio.create_task(
+        run_inbox(
+            _inbox_spool_dir(),
+            _make_inbox_emit(
+                wiring.tts_holder,
+                wiring.telegram,
+                wiring.cfg,
+                wiring.sessions,
+            ),
+            stop,
+            sleep_fn=asyncio.sleep,
+        )
+    )
     try:
         await stop.wait()
     finally:
-        scheduler_task.cancel()
-        try:
-            await scheduler_task
-        except asyncio.CancelledError:
-            pass
+        for task in (scheduler_task, inbox_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await wiring.telegram.stop()
         await wiring.sessions.stop_all()
 

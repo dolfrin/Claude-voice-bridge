@@ -46,6 +46,7 @@ _BOT_COMMANDS = [
     BotCommand("cost", "💰 Token & cost usage"),
     BotCommand("policies", "♾ Always-allow grants"),
     BotCommand("schedule", "⏰ Daily scheduled prompts"),
+    BotCommand("help", "❓ Routing rules & commands"),
 ]
 
 # A scheduled prompt can be arbitrarily long; the plain-text listing truncates
@@ -177,6 +178,47 @@ def _format_schedules(schedules: list[dict]) -> str:
     lines.append("")
     lines.append("Šalinti: /schedule remove <id> · Perjungti: /schedule on|off <id>")
     return "\n".join(lines)
+
+
+def _format_help() -> str:
+    """Render the /help reference as a plain-text (no-HTML) message.
+
+    Kept strictly HTML-free — no ``<``/``>``/``&`` — so it is sent with no
+    ``parse_mode`` and nothing in it can ever be mis-parsed as markup. It
+    documents the two things that are not discoverable from the command menu:
+    how a message is ROUTED to a project, and how a phone reply ANSWERS an
+    approval or question. The command list mirrors the registered commands, one
+    line each.
+    """
+    return "\n".join([
+        "❓ Kaip veikia tiltas",
+        "",
+        "Adresavimas (į kurį projektą eina žinutė):",
+        "• „projektas: tekstas“ — vardo prefiksas nurodo projektą.",
+        "• vien tekstas — eina paskutiniam aktyviam projektui.",
+        "• atsakymas (reply) į projekto žinutę — eina tam projektui.",
+        "",
+        "Skubu:",
+        "• „!“ žinutės pradžioje — nutraukia dabartinį projekto darbą ir "
+        "pristato iš karto (pvz. „!qwing: stok“).",
+        "",
+        "Atsakymai iš telefono:",
+        "• Į patvirtinimo (leidimo) klausimą atsakyk „taip“/„ne“ — reply arba, "
+        "jei laukiamas tik vienas, paprastu atsakymu.",
+        "• Į „ask_user“ klausimą atsakyk numeriu, „first“, etikete ar laisvu "
+        "tekstu.",
+        "",
+        "Komandos:",
+        "/panel — valdymo skydelis (įjungti/išjungti, režimas, balsas).",
+        "/projects — aktyvūs projektai (visi: /projects_all).",
+        "/recap — kas nutiko, kol nebuvai.",
+        "/cost — tokenų ir kainos suvestinė.",
+        "/info — modelis, effort ir nustatymai.",
+        "/voice — parodyti ar nustatyti TTS balsą.",
+        "/policies — „visada leisti“ politikos (išvalyti: /policies clear).",
+        "/schedule — kasdienės suplanuotos užduotys.",
+        "/help — ši pagalba.",
+    ])
 
 
 def _project_list_rows(

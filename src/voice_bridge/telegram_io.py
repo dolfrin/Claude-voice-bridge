@@ -66,6 +66,7 @@ from .telegram_views import (
     _MODES,
     _clean_choices,
     _find_project_row,
+    _format_help,
     _format_policies,
     _format_schedules,
     _friendly_path,
@@ -1588,6 +1589,21 @@ class TelegramIO:
         suffix = " (pirmą kartą rytoj)" if first_tomorrow else ""
         await msg.reply_text(f"⏰ Suplanuota: {project} kasdien {hhmm}{suffix}")
 
+    async def _cmd_help(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Document the routing rules + command reference (owner-gated).
+
+        Sent as PLAIN text (no ``parse_mode``): :func:`_format_help` is kept
+        strictly HTML-free, so nothing in it can be mis-parsed as markup. The
+        content covers what the command menu cannot — how a message is routed to
+        a project and how a phone reply answers an approval / ask_user question.
+        """
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        await msg.reply_text(_format_help())
+
     async def _cmd_handoff(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1675,6 +1691,8 @@ class TelegramIO:
             CommandHandler("policies", self._cmd_policies, filters=only_me))
         app.add_handler(
             CommandHandler("schedule", self._cmd_schedule, filters=only_me))
+        app.add_handler(
+            CommandHandler("help", self._cmd_help, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(
             only_me & filters.VOICE, self._handle_voice))

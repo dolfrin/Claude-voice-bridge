@@ -1006,6 +1006,63 @@ async def test_cmd_policies_non_owner_ignored():
     msg.reply_text.assert_not_awaited()
 
 
+# --------------------------------------------------------------------------
+# /help: routing rules + command reference (owner-gated, HTML-safe plain text)
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_help_documents_routing_and_commands():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    msg = make_message(user_id=42, text="/help")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_help(update, MagicMock(args=[]))
+
+    sent = msg.reply_text.await_args.args[0]
+    assert isinstance(sent, str) and sent
+    # routing rules
+    assert ":" in sent  # name-prefix "projektas: tekstas"
+    assert "!" in sent  # urgent interrupt prefix
+    # command reference — every command listed one line each
+    for cmd in ("/panel", "/projects", "/recap", "/cost", "/info",
+                "/voice", "/policies", "/schedule", "/help"):
+        assert cmd in sent, cmd
+    # HTML-safe: no raw markup metacharacters that would break a parse_mode send.
+    assert "<" not in sent and ">" not in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_help_is_sent_without_html_parse_mode():
+    # /help must go out as plain text (no parse_mode) so nothing in it can be
+    # mis-parsed as HTML.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    msg = make_message(user_id=42, text="/help")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_help(update, MagicMock(args=[]))
+
+    assert "parse_mode" not in msg.reply_text.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_cmd_help_non_owner_ignored():
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), FakeControls())
+    msg = make_message(user_id=999, text="/help")  # not the owner
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_help(update, MagicMock(args=[]))
+
+    msg.reply_text.assert_not_awaited()
+
+
+def test_help_command_registered_in_bot_commands():
+    from voice_bridge.telegram_io import _BOT_COMMANDS
+
+    assert "help" in {c.command for c in _BOT_COMMANDS}
+
+
 @pytest.mark.asyncio
 async def test_ask_user_sends_buttons_and_returns_selected_choice():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
@@ -2914,7 +2971,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
-            "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info", "policies", "schedule"} == registered_names
+            "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info", "policies", "schedule", "help"} == registered_names
 
 
 @pytest.mark.asyncio
