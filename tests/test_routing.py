@@ -606,3 +606,140 @@ async def test_init_adds_policy_table_to_old_db(tmp_db):
     # table now exists and is usable
     await store.add_policy("qwing", "git push")
     assert await store.has_policy("qwing", "git push") is True
+
+
+# ---------------------------------------------------------------------------
+# Step 12: scheduled/recurring turns (I4) — schedules table + methods
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_schedules_empty_by_default(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    assert await store.list_schedules() == []
+
+
+@pytest.mark.asyncio
+async def test_add_list_remove_enable_round_trip(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    sid = await store.add_schedule("qwing", "07:30", "check overnight CI")
+    assert isinstance(sid, int) and sid > 0
+
+    rows = await store.list_schedules()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == sid
+    assert row["project"] == "qwing"
+    assert row["hhmm"] == "07:30"
+    assert row["prompt"] == "check overnight CI"
+    assert row["enabled"] is True
+    assert row["last_run"] is None
+
+    # a second one, listed ordered by project then hhmm
+    sid2 = await store.add_schedule("qwing", "06:00", "morning ping")
+    rows = await store.list_schedules()
+    assert [r["hhmm"] for r in rows] == ["06:00", "07:30"]
+
+    # filter by project
+    await store.add_schedule("other", "10:00", "standup")
+    assert [r["project"] for r in await store.list_schedules("qwing")] == [
+        "qwing", "qwing"
+    ]
+
+    # disable/enable round-trip
+    assert await store.set_schedule_enabled(sid, False) is True
+    row = [r for r in await store.list_schedules() if r["id"] == sid][0]
+    assert row["enabled"] is False
+    assert await store.set_schedule_enabled(sid, True) is True
+    row = [r for r in await store.list_schedules() if r["id"] == sid][0]
+    assert row["enabled"] is True
+
+    # remove
+    assert await store.remove_schedule(sid2) is True
+    assert sid2 not in {r["id"] for r in await store.list_schedules()}
+    # removing an unknown id returns False
+    assert await store.remove_schedule(9999) is False
+    # toggling an unknown id returns False
+    assert await store.set_schedule_enabled(9999, False) is False
+
+
+@pytest.mark.asyncio
+async def test_due_schedules_boundaries(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    at_now = await store.add_schedule("qwing", "07:30", "at now")      # hhmm == now
+    before = await store.add_schedule("qwing", "07:00", "before now")  # hhmm < now
+    after = await store.add_schedule("qwing", "09:00", "after now")    # hhmm > now
+    disabled = await store.add_schedule("qwing", "06:00", "disabled")
+    await store.set_schedule_enabled(disabled, False)
+
+    due = await store.due_schedules("2026-07-21", "07:30")
+    due_ids = {r["id"] for r in due}
+    # hhmm == now and hhmm < now are due; hhmm > now and disabled are not.
+    assert at_now in due_ids
+    assert before in due_ids
+    assert after not in due_ids
+    assert disabled not in due_ids
+
+
+@pytest.mark.asyncio
+async def test_due_schedules_last_run_dedup(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    sid = await store.add_schedule("qwing", "07:30", "check CI")
+
+    # not run yet -> due
+    assert {r["id"] for r in await store.due_schedules("2026-07-21", "07:30")} == {sid}
+
+    # marked ran TODAY -> not due again today
+    await store.mark_schedule_ran(sid, "2026-07-21")
+    assert await store.due_schedules("2026-07-21", "07:30") == []
+
+    # a NEW day -> due again (last_run != today)
+    assert {r["id"] for r in await store.due_schedules("2026-07-22", "07:30")} == {sid}
+
+
+@pytest.mark.asyncio
+async def test_mark_schedule_ran_persists(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    sid = await store.add_schedule("qwing", "07:30", "check CI")
+    await store.mark_schedule_ran(sid, "2026-07-21")
+
+    row = [r for r in await store.list_schedules() if r["id"] == sid][0]
+    assert row["last_run"] == "2026-07-21"
+
+
+@pytest.mark.asyncio
+async def test_init_adds_schedules_table_to_old_db(tmp_db):
+    # An old db with no schedules table must gain it on init (no data loss).
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.executescript(
+            """
+            CREATE TABLE projects (
+                name TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1
+            );
+            """
+        )
+        await db.commit()
+
+    store = Store(tmp_db)
+    await store.init()
+    # table now exists and is usable
+    sid = await store.add_schedule("qwing", "07:30", "check CI")
+    assert [r["id"] for r in await store.list_schedules()] == [sid]
+
+
+@pytest.mark.asyncio
+async def test_schedules_survive_new_store_instance(tmp_db):
+    s1 = Store(tmp_db)
+    await s1.init()
+    sid = await s1.add_schedule("qwing", "07:30", "check CI")
+
+    s2 = Store(tmp_db)
+    await s2.init()
+    rows = await s2.list_schedules()
+    assert [r["id"] for r in rows] == [sid]
+    assert rows[0]["prompt"] == "check CI"

@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS approval_policy (
     signature TEXT NOT NULL,
     PRIMARY KEY (project, signature)
 );
+CREATE TABLE IF NOT EXISTS schedules (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    project  TEXT NOT NULL,
+    hhmm     TEXT NOT NULL,      -- "07:30", 24h LOCAL time
+    prompt   TEXT NOT NULL,
+    enabled  INTEGER NOT NULL DEFAULT 1,
+    last_run TEXT                -- "YYYY-MM-DD" the schedule last fired (per-day dedup)
+);
 """
 
 # Columns the ``projects`` table must carry. A fresh db gets them from _SCHEMA;
@@ -439,6 +447,111 @@ class Store:
                     (project, signature),
                 )
             await db.commit()
+
+    # ------------------------------------------------------------------
+    # scheduled / recurring turns (I4): daily-at-HH:MM prompts per project
+    # ------------------------------------------------------------------
+    #
+    # A schedule delivers ``prompt`` to ``project`` once per local day at (or
+    # after) ``hhmm``. The per-day dedup lives in ``last_run`` (the "YYYY-MM-DD"
+    # of the last fire): :meth:`due_schedules` returns a schedule only while it
+    # is enabled, its time has arrived (``hhmm <= now_hhmm``), and it has NOT
+    # already fired today (``last_run IS NULL OR last_run != now_date``). String
+    # comparison is exact for zero-padded "HH:MM" and ISO dates. This makes the
+    # design restart-safe (a mid-day restart won't re-fire an already-run
+    # schedule) and forgiving of a missed exact minute (bot down at 07:30, up at
+    # 07:34 still fires) with NO catch-up storms (one fire per day). All values
+    # are param-bound; no user text is interpolated into SQL.
+
+    async def add_schedule(self, project: str, hhmm: str, prompt: str) -> int:
+        """Insert a new daily schedule and return its new id."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "INSERT INTO schedules (project, hhmm, prompt) VALUES (?, ?, ?)",
+                (project, hhmm, prompt),
+            )
+            await db.commit()
+            return cur.lastrowid
+
+    async def list_schedules(self, project: str | None = None) -> list[dict]:
+        """Return schedules (optionally filtered to *project*), ordered.
+
+        Ordered by project then hhmm so the /schedule listing is stable. Each
+        row is a dict: ``{id, project, hhmm, prompt, enabled(bool), last_run}``.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            if project is None:
+                cur = await db.execute(
+                    "SELECT id, project, hhmm, prompt, enabled, last_run "
+                    "FROM schedules ORDER BY project, hhmm"
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT id, project, hhmm, prompt, enabled, last_run "
+                    "FROM schedules WHERE project = ? ORDER BY project, hhmm",
+                    (project,),
+                )
+            rows = await cur.fetchall()
+        return [_schedule_row_to_dict(row) for row in rows]
+
+    async def remove_schedule(self, schedule_id: int) -> bool:
+        """Delete a schedule by id. Return True if a row was removed."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "DELETE FROM schedules WHERE id = ?", (schedule_id,)
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> bool:
+        """Toggle a schedule's enabled flag. Return True if a row was updated."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "UPDATE schedules SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, schedule_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def due_schedules(self, now_date: str, now_hhmm: str) -> list[dict]:
+        """Return enabled schedules due to fire at *now_date*/*now_hhmm*.
+
+        "Due" = enabled AND its time has arrived (``hhmm <= now_hhmm``) AND it
+        has not already fired today (``last_run IS NULL OR last_run !=
+        now_date``). See the class comment for the restart-safe rationale.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT id, project, hhmm, prompt, enabled, last_run "
+                "FROM schedules "
+                "WHERE enabled = 1 AND hhmm <= ? "
+                "AND (last_run IS NULL OR last_run != ?) "
+                "ORDER BY project, hhmm",
+                (now_hhmm, now_date),
+            )
+            rows = await cur.fetchall()
+        return [_schedule_row_to_dict(row) for row in rows]
+
+    async def mark_schedule_ran(self, schedule_id: int, now_date: str) -> None:
+        """Stamp a schedule's ``last_run`` to *now_date* (the per-day dedup)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE schedules SET last_run = ? WHERE id = ?",
+                (now_date, schedule_id),
+            )
+            await db.commit()
+
+
+def _schedule_row_to_dict(row) -> dict:
+    id_, project, hhmm, prompt, enabled, last_run = row
+    return {
+        "id": id_,
+        "project": project,
+        "hhmm": hhmm,
+        "prompt": prompt,
+        "enabled": bool(enabled),
+        "last_run": last_run,
+    }
 
 
 def _usage_row_to_dict(row) -> dict:

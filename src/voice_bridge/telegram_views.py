@@ -45,7 +45,12 @@ _BOT_COMMANDS = [
     BotCommand("recap", "🗒 What happened while away"),
     BotCommand("cost", "💰 Token & cost usage"),
     BotCommand("policies", "♾ Always-allow grants"),
+    BotCommand("schedule", "⏰ Daily scheduled prompts"),
 ]
+
+# A scheduled prompt can be arbitrarily long; the plain-text listing truncates
+# it so one runaway schedule cannot blow past Telegram's message limit.
+_SCHEDULE_PROMPT_MAX = 80
 
 
 def parse_callback(data: str) -> tuple[str, str]:
@@ -144,6 +149,33 @@ def _format_policies(policies: list[tuple[str, str]]) -> str:
         lines.append(f"• {project}: {signature}")
     lines.append("")
     lines.append("Atšaukti: /policies clear [projektas]")
+    return "\n".join(lines)
+
+
+def _format_schedules(schedules: list[dict]) -> str:
+    """Render the /schedule listing as a plain-text (no-HTML) message.
+
+    Kept HTML-free (sent with no ``parse_mode``) so a scheduled prompt carrying
+    ``<``/``>``/``&`` can never break Telegram parsing. Each line is
+    ``{id}  {project}  {HH:MM}  [off]  {prompt}`` with the ``[off]`` marker only
+    for disabled schedules and the prompt truncated to keep the message bounded.
+    """
+    if not schedules:
+        return (
+            "Nėra suplanuotų užduočių.\n"
+            "Pridėti: /schedule <projektas> <HH:MM> <užduotis>"
+        )
+    lines = ["⏰ Suplanuotos užduotys:"]
+    for s in schedules:
+        prompt = str(s.get("prompt") or "")
+        if len(prompt) > _SCHEDULE_PROMPT_MAX:
+            prompt = prompt[:_SCHEDULE_PROMPT_MAX] + "…"
+        off = " [off]" if not s.get("enabled", True) else ""
+        lines.append(
+            f"{s.get('id')}  {s.get('project')}  {s.get('hhmm')}{off}  {prompt}"
+        )
+    lines.append("")
+    lines.append("Šalinti: /schedule remove <id> · Perjungti: /schedule on|off <id>")
     return "\n".join(lines)
 
 

@@ -26,6 +26,7 @@ import shutil
 import signal
 import time
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -43,6 +44,7 @@ from .config import (
 from .discovery import discover_projects, merge_projects
 from .routing import Store
 from .sanitizer import prepare_outbound, to_spoken
+from .scheduler import run_scheduler
 from .sessions import SessionManager
 from .stt import Transcriber
 from .telegram_io import TelegramIO
@@ -629,6 +631,24 @@ class _Controls:
         """Revoke always-allow grants: all, or just one project's."""
         await self._store.clear_policy(project)
 
+    # -- Scheduled / recurring turns (I4) — thin pass-throughs to the store --
+
+    async def list_schedules(self, project: str | None = None) -> list[dict]:
+        """Every daily schedule (optionally one project's), for /schedule list."""
+        return await self._store.list_schedules(project)
+
+    async def add_schedule(self, project: str, hhmm: str, prompt: str) -> int:
+        """Add a daily schedule; returns its new id (for /schedule add)."""
+        return await self._store.add_schedule(project, hhmm, prompt)
+
+    async def remove_schedule(self, schedule_id: int) -> bool:
+        """Delete a schedule by id (for /schedule remove)."""
+        return await self._store.remove_schedule(schedule_id)
+
+    async def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> bool:
+        """Enable/disable a schedule by id (for /schedule on|off)."""
+        return await self._store.set_schedule_enabled(schedule_id, enabled)
+
     async def cost_summary(self) -> str:
         """Per-project + TOTAL token/cost summary, read fresh from the store.
 
@@ -1021,6 +1041,75 @@ class _Controls:
 
 
 # --------------------------------------------------------------------------- #
+# Scheduler wiring (I4)
+# --------------------------------------------------------------------------- #
+
+# A scheduled-fire notice echoes a short slice of the prompt for context.
+_SCHEDULE_NOTICE_MAX = 60
+
+
+def _local_now() -> tuple[str, str]:
+    """LOCAL wall-clock ``(YYYY-MM-DD, HH:MM)`` for the scheduler's now_fn.
+
+    The service runs in the user's timezone (a systemd user service), so
+    ``date.today()``/``datetime.now()`` ARE the user's local day and minute —
+    exactly what a "kasdien 07:30" schedule means to them. This is the ONLY
+    place the wall clock is read; it is injected into :func:`run_scheduler` so
+    the loop core stays deterministic in tests. NOTE on DST: because it reads
+    local time, a spring/fall jump shifts the effective fire minute by the
+    offset for that one day (a 07:30 schedule still fires once that day, just at
+    the post-jump local 07:30). Acceptable for a daily reminder and far simpler
+    than carrying a tz database and per-schedule offsets.
+    """
+    return date.today().isoformat(), datetime.now().strftime("%H:%M")
+
+
+def _make_schedule_deliver(
+    sessions: "SessionManager", store: Store
+) -> Callable[[str, str], Awaitable[None]]:
+    """Build the scheduler's deliver closure: the SAME path an inbound turn uses.
+
+    Skips a disabled project (a schedule can outlive an ``/off``) and otherwise
+    delivers the prompt via ``sessions.deliver`` so the project's normal
+    outbound (voice+text to Telegram) reports back exactly as if the user had
+    typed it. Kept a thin closure so :func:`run_scheduler` stays store/session
+    agnostic and unit-testable.
+    """
+
+    async def deliver(project: str, prompt: str) -> None:
+        if not await store.is_enabled(project):
+            logger.info(
+                "scheduler: project %s disabled; skipping scheduled turn", project
+            )
+            return
+        await sessions.deliver(project, prompt)
+
+    return deliver
+
+
+def _make_schedule_notify(
+    telegram: "TelegramIO",
+) -> Callable[[str, str], Awaitable[None]]:
+    """Build the scheduler's notify closure: one short Telegram line per fire.
+
+    ``send_question`` already prefixes ``[project] ``; the prompt echo is
+    truncated so a long scheduled prompt can't bloat the notice.
+    """
+
+    async def notify(project: str, prompt: str) -> None:
+        short = (
+            prompt
+            if len(prompt) <= _SCHEDULE_NOTICE_MAX
+            else prompt[:_SCHEDULE_NOTICE_MAX] + "…"
+        )
+        await telegram.send_question(
+            project, f"⏰ Suplanuota užduotis paleista: {short}"
+        )
+
+    return notify
+
+
+# --------------------------------------------------------------------------- #
 # Wiring + lifecycle
 # --------------------------------------------------------------------------- #
 
@@ -1252,13 +1341,31 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
     """Start sessions, start telegram polling (returns), wait for *stop*, shut down.
 
     ``telegram.run()`` does NOT block (C3); this function owns the run-forever
-    wait via ``stop``. Shutdown is symmetric and runs in ``finally``.
+    wait via ``stop``. The I4 scheduler runs as a long-lived background task
+    alongside polling: it shares the same ``stop`` event (so it exits cleanly on
+    shutdown) and is ALSO cancelled/awaited in ``finally`` so a mid-``sleep``
+    tick can't delay shutdown. Shutdown is symmetric and runs in ``finally``.
     """
     await wiring.sessions.start_all()
     await wiring.telegram.run()
+    scheduler_task = asyncio.create_task(
+        run_scheduler(
+            wiring.store,
+            _make_schedule_deliver(wiring.sessions, wiring.store),
+            _make_schedule_notify(wiring.telegram),
+            stop,
+            now_fn=_local_now,
+            sleep_fn=asyncio.sleep,
+        )
+    )
     try:
         await stop.wait()
     finally:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
         await wiring.telegram.stop()
         await wiring.sessions.stop_all()
 

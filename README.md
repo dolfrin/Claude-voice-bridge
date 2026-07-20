@@ -415,9 +415,20 @@ journalctl --user -u voice-bridge -f
 | 🗒 | `/recap` | Show what changed across all projects while you were away |
 | 💰 | `/cost` | Show per-project and total token and cost usage |
 | ♾ | `/policies` / `/policies clear [project]` | List, or revoke (all / one project's), the always-allow grants |
+| ⏰ | `/schedule` / `/schedule <project> <HH:MM> <prompt>` / `/schedule remove\|on\|off <id>` | List, add, or toggle/remove a daily recurring prompt delivered to a project at a local time |
 
 Telegram turns are mirrored into each project's `.claude/voice-bridge-chat.md`
 so the voice/text conversation is visible from the IDE file tree.
+
+`/schedule` sets up daily recurring prompts — e.g.
+`/schedule qwing 07:30 check overnight CI and summarize`. At (or after) the
+given **local** time the bridge delivers the prompt to that project exactly as
+if you had typed it, and the project's normal voice+text outbound reports back.
+Each schedule fires **once per day**: a schedule fires the first time the
+bridge is up at or past its time, so a bot that was down at 07:30 but back at
+07:34 still fires that morning, and a mid-day restart never re-fires an
+already-run schedule. A disabled project's schedules are skipped (the schedule
+stays, so re-enabling resumes it next day). Not full cron — daily-at-HH:MM only.
 
 ### Interrupts and queueing
 

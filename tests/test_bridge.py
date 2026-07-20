@@ -115,6 +115,49 @@ class FakeStore:
         else:
             self._policies.discard((project, signature))
 
+    # I4: scheduled/recurring turns
+    def __post_schedule_init(self):
+        pass
+
+    async def add_schedule(self, project, hhmm, prompt):
+        rows = getattr(self, "_schedules", None)
+        if rows is None:
+            rows = self._schedules = []
+        sid = len(rows) + 1
+        rows.append({"id": sid, "project": project, "hhmm": hhmm,
+                     "prompt": prompt, "enabled": True, "last_run": None})
+        return sid
+
+    async def list_schedules(self, project=None):
+        rows = getattr(self, "_schedules", [])
+        return [dict(r) for r in rows if project is None or r["project"] == project]
+
+    async def remove_schedule(self, schedule_id):
+        rows = getattr(self, "_schedules", [])
+        before = len(rows)
+        self._schedules = [r for r in rows if r["id"] != schedule_id]
+        return len(self._schedules) < before
+
+    async def set_schedule_enabled(self, schedule_id, enabled):
+        for r in getattr(self, "_schedules", []):
+            if r["id"] == schedule_id:
+                r["enabled"] = enabled
+                return True
+        return False
+
+    async def due_schedules(self, now_date, now_hhmm):
+        out = []
+        for r in getattr(self, "_schedules", []):
+            if (r["enabled"] and r["hhmm"] <= now_hhmm
+                    and (r["last_run"] is None or r["last_run"] != now_date)):
+                out.append(dict(r))
+        return out
+
+    async def mark_schedule_ran(self, schedule_id, now_date):
+        for r in getattr(self, "_schedules", []):
+            if r["id"] == schedule_id:
+                r["last_run"] = now_date
+
 
 class FakeTTS:
     def __init__(self, out=b"OGGDATA", boom=False):
@@ -2439,3 +2482,117 @@ async def test_make_inbound_pending_approval_takes_precedence_over_ask():
     assert approvals.resolved == [(55, True)]
     assert telegram.resolved_asks == []
     assert sessions.delivered == []
+
+
+# --------------------------------------------------------------------------- #
+# I4: scheduler wiring
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_controls_schedule_pass_throughs():
+    """_Controls delegates the /schedule surface straight to the store."""
+    from voice_bridge.bridge import _Controls
+
+    store = FakeStore(enabled={"qwing": True})
+    sessions = FakeSessions([FakeProject("qwing")])
+    controls = _Controls(sessions, store, FakeCfg(), {"backend": FakeTTS()})
+
+    sid = await controls.add_schedule("qwing", "07:30", "check CI")
+    assert sid == 1
+    rows = await controls.list_schedules()
+    assert rows[0]["project"] == "qwing" and rows[0]["hhmm"] == "07:30"
+    assert await controls.set_schedule_enabled(sid, False) is True
+    assert (await controls.list_schedules())[0]["enabled"] is False
+    assert await controls.remove_schedule(sid) is True
+    assert await controls.list_schedules() == []
+
+
+def test_local_now_shape():
+    """The injected clock returns (ISO-date, HH:MM) strings in local time."""
+    from voice_bridge.bridge import _local_now
+
+    now_date, now_hhmm = _local_now()
+    assert isinstance(now_date, str) and now_date.count("-") == 2
+    assert isinstance(now_hhmm, str) and len(now_hhmm) == 5 and now_hhmm[2] == ":"
+
+
+@pytest.mark.asyncio
+async def test_schedule_deliver_closure_checks_enabled():
+    """The deliver closure delivers to enabled projects and skips disabled ones."""
+    from voice_bridge.bridge import _make_schedule_deliver
+
+    store = FakeStore(enabled={"qwing": True, "off": False})
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("off")])
+    deliver = _make_schedule_deliver(sessions, store)
+
+    await deliver("qwing", "check CI")
+    await deliver("off", "should skip")
+
+    assert sessions.delivered == [("qwing", "check CI")]
+
+
+@pytest.mark.asyncio
+async def test_schedule_notify_closure_sends_line():
+    """The notify closure posts one short Telegram line for the project."""
+    from voice_bridge.bridge import _make_schedule_notify
+
+    telegram = FakeTelegram()
+    notify = _make_schedule_notify(telegram)
+    await notify("qwing", "check CI")
+
+    assert len(telegram.questions) == 1
+    project, text = telegram.questions[0]
+    assert project == "qwing"
+    assert isinstance(text, str) and text
+
+
+@pytest.mark.asyncio
+async def test_run_until_stopped_starts_and_cancels_scheduler(monkeypatch):
+    """run_until_stopped spawns the scheduler task and cancels it on shutdown."""
+    import voice_bridge.bridge as bridge_mod
+
+    cfg = FakeCfg()
+    projects = [FakeProject("qwing", voice="echo")]
+    store = FakeStore(enabled={"qwing": True})
+    telegram = FakeTelegram()
+    sessions = FakeSessions(projects)
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda path="projects.yaml": projects)
+    monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
+    monkeypatch.setattr(bridge_mod, "Transcriber",
+                        lambda model_name, language="lt": FakeTranscriber())
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
+    monkeypatch.setattr(bridge_mod, "ApprovalManager",
+                        lambda send_question, timeout: FakeApprovals())
+    monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
+    monkeypatch.setattr(bridge_mod, "TelegramIO",
+                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None: telegram)
+
+    state = {"called": False, "cancelled": False}
+
+    async def fake_run_scheduler(store, deliver, notify, stop_event, *, now_fn, sleep_fn, interval=30):
+        state["called"] = True
+        try:
+            await asyncio.Event().wait()  # block until cancelled
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
+
+    monkeypatch.setattr(bridge_mod, "run_scheduler", fake_run_scheduler)
+
+    wired = await build()
+    stop = asyncio.Event()
+    runner = asyncio.create_task(run_until_stopped(wired, stop))
+    # Let start_all/run/create_task run and the scheduler task begin.
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert state["called"] is True
+
+    stop.set()
+    await runner
+
+    assert state["cancelled"] is True
+    assert telegram.stopped == 1
+    assert sessions.stopped == 1

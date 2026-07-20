@@ -143,6 +143,23 @@ class FakeControls:
     async def clear_policies(self, project=None):
         self.calls.append(("clear_policies", project))
 
+    # I4: scheduled/recurring turns
+    async def list_schedules(self, project=None):
+        self.calls.append(("list_schedules", project))
+        return list(getattr(self, "_schedules", []))
+
+    async def add_schedule(self, project, hhmm, prompt):
+        self.calls.append(("add_schedule", project, hhmm, prompt))
+        return 1
+
+    async def remove_schedule(self, schedule_id):
+        self.calls.append(("remove_schedule", schedule_id))
+        return getattr(self, "_remove_result", True)
+
+    async def set_schedule_enabled(self, schedule_id, enabled):
+        self.calls.append(("set_schedule_enabled", schedule_id, enabled))
+        return getattr(self, "_toggle_result", True)
+
     def snapshot(self):
         return self._snapshot
 
@@ -2896,7 +2913,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
-            "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info", "policies"} == registered_names
+            "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info", "policies", "schedule"} == registered_names
 
 
 @pytest.mark.asyncio
@@ -3203,3 +3220,193 @@ async def test_ask_user_returns_and_cleans_up_when_resolved_via_resolve_ask():
     assert await task == "A"
     assert io._pending_asks == {}
     assert io._ask_msg_ids == {}
+
+
+# --------------------------------------------------------------------------
+# /schedule: daily recurring turns (owner-gated) — I4
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_schedule_add_valid():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule qwing 7:30 check overnight CI")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(
+        update, MagicMock(args=["qwing", "7:30", "check", "overnight", "CI"])
+    )
+
+    # project validated against snapshot, time normalized to 07:30, prompt joined
+    assert ("add_schedule", "qwing", "07:30", "check overnight CI") in controls.calls
+    msg.reply_text.assert_awaited_once()
+    reply = msg.reply_text.await_args.args[0]
+    assert "qwing" in reply and "07:30" in reply
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_add_bad_time():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule qwing 99:99 check CI")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["qwing", "99:99", "check", "CI"]))
+
+    # no schedule added; a usage/error reply is sent
+    assert not any(c[0] == "add_schedule" for c in controls.calls)
+    msg.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_add_unknown_project():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule nope 07:30 check CI")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["nope", "07:30", "check", "CI"]))
+
+    assert not any(c[0] == "add_schedule" for c in controls.calls)
+    reply = msg.reply_text.await_args.args[0]
+    assert "nope" in reply  # names the unknown project
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_add_missing_prompt():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule qwing 07:30")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["qwing", "07:30"]))
+
+    assert not any(c[0] == "add_schedule" for c in controls.calls)
+    msg.reply_text.assert_awaited_once()  # usage reply
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_list_no_args():
+    controls = FakeControls()
+    controls._schedules = [
+        {"id": 1, "project": "qwing", "hhmm": "07:30",
+         "prompt": "check CI", "enabled": True, "last_run": None},
+        {"id": 2, "project": "other", "hhmm": "09:00",
+         "prompt": "standup summary", "enabled": False, "last_run": "2026-07-20"},
+    ]
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=[]))
+
+    assert ("list_schedules", None) in controls.calls
+    sent = msg.reply_text.await_args.args[0]
+    assert "qwing" in sent and "07:30" in sent and "check CI" in sent
+    assert "other" in sent and "09:00" in sent
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_list_explicit():
+    controls = FakeControls()
+    controls._schedules = []
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule list")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["list"]))
+
+    assert ("list_schedules", None) in controls.calls
+    sent = msg.reply_text.await_args.args[0]
+    assert isinstance(sent, str) and sent  # non-empty "nothing scheduled" text
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_remove():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule remove 3")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["remove", "3"]))
+
+    assert ("remove_schedule", 3) in controls.calls
+    msg.reply_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_remove_alias_rm():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule rm 5")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["rm", "5"]))
+
+    assert ("remove_schedule", 5) in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_remove_unknown_id_reply():
+    controls = FakeControls()
+    controls._remove_result = False
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule remove 99")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["remove", "99"]))
+
+    assert ("remove_schedule", 99) in controls.calls
+    msg.reply_text.assert_awaited_once()  # tells the user it wasn't found
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_remove_bad_id():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule remove abc")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["remove", "abc"]))
+
+    assert not any(c[0] == "remove_schedule" for c in controls.calls)
+    msg.reply_text.assert_awaited_once()  # usage/error reply
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_off_then_on():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+
+    msg = make_message(user_id=42, text="/schedule off 2")
+    msg.reply_text = AsyncMock()
+    await io._cmd_schedule(MagicMock(message=msg), MagicMock(args=["off", "2"]))
+    assert ("set_schedule_enabled", 2, False) in controls.calls
+
+    msg2 = make_message(user_id=42, text="/schedule on 2")
+    msg2.reply_text = AsyncMock()
+    await io._cmd_schedule(MagicMock(message=msg2), MagicMock(args=["on", "2"]))
+    assert ("set_schedule_enabled", 2, True) in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_non_owner_ignored():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
+    msg = make_message(user_id=999, text="/schedule qwing 07:30 check CI")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["qwing", "07:30", "check", "CI"]))
+
+    assert controls.calls == []
+    msg.reply_text.assert_not_awaited()

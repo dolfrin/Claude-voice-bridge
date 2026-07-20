@@ -50,6 +50,7 @@ from telegram.ext import (
 
 from .approvals import _TOKEN_RE, _fold
 from .config import Config
+from .scheduler import parse_hhmm
 from .transcript import transcript_path
 from .tts import available_voices
 
@@ -66,6 +67,7 @@ from .telegram_views import (
     _clean_choices,
     _find_project_row,
     _format_policies,
+    _format_schedules,
     _friendly_path,
     _project_list_rows,
     _tail_for_telegram,
@@ -114,6 +116,10 @@ class Controls(Protocol):
     async def cost_summary(self) -> str: ...
     async def list_policies(self) -> list[tuple[str, str]]: ...
     async def clear_policies(self, project: str | None) -> None: ...
+    async def list_schedules(self, project: str | None = None) -> list[dict]: ...
+    async def add_schedule(self, project: str, hhmm: str, prompt: str) -> int: ...
+    async def remove_schedule(self, schedule_id: int) -> bool: ...
+    async def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> bool: ...
 
 
 _PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
@@ -147,6 +153,20 @@ _APPROVAL_TRUNCATED_MARKER = "…[truncated]"
 _FILE_TOO_LARGE_MSG = (
     "Failas per didelis (Telegram botų riba ~20 MB) — atsiųsk mažesnį arba per git."
 )
+
+
+def _parse_schedule_id(raw: str | None) -> int | None:
+    """Parse a /schedule id argument to a positive int, or None on junk.
+
+    Kept tiny and total (never raises) so the command handler can reply with a
+    usage line instead of crashing on ``/schedule remove abc``."""
+    if raw is None:
+        return None
+    try:
+        sid = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return sid if sid > 0 else None
 
 
 def _truncate_approval_preview(text: str, limit: int = _APPROVAL_PREVIEW_LIMIT) -> str:
@@ -1477,6 +1497,80 @@ class TelegramIO:
         policies = await self.controls.list_policies()
         await msg.reply_text(_format_policies(policies))
 
+    async def _cmd_schedule(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Manage daily recurring prompts (I4), owner-gated like every command.
+
+        Sub-commands (dispatched on the FIRST arg):
+
+        * (none) / ``list`` → list every schedule (plain text, HTML-free).
+        * ``remove``/``rm``/``del`` ``<id>`` → delete one schedule.
+        * ``on``/``off`` ``<id>`` → enable/disable one schedule.
+        * ``<project> <HH:MM> <prompt...>`` → add a daily schedule; the project
+          is validated with the same ``_resolve_project_arg`` the other commands
+          use, and the time via :func:`~voice_bridge.scheduler.parse_hhmm`.
+
+        Any bad input replies with usage and calls no mutator. The output is
+        HTML-free so a scheduled prompt's ``<``/``>``/``&`` can never break
+        Telegram parsing.
+        """
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        args = list(context.args or [])
+        if not args or args[0] == "list":
+            schedules = await self.controls.list_schedules()
+            await msg.reply_text(_format_schedules(schedules))
+            return
+
+        sub = args[0]
+        if sub in {"remove", "rm", "del"}:
+            sid = _parse_schedule_id(args[1] if len(args) > 1 else None)
+            if sid is None:
+                await msg.reply_text("Naudojimas: /schedule remove <id>")
+                return
+            removed = await self.controls.remove_schedule(sid)
+            await msg.reply_text(
+                f"Pašalinta suplanuota užduotis {sid}." if removed
+                else f"Nerasta suplanuota užduotis su id {sid}."
+            )
+            return
+
+        if sub in {"on", "off"}:
+            sid = _parse_schedule_id(args[1] if len(args) > 1 else None)
+            if sid is None:
+                await msg.reply_text(f"Naudojimas: /schedule {sub} <id>")
+                return
+            enabled = sub == "on"
+            ok = await self.controls.set_schedule_enabled(sid, enabled)
+            state = "įjungta" if enabled else "išjungta"
+            await msg.reply_text(
+                f"Suplanuota užduotis {sid} {state}." if ok
+                else f"Nerasta suplanuota užduotis su id {sid}."
+            )
+            return
+
+        # Otherwise: add. Needs <project> <HH:MM> <prompt...>.
+        usage = "Naudojimas: /schedule <projektas> <HH:MM> <užduotis>"
+        if len(args) < 3:
+            await msg.reply_text(usage)
+            return
+        project, error = self._resolve_project_arg(args[0])
+        if error:
+            await msg.reply_text(error)
+            return
+        hhmm = parse_hhmm(args[1])
+        if hhmm is None:
+            await msg.reply_text(f"Netinkamas laikas: {args[1]}. {usage}")
+            return
+        prompt = " ".join(args[2:]).strip()
+        if not prompt:
+            await msg.reply_text(usage)
+            return
+        await self.controls.add_schedule(project, hhmm, prompt)
+        await msg.reply_text(f"⏰ Suplanuota: {project} kasdien {hhmm}")
+
     async def _cmd_handoff(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1562,6 +1656,8 @@ class TelegramIO:
             CommandHandler("cost", self._cmd_cost, filters=only_me))
         app.add_handler(
             CommandHandler("policies", self._cmd_policies, filters=only_me))
+        app.add_handler(
+            CommandHandler("schedule", self._cmd_schedule, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(
             only_me & filters.VOICE, self._handle_voice))
