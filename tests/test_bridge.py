@@ -2353,6 +2353,25 @@ async def test_make_inbound_single_pending_ask_with_name_prefix_delivers_turn():
 
 
 @pytest.mark.asyncio
+async def test_make_inbound_urgent_name_prefix_not_hijacked_by_single_ask():
+    # "!qwing: build" is an URGENT turn for qwing. A leading '!' must not hide
+    # the name-prefix and let the single-pending-ask fallback swallow it — the
+    # name-prefix guard checks the urgent-stripped text.
+    store = FakeStore(last_active="othersapp",
+                      enabled={"qwing": True, "othersapp": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram(single_ask="3")
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, text="!qwing: build"))
+
+    assert telegram.resolved_asks == []
+    assert sessions.delivered == [("qwing", "build")]
+
+
+@pytest.mark.asyncio
 async def test_make_inbound_two_pending_asks_plain_text_routes_normally():
     # Two asks outstanding -> single_pending_ask_token() is None, and there is
     # no quote-reply, so the message must NOT be hijacked: it routes as a turn.

@@ -406,10 +406,15 @@ def make_inbound(
             # No explicit reply target: fall back to the sole outstanding ask,
             # but ONLY when this message carries no other routing intent — no
             # quote-reply at all, and no leading "<project>:" name-prefix — so a
-            # legitimate new turn is never hijacked.
+            # legitimate new turn is never hijacked. The name-prefix check runs
+            # on the URGENT-STRIPPED text: "!qwing: build" is an urgent turn for
+            # qwing, and a leading '!' must not hide the name-prefix and let the
+            # turn be swallowed as an ask answer. (resolve_ask still gets the raw
+            # ``text`` so a literal "!yes" answer is preserved verbatim.)
             if rid is None:
+                _, unprefixed = _consume_urgent_prefix(text)
                 names = sessions.names() if hasattr(sessions, "names") else []
-                prefix_project, _ = parse_name_prefix(text, names)
+                prefix_project, _ = parse_name_prefix(unprefixed, names)
                 if prefix_project is None:
                     ask_token = telegram.single_pending_ask_token()
         if ask_token is not None and telegram.resolve_ask(ask_token, text):

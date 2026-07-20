@@ -3112,6 +3112,28 @@ async def test_resolve_ask_ambiguous_substring_falls_to_free_form():
 
 
 @pytest.mark.asyncio
+async def test_resolve_ask_negated_sentence_not_snapped_onto_choice():
+    # A label that appears INSIDE a longer answer must NOT be selected: a
+    # negated/ambiguous sentence has to pass through as free-form so the agent
+    # interprets the user's actual words. "no, do not deploy" must NOT resolve
+    # to "Deploy".
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["Deploy", "Wait"])
+    assert io.resolve_ask("1", "no, do not deploy") is True
+    assert future.result() == "no, do not deploy"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_short_label_not_matched_inside_word():
+    # Single-letter labels must not substring-match an arbitrary word:
+    # "first or second" must not resolve to "C" (inside "seCond").
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["A", "B", "C"])
+    assert io.resolve_ask("1", "first or second") is True
+    assert future.result() == "first or second"
+
+
+@pytest.mark.asyncio
 async def test_resolve_ask_free_form_passthrough_when_no_match():
     io, _ = _io_with_bot()
     future = _register_pending_ask(io, "1", ["A", "B"])

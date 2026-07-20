@@ -273,12 +273,19 @@ def _match_choice(answer_text: str, choices: list[str]) -> str | None:
        that choice — only when the answer names EXACTLY ONE in-range ordinal
        (ambiguous "first or second" falls through);
     3. a case-insensitive, diacritic-folded EXACT match to a choice label;
-    4. a case-insensitive, diacritic-folded UNIQUE substring (answer inside a
-       label OR a label inside the answer) — skipped when >1 label matches.
+    4. the answer is a diacritic-folded UNIQUE substring of exactly one label
+       (the user typed PART of a label, e.g. "deploy" -> "Deploy to prod").
 
-    Returns the matched choice's ORIGINAL label (not the folded form), or None
-    so :meth:`TelegramIO.resolve_ask` can pass the raw answer through as
-    free-form. Pure; never raises."""
+    Only that one direction is used. Matching a label that appears INSIDE a
+    longer answer is deliberately NOT done: it would snap a whole sentence —
+    including a NEGATED one ("no, do not deploy") or an ambiguous one ("first or
+    second") — onto a choice label. Anything that is not a clean number /
+    ordinal / label / label-substring instead returns None, so
+    :meth:`TelegramIO.resolve_ask` passes the RAW answer through as free-form
+    and the agent interprets the user's actual words (preserving negation).
+
+    Returns the matched choice's ORIGINAL label (not the folded form), or None.
+    Pure; never raises."""
     stripped = answer_text.strip()
     if not stripped:
         return None
@@ -303,15 +310,19 @@ def _match_choice(answer_text: str, choices: list[str]) -> str | None:
         if _fold(choice.lower()) == folded_answer:
             return choice
 
-    # 4. unique substring, either direction.
-    substring_hits = [
-        choice
-        for choice in choices
-        if (folded_choice := _fold(choice.lower()))
-        and (folded_answer in folded_choice or folded_choice in folded_answer)
-    ]
-    if len(substring_hits) == 1:
-        return substring_hits[0]
+    # 4. the answer is a UNIQUE substring of exactly one label. ONLY this
+    #    direction (answer inside label): matching a label inside the answer
+    #    would snap a negated/ambiguous sentence onto a choice. Require length
+    #    >= 2 so a stray single char can't match. Everything else -> free-form.
+    if len(folded_answer) >= 2:
+        substring_hits = [
+            choice
+            for choice in choices
+            if (folded_choice := _fold(choice.lower()))
+            and folded_answer in folded_choice
+        ]
+        if len(substring_hits) == 1:
+            return substring_hits[0]
     return None
 
 
