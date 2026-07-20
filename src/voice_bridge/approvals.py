@@ -96,8 +96,10 @@ _RISKY_COMMAND_PATTERNS.append(
 # at shell metacharacters that would end the token (pipe, semicolon, `&`,
 # another redirection). This intentionally excludes fd-duplication targets
 # like `>&1` — those aren't file paths. (`&>file` — ampersand BEFORE `>` — is
-# caught here because the `>` still precedes the target.)
-_REDIRECT_TARGET_RE = re.compile(r">>?\s*([^\s|;&<>]+)")
+# caught here because the `>` still precedes the target.) The optional `\|`
+# after `>`/`>>` catches the force-clobber form `>|file` (bypasses noclobber),
+# whose `|` would otherwise end the token before the path is seen.
+_REDIRECT_TARGET_RE = re.compile(r">>?\|?\s*([^\s|;&<>]+)")
 
 # `>&word` (ampersand AFTER `>`) redirects BOTH stdout+stderr to `word` when
 # `word` is a FILENAME, not an fd number: `echo x >&/etc/passwd` truncates the

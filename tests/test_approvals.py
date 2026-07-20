@@ -1085,6 +1085,9 @@ def test_signature_amp_redirect_to_file_is_detected():
     # fd-duplication (`2>&1`, `>&2`, `>&-`) is NOT a file redirect.
     assert is_risky("Bash", {"command": "ls >&2"}, CWD) is False
     assert signature_for("Bash", {"command": "git push 2>&1"}, CWD) == "git push"
+    # `>|FILE` force-clobber (bypasses noclobber) is a real write -> risky.
+    assert is_risky("Bash", {"command": "echo x >| /etc/passwd"}, CWD) is True
+    assert is_risky("Bash", {"command": "echo x >|/etc/passwd"}, CWD) is True
 
 
 def test_signature_odd_input_never_raises_and_has_no_broad_risky_key():
