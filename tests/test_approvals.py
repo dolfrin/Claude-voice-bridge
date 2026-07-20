@@ -955,6 +955,24 @@ def test_is_risky_send_file_symlink_normal_in_cwd_still_false(tmp_path):
     assert is_risky(SEND_FILE_TOOL_NAME, {"path": "alias.py"}, str(tmp_path)) is False
 
 
+def test_is_risky_redirect_through_symlink_escaping_cwd(tmp_path):
+    # A relative redirect target that RESOLVES outside cwd via a symlink can't
+    # be seen by a string check — only realpath resolution catches it. Writing
+    # through such a symlink is a safe-mode escape, so it must be risky, while a
+    # symlink to a normal in-cwd file (and plain new relative files) stay safe.
+    os.symlink("/etc/passwd", tmp_path / "innocuous")
+    (tmp_path / "real.txt").write_text("x")
+    os.symlink(tmp_path / "real.txt", tmp_path / "alias")
+
+    assert is_risky("Bash", {"command": "echo evil > innocuous"}, str(tmp_path)) is True
+    assert is_risky("Bash", {"command": "echo x > alias"}, str(tmp_path)) is False
+    assert is_risky("Bash", {"command": "echo x > brand_new.txt"}, str(tmp_path)) is False
+    # Signature: a symlink-escaping target on an allowlisted verb keeps a
+    # distinct tag, so a plain `git push` grant can't auto-allow it.
+    sig = signature_for("Bash", {"command": "git push > innocuous"}, str(tmp_path))
+    assert sig is not None and sig != "git push"
+
+
 # ---------------------------------------------------------------------------
 # signature_for: stable, action-specific policy keys (always-allow feature)
 # ---------------------------------------------------------------------------

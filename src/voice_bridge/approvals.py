@@ -114,14 +114,15 @@ _REDIRECT_AMP_TARGET_RE = re.compile(r">&\s*([^\s|;&<>0-9-][^\s|;&<>]*)")
 _SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 
 
-def _has_risky_redirect(command: str) -> bool:
+def _has_risky_redirect(command: str, cwd: str) -> bool:
     """Flag `>`/`>>` redirection to an absolute path, a path that escapes
-    cwd (`../`), or a sensitive-looking target. Plain relative targets like
-    `> out.txt` stay safe, and so do the standard /dev/null-style sinks.
+    cwd (`../`, or a relative target that resolves out via a symlink), or a
+    sensitive-looking target. Plain relative targets like `> out.txt` stay
+    safe, and so do the standard /dev/null-style sinks.
 
     Delegates to :func:`_risky_redirect_targets` so the risk test and the
     signature derivation (which needs the actual targets) stay in lockstep."""
-    return bool(_risky_redirect_targets(command))
+    return bool(_risky_redirect_targets(command, cwd))
 
 
 # Tools that touch the filesystem with an explicit path.
@@ -165,7 +166,7 @@ def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
             return True
         if _EXFIL_SHORT_FLAG_RE.search(command):
             return True
-        if _has_risky_redirect(command):
+        if _has_risky_redirect(command, cwd):
             return True
 
     for key in _PATH_INPUT_KEYS:
@@ -312,11 +313,19 @@ def _norm_ws(text: str) -> str:
     return " ".join(text.split())
 
 
-def _risky_redirect_targets(command: str) -> list[str]:
+def _risky_redirect_targets(command: str, cwd: str) -> list[str]:
     """The redirect targets in *command* that :func:`_has_risky_redirect` flags.
 
     Kept in sync with :func:`_has_risky_redirect` (which now delegates here) so
     the risk test and the signature derivation can never diverge.
+
+    A target is risky if it is NOT provably a plain file inside *cwd*: an
+    absolute path, a `../` escape, a tilde/`$VAR` expansion (unknowable
+    statically), a sensitive-looking name, OR a relative name that resolves
+    OUTSIDE cwd via a symlink (`ln -s /etc/passwd x; echo … > x`) — the last
+    caught by realpath resolution (:func:`_inside_cwd`), which a pure string
+    check cannot see. Over-flagging only costs a prompt; under-flagging is the
+    bug, so anything unprovable fails toward risky.
     """
     targets: list[str] = []
     for pattern in (_REDIRECT_TARGET_RE, _REDIRECT_AMP_TARGET_RE):
@@ -325,9 +334,7 @@ def _risky_redirect_targets(command: str) -> list[str]:
             # Bash strips quotes and expands ~/$VAR BEFORE opening the file, so
             # the raw captured token differs from the path actually written:
             # `> "/etc/passwd"` opens /etc/passwd, `> ~/.bashrc` opens $HOME/….
-            # Normalize (drop the quote chars bash removes) before classifying,
-            # and treat any tilde/variable expansion as NOT provably in-cwd
-            # (fail toward risky — over-flagging only ever costs one prompt).
+            # Normalize (drop the quote chars bash removes) before classifying.
             target = raw.replace('"', "").replace("'", "")
             if target in _SAFE_REDIRECT_TARGETS:
                 continue
@@ -335,9 +342,10 @@ def _risky_redirect_targets(command: str) -> list[str]:
                 target.startswith("/")
                 or target.startswith("..")
                 or "../" in target
-                or target.startswith("~")
-                or "$" in target
+                or target.startswith("~")   # $HOME etc. — outside cwd
+                or "$" in target            # unexpandable var — unknowable
                 or re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE)
+                or not _inside_cwd(target, cwd)  # relative escape via symlink
             ):
                 targets.append(target)
     return targets
@@ -359,7 +367,7 @@ def _leading_verb(command: str) -> str:
     return verb
 
 
-def _bash_risky_signature(command: str) -> str | None:
+def _bash_risky_signature(command: str, cwd: str) -> str | None:
     """Signature for a Bash command already known to be RISKY, or None.
 
     Returns None (=> not policy-eligible, allow-once only) unless *command* is a
@@ -384,7 +392,7 @@ def _bash_risky_signature(command: str) -> str | None:
     if first not in _GENERALIZABLE_VERBS:
         return None
     tags = [_leading_verb(lowered)]
-    for target in _risky_redirect_targets(command):
+    for target in _risky_redirect_targets(command, cwd):
         tags.append("> " + target.lower())
     return " + ".join(sorted(set(tags)))
 
@@ -437,7 +445,7 @@ def signature_for(tool_name: str, tool_input: dict, cwd: str) -> str | None:
                     return None
             command = tool_input.get("command")
             if isinstance(command, str) and command.strip():
-                return _bash_risky_signature(command)
+                return _bash_risky_signature(command, cwd)
             return None
         # Every path-gated tool (Read/Write/Edit/NotebookEdit/…) is risky HERE
         # only because a path escaped cwd; a tool-name key would authorize the
