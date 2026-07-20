@@ -32,7 +32,13 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
+from telegram.error import (
+    BadRequest,
+    NetworkError,
+    RetryAfter,
+    TelegramError,
+    TimedOut,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -291,10 +297,18 @@ class TelegramIO:
         # BadRequest ("file is too big") with no handler here, so it used to
         # vanish silently. Tell the user instead of letting the handler
         # crash / the message disappear.
+        #
+        # Review fix: only the oversize case is a BadRequest we can safely
+        # swallow -- an unrelated BadRequest (expired/invalid file_id, etc.)
+        # must not be mislabeled as "too big", so it re-raises instead
+        # (mirrors this file's `_answer_quietly`/`_edit_callback_markup`
+        # convention of checking `str(exc).lower()` before handling).
         try:
             tg_file = await msg.voice.get_file()
             audio = bytes(await tg_file.download_as_bytearray())
-        except BadRequest:
+        except BadRequest as exc:
+            if "too big" not in str(exc).lower() and "too large" not in str(exc).lower():
+                raise
             logger.warning(
                 "voice download failed (likely >20MB Telegram cap), message %s",
                 msg.message_id,
@@ -319,9 +333,17 @@ class TelegramIO:
         # getFile cap raises BadRequest ("file is too big") with no handler
         # here, so it used to vanish silently. Tell the user instead of
         # letting the handler crash / the attachment disappear.
+        #
+        # Review fix: only the oversize case is a BadRequest we can safely
+        # swallow -- an unrelated BadRequest (expired/invalid file_id, etc.)
+        # must not be mislabeled as "too big", so it re-raises instead
+        # (mirrors this file's `_answer_quietly`/`_edit_callback_markup`
+        # convention of checking `str(exc).lower()` before handling).
         try:
             attachment = await _download_attachment(msg)
-        except BadRequest:
+        except BadRequest as exc:
+            if "too big" not in str(exc).lower() and "too large" not in str(exc).lower():
+                raise
             logger.warning(
                 "attachment download failed (likely >20MB Telegram cap), message %s",
                 msg.message_id,
@@ -442,6 +464,14 @@ class TelegramIO:
         ``_send_with_retry`` and the pending entry is registered only AFTER
         it succeeds; a persistent send failure returns ``""`` (same sentinel
         as a timeout) instead of leaving phantom state or raising.
+
+        Review fix: the except clause used to list only
+        ``(BadRequest, NetworkError, RetryAfter, TimedOut)``, but
+        ``telegram.error.Forbidden`` (bot blocked by the user), ``Conflict``,
+        ``InvalidToken``, etc. are siblings of ``NetworkError`` under
+        ``TelegramError`` and fell through uncaught -- contradicting this
+        docstring's "never raises" claim. Catching ``TelegramError`` (the
+        common base) keeps the same clean return for every Telegram failure.
         """
         clean_choices = _clean_choices(choices)
         if not clean_choices:
@@ -461,7 +491,7 @@ class TelegramIO:
                     reply_markup=InlineKeyboardMarkup(rows),
                 )
             )
-        except (BadRequest, NetworkError, RetryAfter, TimedOut):
+        except TelegramError:
             logger.exception(
                 "ask_user: send failed after retries for %s; no pending registered",
                 project,
@@ -567,6 +597,14 @@ class TelegramIO:
         it succeeds. A persistent send failure returns ``None`` instead of
         leaving phantom state or raising (never-crash posture, matching the
         rest of this module's send paths).
+
+        Review fix: the except clause used to list only
+        ``(BadRequest, NetworkError, RetryAfter, TimedOut)``, but
+        ``telegram.error.Forbidden`` (bot blocked by the user), ``Conflict``,
+        ``InvalidToken``, etc. are siblings of ``NetworkError`` under
+        ``TelegramError`` and fell through uncaught -- contradicting the
+        never-crash posture above. Catching ``TelegramError`` (the common
+        base) keeps the same clean return for every Telegram failure.
         """
         self._pending_off_seq += 1
         token = str(self._pending_off_seq)
@@ -590,7 +628,7 @@ class TelegramIO:
                     reply_markup=markup,
                 )
             )
-        except (BadRequest, NetworkError, RetryAfter, TimedOut):
+        except TelegramError:
             logger.exception(
                 "send_disabled_project_prompt: send failed after retries for "
                 "%s; no pending registered",

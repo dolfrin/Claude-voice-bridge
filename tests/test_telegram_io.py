@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 from voice_bridge.config import AUTONOMY_MODES, Config, EFFORT_LEVELS, TTS_BACKENDS
 from voice_bridge.telegram_io import (
@@ -348,6 +348,64 @@ async def test_handle_attachment_file_too_big_replies_and_does_not_crash():
     msg.reply_text.assert_awaited_once()
     reply = msg.reply_text.await_args.args[0]
     assert "per didelis" in reply
+
+
+# --------------------------------------------------------------------------
+# Review fix 2: only a "too big"/"too large" BadRequest is the oversize case.
+# An unrelated BadRequest (e.g. an expired/invalid file_id) must NOT be
+# mislabeled as "per didelis" -- it must re-raise instead.
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_handle_voice_unrelated_bad_request_is_not_reported_as_too_big():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    voice_obj = MagicMock()
+    voice_obj.get_file = AsyncMock(side_effect=BadRequest("wrong file_id"))
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    msg = make_message(message_id=22, user_id=42, voice=voice_obj)
+    msg.reply_text = AsyncMock()
+    update = MagicMock()
+    update.message = msg
+    update.callback_query = None
+
+    with pytest.raises(BadRequest):
+        await io._handle_voice(update, MagicMock())
+
+    assert received == []
+    for call in msg.reply_text.await_args_list:
+        assert "per didelis" not in call.args[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_attachment_unrelated_bad_request_is_not_reported_as_too_big():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    doc = MagicMock()
+    doc.file_name = "report.pdf"
+    doc.mime_type = "application/pdf"
+    doc.get_file = AsyncMock(side_effect=BadRequest("wrong file_id"))
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    msg = make_message(message_id=23, user_id=42)
+    msg.document = doc
+    msg.reply_text = AsyncMock()
+    update = MagicMock()
+    update.message = msg
+    update.callback_query = None
+
+    with pytest.raises(BadRequest):
+        await io._handle_attachment(update, MagicMock())
+
+    assert received == []
+    for call in msg.reply_text.await_args_list:
+        assert "per didelis" not in call.args[0]
 
 
 # --------------------------------------------------------------------------
@@ -814,6 +872,54 @@ async def test_ask_user_persistent_send_failure_leaks_no_pending_and_does_not_cr
 
     assert result == ""
     assert io._pending_asks == {}
+
+
+@pytest.mark.asyncio
+async def test_ask_user_forbidden_send_failure_returns_cleanly_and_does_not_crash(monkeypatch):
+    """Review fix 1: Forbidden ("bot was blocked by the user") is a sibling of
+    NetworkError under TelegramError, not caught by the old narrow
+    (BadRequest, NetworkError, RetryAfter, TimedOut) tuple -- it used to raise
+    straight out of ask_user, contradicting the docstring's "never raises"
+    claim. Must return the same "" sentinel as any other persistent send
+    failure, with no pending entry leaked."""
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=Forbidden("bot was blocked by the user"))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    result = await io.ask_user("qwing", "Rinktis?", ["A", "B"])
+
+    assert result == ""
+    assert io._pending_asks == {}
+
+
+@pytest.mark.asyncio
+async def test_send_disabled_project_prompt_forbidden_send_failure_returns_cleanly_and_does_not_crash(
+    monkeypatch,
+):
+    """Review fix 1: same Forbidden gap as ask_user, for
+    send_disabled_project_prompt's except clause."""
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=Forbidden("bot was blocked by the user"))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    result = await io.send_disabled_project_prompt("othersapp", "go")
+
+    assert result is None
+    assert io._pending_off_sends == {}
 
 
 @pytest.mark.asyncio

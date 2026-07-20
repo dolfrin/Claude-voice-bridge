@@ -489,6 +489,7 @@ async def test_save_attachments_batch_survives_unexpected_exception_in_one_item(
     assert saved[0].path is None
     assert saved[0].note is not None
     assert saved[1].path is not None
+    assert (tmp_path / saved[1].path).read_bytes() == b"hello"
 
 
 # --------------------------------------------------------------------------
