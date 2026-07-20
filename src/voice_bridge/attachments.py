@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import uuid
 import zipfile
 import zlib
 from dataclasses import dataclass
@@ -103,7 +104,19 @@ def _save_sync(cwd: str, attachments: list[dict]) -> list[SavedAttachment]:
                 )
                 continue
 
-            filename = f"{stamp}-{index:02d}-{_safe_filename(raw_name)}"
+            # Bug fix: `stamp` is computed once per BATCH and `index` is the
+            # position within that batch, so two attachments arriving in
+            # DIFFERENT Telegram messages (e.g. an album, or two quick
+            # messages) within the same second each start their own
+            # `_save_sync` call with index=1 and an identical `stamp`,
+            # producing the identical filename and silently overwriting one
+            # attachment with the other. A short uuid4 component makes every
+            # saved filename unique regardless of clock resolution or which
+            # batch produced it, while the human-readable timestamp+index
+            # prefix (and the original extension, via `_safe_filename`) is
+            # kept for a human skimming the folder.
+            unique = uuid.uuid4().hex[:8]
+            filename = f"{stamp}-{index:02d}-{unique}-{_safe_filename(raw_name)}"
             path = root / filename
             path.write_bytes(data)
 

@@ -293,6 +293,64 @@ async def test_non_whitelisted_voice_is_ignored_no_download():
 
 
 # --------------------------------------------------------------------------
+# Bug 3: a download over Telegram's ~20 MB getFile cap raises BadRequest;
+# this must reply to the user instead of silently dropping the attachment
+# and must not crash the handler.
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_handle_voice_file_too_big_replies_and_does_not_crash():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    voice_obj = MagicMock()
+    voice_obj.get_file = AsyncMock(side_effect=BadRequest("File is too big"))
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    msg = make_message(message_id=20, user_id=42, voice=voice_obj)
+    msg.reply_text = AsyncMock()
+    update = MagicMock()
+    update.message = msg
+    update.callback_query = None
+
+    await io._handle_voice(update, MagicMock())
+
+    assert received == []
+    msg.reply_text.assert_awaited_once()
+    reply = msg.reply_text.await_args.args[0]
+    assert "per didelis" in reply
+
+
+@pytest.mark.asyncio
+async def test_handle_attachment_file_too_big_replies_and_does_not_crash():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    doc = MagicMock()
+    doc.file_name = "huge.bin"
+    doc.mime_type = "application/octet-stream"
+    doc.get_file = AsyncMock(side_effect=BadRequest("File is too big"))
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    msg = make_message(message_id=21, user_id=42)
+    msg.document = doc
+    msg.reply_text = AsyncMock()
+    update = MagicMock()
+    update.message = msg
+    update.callback_query = None
+
+    await io._handle_attachment(update, MagicMock())
+
+    assert received == []
+    msg.reply_text.assert_awaited_once()
+    reply = msg.reply_text.await_args.args[0]
+    assert "per didelis" in reply
+
+
+# --------------------------------------------------------------------------
 # outbound: send_update + send_question
 # --------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -489,6 +547,77 @@ async def test_send_question_sends_alert_voice_when_bytes_provided():
     assert bot.send_voice.await_args.kwargs["voice"] == b"ALERT"
 
 
+# --------------------------------------------------------------------------
+# Bug 1: send_question truncates an oversized approval preview instead of
+# silently exceeding Telegram's 4096-char hard limit (buttons must stay on
+# the one message the user taps, so this truncates rather than chunks).
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_send_question_truncates_huge_preview_keeps_buttons_attached():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=700))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    huge_preview = "qwing — approval reikalingas:\n\n" + ("x" * 6000)
+
+    mid = await io.send_question("qwing", huge_preview, approval_token=9)
+
+    assert mid == 700
+    bot.send_message.assert_awaited_once()
+    sent_text = bot.send_message.await_args.kwargs["text"]
+    assert len(sent_text) <= 3500
+    assert "[truncated]" in sent_text
+
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == ["apv:9:1", "apv:9:0"]
+
+
+@pytest.mark.asyncio
+async def test_send_question_short_preview_is_unchanged():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=701))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    mid = await io.send_question("qwing", "run: git push", approval_token=11)
+
+    assert mid == 701
+    sent_text = bot.send_message.await_args.kwargs["text"]
+    assert sent_text == "[qwing] run: git push"
+    assert "[truncated]" not in sent_text
+
+
+@pytest.mark.asyncio
+async def test_send_question_retries_transient_error_via_send_with_retry(monkeypatch):
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    calls: list[dict] = []
+
+    async def flaky(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RetryAfter(retry_after=0)
+        return MagicMock(message_id=702)
+
+    bot.send_message = AsyncMock(side_effect=flaky)
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    mid = await io.send_question("qwing", "run: git push", approval_token=12)
+
+    assert mid == 702
+    assert len(calls) == 2
+
+
 @pytest.mark.asyncio
 async def test_approval_callback_resolves_and_edits_message():
     resolved: list[tuple[int, bool]] = []
@@ -615,6 +744,125 @@ async def test_ask_user_sends_buttons_and_returns_selected_choice():
 
     assert await task == "B"
     query.edit_message_text.assert_awaited_once_with("Selected: B")
+
+
+# --------------------------------------------------------------------------
+# Bug 2: ask_user / send_disabled_project_prompt must send via
+# _send_with_retry and register their pending entry only AFTER a successful
+# send -- registering it first (the old bug) leaks a phantom pending entry
+# that can never resolve when the send itself failed.
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_ask_user_retries_then_registers_pending_after_success(monkeypatch):
+    # NOTE: a genuine (unpatched) sleep reference is kept for the polling
+    # loop below -- _send_with_retry's own internal sleep is replaced with a
+    # no-delay stub so the retry itself doesn't add real wall-clock time, but
+    # the poll needs a REAL suspension point to let the created task actually
+    # get scheduled and run between checks.
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    attempts: list[dict] = []
+
+    async def flaky(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise RetryAfter(retry_after=0)
+        return MagicMock(message_id=800)
+
+    bot.send_message = AsyncMock(side_effect=flaky)
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    task = asyncio.create_task(io.ask_user("qwing", "Rinktis?", ["A", "B"]))
+    for _ in range(50):
+        if len(attempts) >= 2 and io._pending_asks:
+            break
+        await real_sleep(0)
+
+    assert len(attempts) == 2  # first attempt raised, retry succeeded
+    assert len(io._pending_asks) == 1
+    token = next(iter(io._pending_asks))
+    future, choices = io._pending_asks[token]
+    assert choices == ["A", "B"]
+    future.set_result("B")
+
+    assert await task == "B"
+    assert io._pending_asks == {}
+
+
+@pytest.mark.asyncio
+async def test_ask_user_persistent_send_failure_leaks_no_pending_and_does_not_crash(monkeypatch):
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=NetworkError("down"))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    result = await io.ask_user("qwing", "Rinktis?", ["A", "B"])
+
+    assert result == ""
+    assert io._pending_asks == {}
+
+
+@pytest.mark.asyncio
+async def test_send_disabled_project_prompt_retries_then_registers_pending_after_success(monkeypatch):
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    attempts: list[dict] = []
+
+    async def flaky(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise RetryAfter(retry_after=0)
+        return MagicMock(message_id=900)
+
+    bot.send_message = AsyncMock(side_effect=flaky)
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    mid = await io.send_disabled_project_prompt("othersapp", "go")
+
+    assert mid == 900
+    assert len(attempts) == 2
+    assert len(io._pending_off_sends) == 1
+    token = next(iter(io._pending_off_sends))
+    assert io._pending_off_sends[token] == ("othersapp", "go")
+
+
+@pytest.mark.asyncio
+async def test_send_disabled_project_prompt_persistent_failure_leaks_no_pending_and_does_not_crash(monkeypatch):
+    async def fake_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=NetworkError("down"))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    result = await io.send_disabled_project_prompt("othersapp", "go")
+
+    assert result is None
+    assert io._pending_off_sends == {}
 
 
 # --------------------------------------------------------------------------

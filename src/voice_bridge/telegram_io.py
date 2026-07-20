@@ -121,6 +121,35 @@ _MESSAGE_LIMIT = 4096
 _CAPTION_LIMIT = 1024
 _RETRY_BACKOFF = (0.5, 1.0, 2.0)
 
+# Bug fix (audit-confirmed): send_question sends exactly ONE message so its
+# inline Allow/Deny buttons stay attached to the text being approved -- it
+# must NOT chunk like _send_text_chunks does. Without a cap, an approval
+# preview built from a huge Bash command can exceed Telegram's 4096-char hard
+# limit, the send raises, and the approval is silently lost (times out to
+# DENY, and the user never even sees the prompt). Truncating instead of
+# chunking keeps the buttons on the one message the user taps.
+_APPROVAL_PREVIEW_LIMIT = 1500
+_APPROVAL_TRUNCATED_MARKER = "…[truncated]"
+
+# Bug fix: Telegram's bot API refuses to hand back a file over ~20 MB via
+# getFile (raises BadRequest), which used to have no handler -- the
+# attachment just vanished with no feedback to the user.
+_FILE_TOO_LARGE_MSG = (
+    "Failas per didelis (Telegram botų riba ~20 MB) — atsiųsk mažesnį arba per git."
+)
+
+
+def _truncate_approval_preview(text: str, limit: int = _APPROVAL_PREVIEW_LIMIT) -> str:
+    """Cap an approval preview to `limit` chars plus a truncation marker.
+
+    Keeps the total ``send_question`` message (project prefix + this text)
+    comfortably under Telegram's 4096-char hard cap, even for a giant Bash
+    command preview.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit] + _APPROVAL_TRUNCATED_MARKER
+
 
 def _chunk_text(text: str, limit: int = _MESSAGE_LIMIT) -> list[str]:
     """Split ``text`` into pieces no longer than ``limit`` characters.
@@ -258,8 +287,20 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        tg_file = await msg.voice.get_file()
-        audio = bytes(await tg_file.download_as_bytearray())
+        # Bug fix: a voice note over Telegram's ~20 MB getFile cap raises
+        # BadRequest ("file is too big") with no handler here, so it used to
+        # vanish silently. Tell the user instead of letting the handler
+        # crash / the message disappear.
+        try:
+            tg_file = await msg.voice.get_file()
+            audio = bytes(await tg_file.download_as_bytearray())
+        except BadRequest:
+            logger.warning(
+                "voice download failed (likely >20MB Telegram cap), message %s",
+                msg.message_id,
+            )
+            await msg.reply_text(_FILE_TOO_LARGE_MSG)
+            return
         await self.on_user_message({
             "message_id": msg.message_id,
             "reply_to": self._reply_to(msg),
@@ -274,7 +315,19 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        attachment = await _download_attachment(msg)
+        # Bug fix: a document/photo/audio/video over Telegram's ~20 MB
+        # getFile cap raises BadRequest ("file is too big") with no handler
+        # here, so it used to vanish silently. Tell the user instead of
+        # letting the handler crash / the attachment disappear.
+        try:
+            attachment = await _download_attachment(msg)
+        except BadRequest:
+            logger.warning(
+                "attachment download failed (likely >20MB Telegram cap), message %s",
+                msg.message_id,
+            )
+            await msg.reply_text(_FILE_TOO_LARGE_MSG)
+            return
         if attachment is None:
             return
         await self.on_user_message({
@@ -361,6 +414,7 @@ class TelegramIO:
                 InlineKeyboardButton(
                     "❌ Neleisti", callback_data=f"apv:{approval_token}:0"),
             ]])
+        text = _truncate_approval_preview(text)
         msg = await _send_with_retry(
             lambda: bot.send_message(
                 chat_id=self._chat_id,
@@ -379,23 +433,44 @@ class TelegramIO:
         return msg.message_id
 
     async def ask_user(self, project: str, question: str, choices: list[str]) -> str:
+        """Ask a tappable multiple-choice question; return the chosen label.
+
+        Reliability fix (audit-confirmed): the pending future used to be
+        registered in ``_pending_asks`` BEFORE the send, so a transient send
+        failure (RetryAfter/network) would both drop the question AND leak a
+        pending entry that could never resolve. The send now goes through
+        ``_send_with_retry`` and the pending entry is registered only AFTER
+        it succeeds; a persistent send failure returns ``""`` (same sentinel
+        as a timeout) instead of leaving phantom state or raising.
+        """
         clean_choices = _clean_choices(choices)
         if not clean_choices:
             clean_choices = ["Yes", "No"]
         self._pending_ask_seq += 1
         token = str(self._pending_ask_seq)
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        self._pending_asks[token] = (future, clean_choices)
         rows = [
             [InlineKeyboardButton(choice, callback_data=f"ask:{token}:{idx}")]
             for idx, choice in enumerate(clean_choices)
         ]
-        await self.app.bot.send_message(
-            chat_id=self._chat_id,
-            text=f"[{project}] {question}",
-            reply_markup=InlineKeyboardMarkup(rows),
-        )
+        bot = self.app.bot
+        try:
+            await _send_with_retry(
+                lambda: bot.send_message(
+                    chat_id=self._chat_id,
+                    text=f"[{project}] {question}",
+                    reply_markup=InlineKeyboardMarkup(rows),
+                )
+            )
+        except (BadRequest, NetworkError, RetryAfter, TimedOut):
+            logger.exception(
+                "ask_user: send failed after retries for %s; no pending registered",
+                project,
+            )
+            return ""
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_asks[token] = (future, clean_choices)
         try:
             return await asyncio.wait_for(future, timeout=self.cfg.approval_timeout)
         except asyncio.TimeoutError:
@@ -481,11 +556,20 @@ class TelegramIO:
             ids.append(voice_msg.message_id)
         return ids
 
-    async def send_disabled_project_prompt(self, project: str, text: str) -> int:
-        """Ask whether to enable a disabled project and send the pending turn."""
+    async def send_disabled_project_prompt(self, project: str, text: str) -> int | None:
+        """Ask whether to enable a disabled project and send the pending turn.
+
+        Reliability fix (audit-confirmed): the pending entry used to be
+        registered in ``_pending_off_sends`` BEFORE the send, so a transient
+        send failure (RetryAfter/network) would both drop the prompt AND leak
+        a pending entry nothing could ever resolve. The send now goes through
+        ``_send_with_retry`` and the pending entry is registered only AFTER
+        it succeeds. A persistent send failure returns ``None`` instead of
+        leaving phantom state or raising (never-crash posture, matching the
+        rest of this module's send paths).
+        """
         self._pending_off_seq += 1
         token = str(self._pending_off_seq)
-        self._pending_off_sends[token] = (project, text)
         markup = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
@@ -494,14 +578,26 @@ class TelegramIO:
             ],
             [InlineKeyboardButton("Cancel", callback_data=f"offcancel:{token}")],
         ])
-        msg = await self.app.bot.send_message(
-            chat_id=self._chat_id,
-            text=(
-                f"[bridge] {project} is disabled.\n"
-                "Enable the project and send the last message?"
-            ),
-            reply_markup=markup,
-        )
+        bot = self.app.bot
+        try:
+            msg = await _send_with_retry(
+                lambda: bot.send_message(
+                    chat_id=self._chat_id,
+                    text=(
+                        f"[bridge] {project} is disabled.\n"
+                        "Enable the project and send the last message?"
+                    ),
+                    reply_markup=markup,
+                )
+            )
+        except (BadRequest, NetworkError, RetryAfter, TimedOut):
+            logger.exception(
+                "send_disabled_project_prompt: send failed after retries for "
+                "%s; no pending registered",
+                project,
+            )
+            return None
+        self._pending_off_sends[token] = (project, text)
         return msg.message_id
 
     # --- /panel + callbacks ---------------------------------------------

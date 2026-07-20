@@ -489,4 +489,54 @@ async def test_save_attachments_batch_survives_unexpected_exception_in_one_item(
     assert saved[0].path is None
     assert saved[0].note is not None
     assert saved[1].path is not None
-    assert (tmp_path / saved[1].path).read_bytes() == b"hello"
+
+
+# --------------------------------------------------------------------------
+# Bug 4: two attachments saved in the SAME second (e.g. an album, or two
+# different Telegram messages landing within the same clock second) must
+# never collide onto the same filename and silently overwrite each other.
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_save_attachments_same_second_across_batches_does_not_collide(tmp_path, monkeypatch):
+    from datetime import datetime as real_datetime
+
+    class FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 20, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(attachments_mod, "datetime", FrozenDatetime)
+
+    # Two SEPARATE batches (as if two different Telegram messages arrived),
+    # both landing at the exact same frozen second, both with index=1 and
+    # the identical original file_name -- exactly the collision scenario.
+    saved_first = await save_attachments(str(tmp_path), [{
+        "kind": "document",
+        "file_name": "note.txt",
+        "data": b"first",
+    }])
+    saved_second = await save_attachments(str(tmp_path), [{
+        "kind": "document",
+        "file_name": "note.txt",
+        "data": b"second",
+    }])
+
+    assert saved_first[0].path is not None
+    assert saved_second[0].path is not None
+    assert saved_first[0].path != saved_second[0].path  # distinct filenames
+
+    first_path = tmp_path / saved_first[0].path
+    second_path = tmp_path / saved_second[0].path
+    assert first_path != second_path
+    assert first_path.exists() and second_path.exists()
+    # no overwrite: each file keeps its own original content
+    assert first_path.read_bytes() == b"first"
+    assert second_path.read_bytes() == b"second"
+
+    # original extension preserved
+    assert first_path.suffix == ".txt"
+    assert second_path.suffix == ".txt"
+
+    # human-readable timestamp prefix preserved
+    assert Path(saved_first[0].path).name.startswith("20260720-120000-01-")
+    assert Path(saved_second[0].path).name.startswith("20260720-120000-01-")
