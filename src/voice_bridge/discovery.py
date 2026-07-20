@@ -10,6 +10,25 @@ from urllib.parse import unquote, urlparse
 from .config import ProjectConfig
 
 
+def encode_project_dir(cwd: str) -> str:
+    """Return the ``~/.claude/projects/<dir>`` name Claude Code uses for *cwd*.
+
+    Claude Code encodes a project's cwd by replacing EVERY character outside
+    ``[A-Za-z0-9]`` with ``-`` — not just the path separator. So
+    ``/home/home/Projects/AI SHMARA`` becomes ``-home-home-Projects-AI-SHMARA``
+    and ``.../EcoGun_ARCHYVAS`` becomes ``...-EcoGun-ARCHYVAS`` (verified on
+    disk via ``ls ~/.claude/projects``). A naive ``cwd.replace("/", "-")``
+    only handles the separator and silently leaves ``_``, spaces, ``.``,
+    ``(`` etc. untouched, which mismatches the real directory name for any
+    project whose path contains them.
+
+    Single source of truth: both the session-gist lookup (``catchup.py``)
+    and the local-history discovery below must encode a cwd identically, or
+    one of them will silently stop finding real project dirs.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
 def discover_projects(
     limit: int,
     home: Path | None = None,
@@ -115,7 +134,7 @@ def _claude_history_paths(home: Path, projects_root: Path):
     for project_dir in projects_root.iterdir():
         if not project_dir.is_dir():
             continue
-        encoded = "-" + str(project_dir.resolve()).lstrip("/").replace("/", "-")
+        encoded = encode_project_dir(str(project_dir.resolve()))
         if encoded in encoded_history:
             yield project_dir
 

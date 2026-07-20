@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -46,7 +47,12 @@ def _make_git_repo(path):
 
 
 def _write_session(projects_root, cwd, session_id, entries, mtime=None):
-    encoded = str(cwd).replace("/", "-")
+    # Real Claude Code encoding: every char outside [A-Za-z0-9] -> '-', not
+    # just '/'. Plain "/" -> "-" would (re)hide the bug this module fixes:
+    # pytest's tmp_path is itself named after the test function and so
+    # contains underscores in its ANCESTRY regardless of the leaf dir chosen
+    # by a given test.
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
     d = projects_root / encoded
     d.mkdir(parents=True, exist_ok=True)
     f = d / f"{session_id}.jsonl"
@@ -201,6 +207,58 @@ async def test_build_catchup_respects_max_chars(tmp_path):
         str(repo), projects_root=str(projects_root), max_chars=500,
     )
     assert len(block) <= 500
+
+
+async def test_build_catchup_finds_session_for_path_with_underscore_and_space(tmp_path):
+    """CONFIRMED bug regression: Claude Code names a project's
+    ~/.claude/projects/<dir> by replacing EVERY character outside
+    [A-Za-z0-9] with '-' (not just '/') — e.g. '/tmp/My_Proj Dir' becomes
+    '-tmp-My-Proj-Dir'. The session-dir lookup must use that SAME encoding
+    or it silently misses any project whose path has '_', a space, '.', '('
+    etc. The expected dir name below is computed independently of
+    voice_bridge's implementation (real encoding verified via
+    ``ls ~/.claude/projects``), not by calling the code under test.
+
+    ``cwd`` is a FABRICATED path (never created on disk) rather than a
+    ``tmp_path`` subdirectory: pytest's own tmp dirs are named after the test
+    function (e.g. ``.../test_build_catchup_finds_sessi0``) and so contain
+    underscores themselves, which would smuggle the very bug this test
+    targets into the "control" side too. ``build_catchup``'s session lookup
+    doesn't require ``cwd`` to exist — only ``projects_root/<encoded>`` does
+    — and a nonexistent ``cwd`` also makes ``git -C cwd`` fail harmlessly,
+    which is fine since this test only cares about the session section."""
+    cwd = "/home/deploy/My_Proj Dir"
+    projects_root = tmp_path / "projects"
+    real_encoded = re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    session_dir = projects_root / real_encoded
+    session_dir.mkdir(parents=True)
+    (session_dir / "sess.jsonl").write_text(
+        json.dumps(_user("underscore and space project message")) + "\n"
+    )
+
+    block = await build_catchup(cwd, projects_root=str(projects_root))
+
+    assert "underscore and space project message" in block
+
+
+async def test_build_catchup_finds_session_for_purely_alnum_path(tmp_path):
+    """Regression: a path with no '_'/space/'.'/'(' etc. anywhere in it (this
+    repo's own kind of path) must keep working exactly as before the
+    encoding fix. Uses a fabricated ``cwd`` (see test above) so pytest's own
+    underscored tmp-dir naming can't leak into what's meant to be a clean,
+    fully-alphanumeric control case."""
+    cwd = "/home/deploy/PlainAlnumProject123"
+    projects_root = tmp_path / "projects"
+    real_encoded = re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    session_dir = projects_root / real_encoded
+    session_dir.mkdir(parents=True)
+    (session_dir / "sess.jsonl").write_text(
+        json.dumps(_user("plain alnum project message")) + "\n"
+    )
+
+    block = await build_catchup(cwd, projects_root=str(projects_root))
+
+    assert "plain alnum project message" in block
 
 
 async def test_build_catchup_never_raises_on_bad_cwd(tmp_path):

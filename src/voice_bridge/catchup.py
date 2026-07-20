@@ -37,6 +37,8 @@ import sys
 import time
 import unicodedata
 
+from .discovery import encode_project_dir
+
 logger = logging.getLogger(__name__)
 
 # Per-git-call wall-clock timeout: a wedged/slow git must never stall a turn.
@@ -284,7 +286,11 @@ def _session_gist(
         root = projects_root or os.path.expanduser(
             os.path.join("~", ".claude", "projects")
         )
-        encoded = cwd.replace("/", "-")
+        # Must match the REAL ~/.claude/projects/<dir> encoding Claude Code
+        # uses (every non-alnum char -> '-', not just '/') or this silently
+        # misses any project whose path has '_', a space, '.', '(' etc. See
+        # encode_project_dir's docstring for the on-disk-verified details.
+        encoded = encode_project_dir(cwd)
         session_dir = os.path.join(root, encoded)
         if not os.path.isdir(session_dir):
             return ""

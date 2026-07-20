@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from voice_bridge.config import ProjectConfig
 from voice_bridge.discovery import discover_projects, merge_projects
@@ -68,13 +69,39 @@ def test_discover_projects_reads_claude_history_for_existing_project_dirs(tmp_pa
     home = tmp_path / "home"
     project = home / "Projects" / "DexscreenerUp"
     project.mkdir(parents=True)
-    encoded = "-" + str(project.resolve()).lstrip("/").replace("/", "-")
+    # Real Claude Code encoding: every char outside [A-Za-z0-9] -> '-'. Using
+    # the plain lstrip("/").replace("/", "-") formula here would (re)hide the
+    # bug: pytest's own tmp dir is named after this test function and so
+    # contains underscores in its ANCESTRY regardless of the leaf name chosen
+    # above, e.g. ".../test_discover_projects_reads_claude_history_..." — the
+    # old formula left those alone while real Claude Code dashes them too.
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", str(project.resolve()))
     (home / ".claude" / "projects" / encoded).mkdir(parents=True)
 
     projects = discover_projects(limit=10, home=home)
 
     assert [(p.name, p.cwd, p.enabled) for p in projects] == [
         ("dexscreenerup", str(project.resolve()), False),
+    ]
+
+
+def test_discover_projects_reads_claude_history_for_dirs_with_underscore_and_space(tmp_path):
+    """CONFIRMED bug regression: Claude Code encodes a project's cwd into its
+    ~/.claude/projects/<dir> name by replacing EVERY char outside
+    [A-Za-z0-9] with '-' (not just '/'), so a path containing '_' or a space
+    must still be matched. The expected dir name here is computed
+    independently of voice_bridge's implementation (real encoding verified
+    via ``ls ~/.claude/projects``), not by calling the code under test."""
+    home = tmp_path / "home"
+    project = home / "Projects" / "Eco_Gun ARCHYVAS"
+    project.mkdir(parents=True)
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", str(project.resolve()))
+    (home / ".claude" / "projects" / encoded).mkdir(parents=True)
+
+    projects = discover_projects(limit=10, home=home)
+
+    assert [(p.name, p.cwd, p.enabled) for p in projects] == [
+        ("eco-gun-archyvas", str(project.resolve()), False),
     ]
 
 
