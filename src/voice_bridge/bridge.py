@@ -637,9 +637,15 @@ class _Controls:
         """Every daily schedule (optionally one project's), for /schedule list."""
         return await self._store.list_schedules(project)
 
-    async def add_schedule(self, project: str, hhmm: str, prompt: str) -> int:
-        """Add a daily schedule; returns its new id (for /schedule add)."""
-        return await self._store.add_schedule(project, hhmm, prompt)
+    async def add_schedule(
+        self, project: str, hhmm: str, prompt: str, last_run: str | None = None
+    ) -> int:
+        """Add a daily schedule; returns its new id (for /schedule add).
+
+        *last_run* is seeded by the /schedule handler (today's date when the
+        time has already passed) so an afternoon-added morning schedule first
+        fires tomorrow, not immediately."""
+        return await self._store.add_schedule(project, hhmm, prompt, last_run)
 
     async def remove_schedule(self, schedule_id: int) -> bool:
         """Delete a schedule by id (for /schedule remove)."""
@@ -1066,23 +1072,28 @@ def _local_now() -> tuple[str, str]:
 
 def _make_schedule_deliver(
     sessions: "SessionManager", store: Store
-) -> Callable[[str, str], Awaitable[None]]:
+) -> Callable[[str, str], Awaitable[bool]]:
     """Build the scheduler's deliver closure: the SAME path an inbound turn uses.
 
-    Skips a disabled project (a schedule can outlive an ``/off``) and otherwise
-    delivers the prompt via ``sessions.deliver`` so the project's normal
-    outbound (voice+text to Telegram) reports back exactly as if the user had
-    typed it. Kept a thin closure so :func:`run_scheduler` stays store/session
-    agnostic and unit-testable.
+    Returns True when the turn was actually delivered, False when it was skipped
+    because the project is disabled or no longer exists (a schedule can outlive
+    an ``/off`` or a project removal). ``run_scheduler`` uses that to suppress
+    the "task launched" notice for a turn that never ran. On the happy path the
+    prompt goes through ``sessions.deliver`` so the project's normal outbound
+    (voice+text to Telegram) reports back exactly as if the user had typed it.
+    Kept a thin closure so :func:`run_scheduler` stays store/session agnostic and
+    unit-testable.
     """
 
-    async def deliver(project: str, prompt: str) -> None:
+    async def deliver(project: str, prompt: str) -> bool:
         if not await store.is_enabled(project):
             logger.info(
-                "scheduler: project %s disabled; skipping scheduled turn", project
+                "scheduler: project %s disabled/unknown; skipping scheduled turn",
+                project,
             )
-            return
+            return False
         await sessions.deliver(project, prompt)
+        return True
 
     return deliver
 

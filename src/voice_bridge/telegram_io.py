@@ -117,7 +117,9 @@ class Controls(Protocol):
     async def list_policies(self) -> list[tuple[str, str]]: ...
     async def clear_policies(self, project: str | None) -> None: ...
     async def list_schedules(self, project: str | None = None) -> list[dict]: ...
-    async def add_schedule(self, project: str, hhmm: str, prompt: str) -> int: ...
+    async def add_schedule(
+        self, project: str, hhmm: str, prompt: str, last_run: str | None = None
+    ) -> int: ...
     async def remove_schedule(self, schedule_id: int) -> bool: ...
     async def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> bool: ...
 
@@ -1519,37 +1521,45 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         args = list(context.args or [])
-        if not args or args[0] == "list":
-            schedules = await self.controls.list_schedules()
-            await msg.reply_text(_format_schedules(schedules))
-            return
-
-        sub = args[0]
-        if sub in {"remove", "rm", "del"}:
-            sid = _parse_schedule_id(args[1] if len(args) > 1 else None)
-            if sid is None:
-                await msg.reply_text("Naudojimas: /schedule remove <id>")
+        # A first arg that is a KNOWN project WITH the 3-arg add shape is always
+        # an add — so a project literally named "list"/"on"/"remove" is never
+        # shadowed by a subcommand keyword. Only when it is NOT such an add do we
+        # interpret args[0] as a subcommand.
+        first_is_add = (
+            len(args) >= 3 and self._resolve_project_arg(args[0])[1] is None
+        )
+        if not first_is_add:
+            if not args or args[0] == "list":
+                schedules = await self.controls.list_schedules()
+                await msg.reply_text(_format_schedules(schedules))
                 return
-            removed = await self.controls.remove_schedule(sid)
-            await msg.reply_text(
-                f"Pašalinta suplanuota užduotis {sid}." if removed
-                else f"Nerasta suplanuota užduotis su id {sid}."
-            )
-            return
 
-        if sub in {"on", "off"}:
-            sid = _parse_schedule_id(args[1] if len(args) > 1 else None)
-            if sid is None:
-                await msg.reply_text(f"Naudojimas: /schedule {sub} <id>")
+            sub = args[0]
+            if sub in {"remove", "rm", "del"}:
+                sid = _parse_schedule_id(args[1] if len(args) > 1 else None)
+                if sid is None:
+                    await msg.reply_text("Naudojimas: /schedule remove <id>")
+                    return
+                removed = await self.controls.remove_schedule(sid)
+                await msg.reply_text(
+                    f"Pašalinta suplanuota užduotis {sid}." if removed
+                    else f"Nerasta suplanuota užduotis su id {sid}."
+                )
                 return
-            enabled = sub == "on"
-            ok = await self.controls.set_schedule_enabled(sid, enabled)
-            state = "įjungta" if enabled else "išjungta"
-            await msg.reply_text(
-                f"Suplanuota užduotis {sid} {state}." if ok
-                else f"Nerasta suplanuota užduotis su id {sid}."
-            )
-            return
+
+            if sub in {"on", "off"}:
+                sid = _parse_schedule_id(args[1] if len(args) > 1 else None)
+                if sid is None:
+                    await msg.reply_text(f"Naudojimas: /schedule {sub} <id>")
+                    return
+                enabled = sub == "on"
+                ok = await self.controls.set_schedule_enabled(sid, enabled)
+                state = "įjungta" if enabled else "išjungta"
+                await msg.reply_text(
+                    f"Suplanuota užduotis {sid} {state}." if ok
+                    else f"Nerasta suplanuota užduotis su id {sid}."
+                )
+                return
 
         # Otherwise: add. Needs <project> <HH:MM> <prompt...>.
         usage = "Naudojimas: /schedule <projektas> <HH:MM> <užduotis>"
@@ -1568,8 +1578,15 @@ class TelegramIO:
         if not prompt:
             await msg.reply_text(usage)
             return
-        await self.controls.add_schedule(project, hhmm, prompt)
-        await msg.reply_text(f"⏰ Suplanuota: {project} kasdien {hhmm}")
+        # If the time has already passed for today (local), seed last_run=today
+        # so a morning schedule added in the afternoon first fires TOMORROW,
+        # not on the next tick (~30s later).
+        now = datetime.datetime.now()
+        first_tomorrow = hhmm <= now.strftime("%H:%M")
+        last_run = now.date().isoformat() if first_tomorrow else None
+        await self.controls.add_schedule(project, hhmm, prompt, last_run=last_run)
+        suffix = " (pirmą kartą rytoj)" if first_tomorrow else ""
+        await msg.reply_text(f"⏰ Suplanuota: {project} kasdien {hhmm}{suffix}")
 
     async def _cmd_handoff(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

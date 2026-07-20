@@ -148,8 +148,9 @@ class FakeControls:
         self.calls.append(("list_schedules", project))
         return list(getattr(self, "_schedules", []))
 
-    async def add_schedule(self, project, hhmm, prompt):
+    async def add_schedule(self, project, hhmm, prompt, last_run=None):
         self.calls.append(("add_schedule", project, hhmm, prompt))
+        self.last_add_last_run = last_run
         return 1
 
     async def remove_schedule(self, schedule_id):
@@ -3242,6 +3243,27 @@ async def test_cmd_schedule_add_valid():
     msg.reply_text.assert_awaited_once()
     reply = msg.reply_text.await_args.args[0]
     assert "qwing" in reply and "07:30" in reply
+
+
+@pytest.mark.asyncio
+async def test_cmd_schedule_add_project_named_like_a_subcommand():
+    # A project literally named "on" (or "list"/"remove"/…) must still be
+    # schedulable: the 3-arg add form wins over the subcommand keyword.
+    controls = FakeControls()
+    controls._snapshot.append(
+        {"project": "on", "enabled": True, "mode": "safe", "voice": "alloy",
+         "engine": "openai", "last_active": False, "cwd": "/x/on", "verbose": False}
+    )
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    msg = make_message(user_id=42, text="/schedule on 7:30 do it")
+    msg.reply_text = AsyncMock()
+    update = MagicMock(message=msg)
+
+    await io._cmd_schedule(update, MagicMock(args=["on", "7:30", "do", "it"]))
+
+    assert ("add_schedule", "on", "07:30", "do it") in controls.calls
+    # NOT interpreted as `/schedule on <id>` (enable) — no enable call happened.
+    assert not any(c[0] == "set_schedule_enabled" for c in controls.calls)
 
 
 @pytest.mark.asyncio

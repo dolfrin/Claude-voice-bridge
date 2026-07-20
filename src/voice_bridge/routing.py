@@ -463,12 +463,22 @@ class Store:
     # 07:34 still fires) with NO catch-up storms (one fire per day). All values
     # are param-bound; no user text is interpolated into SQL.
 
-    async def add_schedule(self, project: str, hhmm: str, prompt: str) -> int:
-        """Insert a new daily schedule and return its new id."""
+    async def add_schedule(
+        self, project: str, hhmm: str, prompt: str, last_run: str | None = None
+    ) -> int:
+        """Insert a new daily schedule and return its new id.
+
+        *last_run* seeds the per-day dedup column. The caller passes today's
+        ISO date when *hhmm* has already passed for today, so a schedule added
+        in the afternoon for "07:30" first fires TOMORROW morning rather than
+        immediately on the next tick. Left NULL, the schedule is eligible on the
+        very next tick once ``hhmm <= now`` (the intended catch-up behaviour).
+        """
         async with aiosqlite.connect(self.db_path) as db:
             cur = await db.execute(
-                "INSERT INTO schedules (project, hhmm, prompt) VALUES (?, ?, ?)",
-                (project, hhmm, prompt),
+                "INSERT INTO schedules (project, hhmm, prompt, last_run) "
+                "VALUES (?, ?, ?, ?)",
+                (project, hhmm, prompt, last_run),
             )
             await db.commit()
             return cur.lastrowid

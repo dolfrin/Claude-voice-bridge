@@ -76,6 +76,7 @@ def _collectors():
 
     async def deliver(project, prompt):
         delivered.append((project, prompt))
+        return True  # delivered (not skipped) -> notify fires
 
     async def notify(project, prompt):
         notified.append((project, prompt))
@@ -199,6 +200,7 @@ async def test_deliver_exception_does_not_stop_loop_or_refire(tmp_db):
     async def deliver(project, prompt):
         if project == "bad":
             raise RuntimeError("deliver down")
+        return True
 
     async def notify(project, prompt):
         notified.append((project, prompt))
@@ -217,6 +219,29 @@ async def test_deliver_exception_does_not_stop_loop_or_refire(tmp_db):
     # deliver failure (no crash loop).
     by_id = {s["id"]: s["last_run"] for s in await store.list_schedules()}
     assert by_id[bad_id] == "2026-07-21"
+
+
+@pytest.mark.asyncio
+async def test_skipped_deliver_does_not_notify(tmp_db):
+    # A deliver that returns False (project disabled/removed) means nothing ran,
+    # so the "task launched" notice must NOT be posted — otherwise a schedule
+    # outliving its project would ping a false notice every day.
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_schedule("gone", "07:00", "do it")
+    notified: list[tuple[str, str]] = []
+
+    async def deliver(project, prompt):
+        return False  # skipped (disabled/unknown project)
+
+    async def notify(project, prompt):
+        notified.append((project, prompt))
+
+    await _run_once(store, deliver, notify, ("2026-07-21", "07:01"))
+
+    assert notified == []  # no false "launched" notice
+    # It WAS marked ran (won't spin re-firing), just silently skipped.
+    assert (await store.list_schedules())[0]["last_run"] == "2026-07-21"
 
 
 @pytest.mark.asyncio

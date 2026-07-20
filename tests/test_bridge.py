@@ -119,13 +119,13 @@ class FakeStore:
     def __post_schedule_init(self):
         pass
 
-    async def add_schedule(self, project, hhmm, prompt):
+    async def add_schedule(self, project, hhmm, prompt, last_run=None):
         rows = getattr(self, "_schedules", None)
         if rows is None:
             rows = self._schedules = []
         sid = len(rows) + 1
         rows.append({"id": sid, "project": project, "hhmm": hhmm,
-                     "prompt": prompt, "enabled": True, "last_run": None})
+                     "prompt": prompt, "enabled": True, "last_run": last_run})
         return sid
 
     async def list_schedules(self, project=None):

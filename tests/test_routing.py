@@ -701,6 +701,21 @@ async def test_due_schedules_last_run_dedup(tmp_db):
 
 
 @pytest.mark.asyncio
+async def test_add_schedule_last_run_seed_defers_first_fire_to_next_day(tmp_db):
+    # Seeding last_run=today (the /schedule handler does this when the time has
+    # already passed) keeps a schedule from firing immediately the same day.
+    store = Store(tmp_db)
+    await store.init()
+    sid = await store.add_schedule("qwing", "07:30", "morning CI",
+                                   last_run="2026-07-21")
+
+    # same day, time already passed -> NOT due (would otherwise fire at once)
+    assert await store.due_schedules("2026-07-21", "15:00") == []
+    # next day -> due
+    assert {r["id"] for r in await store.due_schedules("2026-07-22", "07:30")} == {sid}
+
+
+@pytest.mark.asyncio
 async def test_mark_schedule_ran_persists(tmp_db):
     store = Store(tmp_db)
     await store.init()

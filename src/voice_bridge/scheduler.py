@@ -55,7 +55,7 @@ def parse_hhmm(text: object) -> str | None:
 
 async def run_scheduler(
     store,
-    deliver: Callable[[str, str], Awaitable[None]],
+    deliver: Callable[[str, str], Awaitable[bool]],
     notify: Callable[[str, str], Awaitable[None]],
     stop_event: asyncio.Event,
     *,
@@ -72,9 +72,13 @@ async def run_scheduler(
        per-day dedup is already stamped and the schedule cannot re-fire in a
        tight loop.
     2. ``await deliver(project, prompt)`` inside try/except — one bad schedule
-       or a failing delivery must never kill the loop.
-    3. ``await notify(project, prompt)`` (also guarded) to post a short "task
-       fired" line back to the user.
+       or a failing delivery must never kill the loop. ``deliver`` returns True
+       when the turn was actually delivered, False when it was skipped (e.g. the
+       project is disabled or no longer exists).
+    3. ``await notify(project, prompt)`` (also guarded) ONLY when deliver
+       returned True — so a schedule that outlives its project (or fires while
+       the project is off) does not post a daily "task launched" notice for a
+       turn that never ran.
 
     Then ``await sleep_fn(interval)`` before the next tick. ``now_fn`` and
     ``sleep_fn`` are injected so the whole loop is testable with a fake clock;
@@ -102,11 +106,15 @@ async def run_scheduler(
                 )
                 continue
             try:
-                await deliver(project, prompt)
+                delivered = await deliver(project, prompt)
             except Exception:  # noqa: BLE001 - one bad deliver must not kill the loop
                 logger.exception(
                     "scheduler: deliver failed for schedule %s (%s)", sid, project
                 )
+                continue
+            if not delivered:
+                # Project disabled / removed — nothing ran, so don't tell the
+                # user the task "launched".
                 continue
             try:
                 await notify(project, prompt)
