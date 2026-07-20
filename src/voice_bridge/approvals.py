@@ -179,13 +179,41 @@ def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
     # even though there is no `command` key here to match against, OR if it
     # resolves outside cwd (belt-and-suspenders; already caught above for
     # the "path"/"file_path" keys, but explicit here for clarity/robustness).
+    #
+    # The token regex alone is trivially bypassed by an innocuously-named
+    # symlink/hardlink that points at a sensitive file: `ln -s .env
+    # innocuous.txt` sits inside cwd (passes containment) and its own name
+    # doesn't match the sensitive-token regex (passes the raw check), so the
+    # RAW string is not enough — the target must be resolved (symlink-
+    # followed) once and checked too. A symlink's resolved path reveals the
+    # real name (`.env`); a HARDLINK's resolved path does NOT change (a hard
+    # link is just another directory entry for the same inode, not a
+    # pointer), so it is instead caught via `st_nlink > 1` — a project file
+    # sent via send_file essentially never legitimately has multiple hard
+    # links, so this stays fail-safe (over-flagging is acceptable; a silent
+    # bypass is not).
     if tool_name == SEND_FILE_TOOL_NAME:
         for key in _SEND_FILE_PATH_KEYS:
             target = tool_input.get(key)
             if isinstance(target, str) and target:
                 if re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE):
                     return True
-                if not _inside_cwd(target, cwd):
+                try:
+                    base = str(Path(cwd).resolve())
+                    resolved = _resolve(target, base)
+                except (OSError, RuntimeError, ValueError):
+                    # Can't prove anything about the target (symlink loop,
+                    # unreadable link, bad path) — fail closed to risky.
+                    return True
+                if re.search(_SENSITIVE_TOKEN_RE, resolved, re.IGNORECASE):
+                    return True
+                try:
+                    if os.stat(resolved).st_nlink > 1:
+                        return True
+                except OSError:
+                    # Doesn't exist (yet) or unreadable: nothing to alias.
+                    pass
+                if not (resolved == base or resolved.startswith(base + os.sep)):
                     return True
 
     return False

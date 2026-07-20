@@ -35,6 +35,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +89,14 @@ _TRUNCATED = "…[truncated]"
 _FENCE_FOOTER_RE = re.compile(
     r"end\s+of\s+ide\s+catch-?up\s+reference\s+data", re.IGNORECASE
 )
-_FENCE_HEADER_TOPIC_RE = re.compile(r"ide\s+catch-?up", re.IGNORECASE)
-_FENCE_HEADER_CLAIM_RE = re.compile(
-    r"read-?only\s+reference\s+data|do\s+not\s+follow", re.IGNORECASE
+# Single regex over a bounded window (DOTALL so "." also spans a newline):
+# catches "ide catch-up" ... "read-only reference data" / "do not follow"
+# even when the forged header is deliberately wrapped across lines with
+# non-whitespace content in between (the old two-regex-must-both-match-the-
+# SAME-line approach couldn't see across a line break at all).
+_FENCE_HEADER_RE = re.compile(
+    r"ide\s+catch-?up.{0,200}?(?:read-?only\s+reference\s+data|do\s+not\s+follow)",
+    re.IGNORECASE | re.DOTALL,
 )
 _FENCE_PLACEHOLDER = "[filtered]"
 
@@ -454,33 +460,37 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _neutralize_fence_markers(body: str) -> str:
-    """Defang any line in the untrusted *body* that resembles the catch-up
+    """Defang any span of the untrusted *body* that resembles the catch-up
     fence's HEADER/FOOTER sentinels, so hostile content (a poisoned git
     diff/log, another session's transcript) cannot forge the closing
     boundary and smuggle "now ignore the above" instructions past it.
 
-    Line-based, case-insensitive, bracket-tolerant (matches regardless of
-    `[...]`/`(...)`/no brackets at all): a line is replaced wholesale with a
-    short placeholder if it looks like the FOOTER ("end of ide catch-up
-    reference data") or like the HEADER (mentions "ide catch-up" together
-    with its "read-only reference data" / "do not follow" claim). The real
-    header/footer are never part of *body* — they are only added by the
-    caller afterwards — so this only ever touches forged/embedded copies.
+    Whole-string (NOT line-based), case-insensitive, bracket-tolerant
+    (matches regardless of `[...]`/`(...)`/no brackets at all): a span is
+    replaced wholesale with a short placeholder if it looks like the FOOTER
+    ("end of ide catch-up reference data") or like the HEADER (mentions "ide
+    catch-up" followed within a bounded window by its "read-only reference
+    data" / "do not follow" claim). Matching runs over the ENTIRE body rather
+    than per-line on purpose: the fence regexes' whitespace/dot spans happily
+    bridge a newline, so a sentinel deliberately wrapped across two lines
+    must be seen as one contiguous run of text — pre-splitting on a newline
+    would only give each half to the matcher separately, and neither half
+    alone looks like a sentinel. The real header/footer are never part of
+    *body* — they are only added by the caller afterwards — so this only
+    ever touches forged/embedded copies.
+
+    Also strips Unicode "format" characters (category "Cf" — e.g. a
+    zero-width space) before matching: they render invisibly, so a sentinel
+    split by one (`"En​d of IDE catch-up..."`) still reads as the real
+    words to a human but would otherwise dodge every regex here.
 
     Never raises: any failure here degrades to returning *body* unchanged
     (the caller's own hard truncation is still a backstop)."""
     try:
-        lines = body.split("\n")
-        out = []
-        for line in lines:
-            if _FENCE_FOOTER_RE.search(line):
-                out.append(_FENCE_PLACEHOLDER)
-                continue
-            if _FENCE_HEADER_TOPIC_RE.search(line) and _FENCE_HEADER_CLAIM_RE.search(line):
-                out.append(_FENCE_PLACEHOLDER)
-                continue
-            out.append(line)
-        return "\n".join(out)
+        cleaned = "".join(ch for ch in body if unicodedata.category(ch) != "Cf")
+        cleaned = _FENCE_FOOTER_RE.sub(_FENCE_PLACEHOLDER, cleaned)
+        cleaned = _FENCE_HEADER_RE.sub(_FENCE_PLACEHOLDER, cleaned)
+        return cleaned
     except Exception:  # noqa: BLE001 - defensive; must never raise
         logger.exception("fence marker neutralization failed")
         return body

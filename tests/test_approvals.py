@@ -879,3 +879,40 @@ async def test_can_use_tool_safe_allows_normal_send_file():
     result = await fn(SEND_FILE_TOOL_NAME, {"path": "src/main.py"}, None)
     assert _decision_kind(result) == "PermissionResultAllow"
     assert mgr.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Bypass 1 (Critical): send_file sensitivity check ran on the RAW path only,
+# not the resolved one. A symlink/hardlink named innocuously (e.g.
+# innocuous.txt -> .env) sits inside cwd (passes containment) and its own
+# name doesn't match the sensitive-token regex (passes the raw check) — so
+# it slipped through in `safe` mode with zero approvals and got uploaded to
+# Telegram silently.
+# ---------------------------------------------------------------------------
+
+def test_is_risky_send_file_symlink_to_sensitive_target_true(tmp_path):
+    real_env = tmp_path / ".env"
+    real_env.write_text("SECRET=1\n")
+    link = tmp_path / "innocuous.txt"
+    os.symlink(real_env, link)
+
+    assert is_risky(SEND_FILE_TOOL_NAME, {"path": "innocuous.txt"}, str(tmp_path)) is True
+
+
+def test_is_risky_send_file_hardlink_to_sensitive_target_true(tmp_path):
+    real_env = tmp_path / ".env"
+    real_env.write_text("SECRET=1\n")
+    link = tmp_path / "innocuous.txt"
+    os.link(real_env, link)
+
+    assert is_risky(SEND_FILE_TOOL_NAME, {"path": "innocuous.txt"}, str(tmp_path)) is True
+
+
+def test_is_risky_send_file_symlink_normal_in_cwd_still_false(tmp_path):
+    # A symlink to an ordinary, non-sensitive in-cwd file must stay safe.
+    real = tmp_path / "main.py"
+    real.write_text("print('hi')\n")
+    link = tmp_path / "alias.py"
+    os.symlink(real, link)
+
+    assert is_risky(SEND_FILE_TOOL_NAME, {"path": "alias.py"}, str(tmp_path)) is False
