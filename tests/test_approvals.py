@@ -1100,9 +1100,11 @@ def test_signature_amp_redirect_to_file_is_detected():
     # from a plain "git push" grant (no silent auto-allow).
     amp = signature_for("Bash", {"command": "git push >&/etc/cron.d/pwn"}, CWD)
     assert amp is not None and amp != "git push" and "/etc/cron.d/pwn" in amp
-    # fd-duplication (`2>&1`, `>&2`, `>&-`) is NOT a file redirect.
+    # fd-duplication/move/close (`2>&1`, `>&2`, `>&-`, `>&2-`) is NOT a file.
     assert is_risky("Bash", {"command": "ls >&2"}, CWD) is False
     assert signature_for("Bash", {"command": "git push 2>&1"}, CWD) == "git push"
+    assert is_risky("Bash", {"command": "echo x >&-"}, CWD) is False
+    assert is_risky("Bash", {"command": "echo x >&2-"}, CWD) is False
     # `>|FILE` force-clobber (bypasses noclobber) is a real write -> risky.
     assert is_risky("Bash", {"command": "echo x >| /etc/passwd"}, CWD) is True
     assert is_risky("Bash", {"command": "echo x >|/etc/passwd"}, CWD) is True
@@ -1169,6 +1171,24 @@ def test_signature_backslash_escaped_redirect_target_escaping_cwd(tmp_path):
     # An escaped-space target that stays INSIDE cwd is not over-flagged.
     (tmp_path / "a b").mkdir()
     assert is_risky("Bash", {"command": r"echo x > a\ b/keep.txt"}, str(tmp_path)) is False
+
+
+def test_signature_amp_redirect_digit_leading_filename(tmp_path):
+    # `>&word` is fd-duplication ONLY when the whole word is numeric / `N-` / `-`;
+    # a word that merely STARTS with a digit (`>&2link`, `>&2sub/../x`) is a
+    # FILENAME. A "no leading digit" capture missed these, so a symlink or `../`
+    # escape written via `>&` slipped the classifier.
+    os.symlink("/etc/passwd", tmp_path / "2link")
+    (tmp_path / "2sub").mkdir()
+    assert is_risky("Bash", {"command": "echo PWNED >&2link"}, str(tmp_path)) is True
+    assert is_risky(
+        "Bash", {"command": "echo OUT >&2sub/../../pwned.txt"}, str(tmp_path)
+    ) is True
+    # The signature must carry the target so a `git push` grant can't unlock it.
+    sig = signature_for("Bash", {"command": "git push >&2link"}, str(tmp_path))
+    assert sig is not None and sig != "git push"
+    # A quoted numeric IS a file named `1` (not fd-dup) — relative, stays safe.
+    assert is_risky("Bash", {"command": 'echo x >&"1"'}, str(tmp_path)) is False
 
 
 def test_signature_odd_input_never_raises_and_has_no_broad_risky_key():

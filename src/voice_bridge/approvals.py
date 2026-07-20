@@ -108,9 +108,6 @@ _RISKY_COMMAND_PATTERNS.append(
 # (see _risky_redirect_targets) so realpath sees bash's true path.
 _WORD_CHUNK = r'\\.|"[^"]*"|\'[^\']*\'|[^\s"\'|;&<>]'
 _REDIRECT_WORD = r"(?:" + _WORD_CHUNK + r")+"
-_AMP_WORD = (
-    r'(?:\\.|"[^"]*"|\'[^\']*\'|[^\s"\'|;&<>0-9-])(?:' + _WORD_CHUNK + r")*"
-)
 _SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 
 # Redirection target after `>`/`>>` (optional `\|` force-clobber `>|file`).
@@ -119,10 +116,14 @@ _SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 _REDIRECT_TARGET_RE = re.compile(r">>?\|?\s*(" + _REDIRECT_WORD + r")")
 
 # `>&word` (ampersand AFTER `>`) redirects BOTH stdout+stderr to `word` when
-# `word` is a FILENAME, not an fd number (`echo x >&/etc/passwd` truncates it).
-# `_REDIRECT_TARGET_RE` misses it (the char after `>` is `&`), so it gets its
-# own pattern; fd-duplication (`>&1`/`>&2`/`>&-`) is excluded via `_AMP_WORD`.
-_REDIRECT_AMP_TARGET_RE = re.compile(r">&\s*(" + _AMP_WORD + r")")
+# `word` is a FILENAME (`echo x >&/etc/passwd` truncates it). It is fd
+# duplication/move/close ONLY when the WHOLE word is numeric (`>&1`), `N-`
+# (`>&2-`, move), or `-` (`>&-`, close). Capture the full word here and reject
+# only genuine fd-dup tokens in code (`_FD_DUP_TARGET_RE`): a word that merely
+# STARTS with a digit but continues (`>&2link`, `>&2sub/../x`) is a filename and
+# an earlier "no leading digit" regex missed it entirely.
+_REDIRECT_AMP_TARGET_RE = re.compile(r">&\s*(" + _REDIRECT_WORD + r")")
+_FD_DUP_TARGET_RE = re.compile(r"\d+-?|-")
 
 
 def _has_risky_redirect(command: str, cwd: str) -> bool:
@@ -339,9 +340,14 @@ def _risky_redirect_targets(command: str, cwd: str) -> list[str]:
     bug, so anything unprovable fails toward risky.
     """
     targets: list[str] = []
-    for pattern in (_REDIRECT_TARGET_RE, _REDIRECT_AMP_TARGET_RE):
+    for pattern, amp in ((_REDIRECT_TARGET_RE, False), (_REDIRECT_AMP_TARGET_RE, True)):
         for match in pattern.finditer(command):
             raw = match.group(1)
+            # `>&1`/`>&2-`/`>&-` are fd duplication/move/close, NOT a file — but
+            # `>&2link` (starts numeric, continues) IS a file. Check the RAW word
+            # (so a quoted `>&"1"` stays a file named 1, not an fd-dup).
+            if amp and _FD_DUP_TARGET_RE.fullmatch(raw):
+                continue
             # Bash removes backslash-escapes and quotes and expands ~/$VAR
             # BEFORE opening the file, so the raw captured word differs from the
             # path actually written: `> "/etc/passwd"` opens /etc/passwd,
