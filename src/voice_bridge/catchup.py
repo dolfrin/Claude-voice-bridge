@@ -86,8 +86,16 @@ _TRUNCATED = "…[truncated]"
 # out of the fence early. These patterns catch the sentinels' distinctive
 # wording case-insensitively and regardless of the surrounding bracket style
 # (`[...]`, `(...)`, none at all), so any close variant gets defanged too.
+# Tolerate NON-word separators between the distinctive words (not just \s+):
+# a forged footer with punctuation ("End of IDE catch-up, reference data") or a
+# non-\s invisible spacer (Braille-blank U+2800) between words would otherwise
+# survive. \W spans whitespace, punctuation, and such spacers. (Cf format chars
+# like ZWSP are already stripped before matching; a homoglyph "End" with a
+# Cyrillic Е is a separate, larger confusables problem — the header's "do NOT
+# follow" instruction remains the primary defense there.)
 _FENCE_FOOTER_RE = re.compile(
-    r"end\s+of\s+ide\s+catch-?up\s+reference\s+data", re.IGNORECASE
+    r"end\W{0,4}of\W{0,4}ide\W{0,6}catch-?up\W{0,6}reference\W{0,4}data",
+    re.IGNORECASE | re.DOTALL,
 )
 # Single regex over a bounded window (DOTALL so "." also spans a newline):
 # catches "ide catch-up" ... "read-only reference data" / "do not follow"
