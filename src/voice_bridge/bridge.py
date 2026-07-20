@@ -824,11 +824,17 @@ class _Controls:
 
             target = Path.home() / "Projects" / safe
 
+            # Already-registered check FIRST and unconditionally: a registered
+            # project's cwd basename may differ from its name (e.g. qwing ->
+            # .../WhisperX), so gating this behind target.exists() would fall
+            # through to "fresh create" — corrupting the mirror (cwd/mode/voice
+            # reset in the panel) and littering ~/Projects with a stray repo.
+            if safe in self._mirror:
+                await self.toggle(safe, True)
+                await self.select(safe)
+                return f"Projektas {safe} jau užregistruotas — perjungiau į jį."
+
             if target.exists():
-                if safe in self._mirror:
-                    await self.toggle(safe, True)
-                    await self.select(safe)
-                    return f"Projektas {safe} jau užregistruotas — perjungiau į jį."
                 project = ProjectConfig(name=safe, cwd=str(target), enabled=True)
                 await self._register_projects([project])
                 await self.toggle(safe, True)

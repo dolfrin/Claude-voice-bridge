@@ -1285,6 +1285,37 @@ async def test_controls_create_project_existing_registered_selects_without_mkdir
 
 
 @pytest.mark.asyncio
+async def test_controls_create_project_registered_with_mismatched_cwd_not_recreated(
+    tmp_path, monkeypatch
+):
+    """A registered project whose cwd basename differs from its name (e.g.
+    qwing -> .../WhisperX) must take the "already registered" branch even
+    though ~/Projects/<name> does NOT exist on disk — no stray dir, and the
+    mirror's cwd/mode/voice must stay untouched (regression: the check used
+    to be nested inside target.exists())."""
+    import voice_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod.Path, "home", lambda: tmp_path)
+    controls, sessions, store, *_ = _make_controls()
+    await controls.seed()
+    # NOTE: ~/Projects/qwing deliberately NOT created — the registered
+    # project's real cwd (from _make_controls) points elsewhere.
+    before = {row["project"]: dict(row) for row in controls.snapshot()}["qwing"]
+
+    result = await controls.create_project("qwing")
+
+    assert "jau užregistruotas" in result
+    assert not (tmp_path / "Projects" / "qwing").exists(), (
+        "no stray directory may be created for an already-registered project"
+    )
+    after = {row["project"]: dict(row) for row in controls.snapshot()}["qwing"]
+    assert after["cwd"] == before["cwd"]
+    assert after["mode"] == before["mode"]
+    assert after["voice"] == before["voice"]
+    assert after["last_active"] is True
+
+
+@pytest.mark.asyncio
 async def test_controls_create_project_existing_on_disk_unregistered(tmp_path, monkeypatch):
     import voice_bridge.bridge as bridge_mod
 
