@@ -1090,6 +1090,31 @@ def test_signature_amp_redirect_to_file_is_detected():
     assert is_risky("Bash", {"command": "echo x >|/etc/passwd"}, CWD) is True
 
 
+def test_signature_quoted_and_expanded_redirect_targets_are_risky():
+    # Bash strips quotes and expands ~/$VAR before opening the file, so the
+    # classifier must normalize the token — otherwise a QUOTED absolute target
+    # (leading char is the quote, not "/") slips the base risk gate entirely,
+    # and a tilde/$VAR target defeats the per-target signature granularity.
+    for cmd in [
+        'echo x > "/etc/cron.d/pwn"',
+        "echo x > '/etc/passwd'",
+        'echo x >>"/home/home/.bashrc"',
+        "git push > ~/.bashrc",
+        "git push > $HOME/.bashrc",
+        "git push > ${HOME}/.bashrc",
+    ]:
+        assert is_risky("Bash", {"command": cmd}, CWD) is True, cmd
+    # A tilde/$VAR redirect on an allowlisted verb must NOT collapse onto the
+    # plain grant (the target tag keeps them distinct -> still prompts).
+    plain = signature_for("Bash", {"command": "git push"}, CWD)
+    for cmd in ["git push > ~/.bashrc", "git push > $HOME/.bashrc"]:
+        sig = signature_for("Bash", {"command": cmd}, CWD)
+        assert sig is not None and sig != plain, cmd
+    # Benign relative / sink targets stay non-risky (no over-block regression).
+    assert is_risky("Bash", {"command": "echo x > out.txt"}, CWD) is False
+    assert is_risky("Bash", {"command": 'echo x > "/dev/null"'}, CWD) is False
+
+
 def test_signature_odd_input_never_raises_and_has_no_broad_risky_key():
     # Malformed input must never raise. A Bash call with no/empty command is
     # NON-risky, so it degrades to the harmless "ok:Bash" fallback (only ever

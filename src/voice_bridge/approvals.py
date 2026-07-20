@@ -321,13 +321,22 @@ def _risky_redirect_targets(command: str) -> list[str]:
     targets: list[str] = []
     for pattern in (_REDIRECT_TARGET_RE, _REDIRECT_AMP_TARGET_RE):
         for match in pattern.finditer(command):
-            target = match.group(1)
+            raw = match.group(1)
+            # Bash strips quotes and expands ~/$VAR BEFORE opening the file, so
+            # the raw captured token differs from the path actually written:
+            # `> "/etc/passwd"` opens /etc/passwd, `> ~/.bashrc` opens $HOME/….
+            # Normalize (drop the quote chars bash removes) before classifying,
+            # and treat any tilde/variable expansion as NOT provably in-cwd
+            # (fail toward risky — over-flagging only ever costs one prompt).
+            target = raw.replace('"', "").replace("'", "")
             if target in _SAFE_REDIRECT_TARGETS:
                 continue
             if (
                 target.startswith("/")
                 or target.startswith("..")
                 or "../" in target
+                or target.startswith("~")
+                or "$" in target
                 or re.search(_SENSITIVE_TOKEN_RE, target, re.IGNORECASE)
             ):
                 targets.append(target)
