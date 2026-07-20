@@ -223,6 +223,7 @@ def is_risky(tool_name: str, tool_input: dict, cwd: str) -> bool:
 # Yes/No parsing
 # ---------------------------------------------------------------------------
 
+# English tokens, kept as-is.
 _YES_WORDS = {
     "ok", "okay", "yes", "yep", "yeah", "y", "sure", "go", "allow",
     "approve", "approved",
@@ -231,7 +232,36 @@ _NO_WORDS = {
     "stop", "no", "nope", "n", "cancel", "deny", "denied",
 }
 
-_TOKEN_RE = re.compile(r"[a-z]+", re.IGNORECASE)
+# Lithuanian tokens (approvals are ASKED in Lithuanian — see
+# format_approval_spoken — so the answer arrives in Lithuanian too, spoken
+# or typed). Both the diacritic form and the ASCII-folded form Whisper may
+# emit are listed explicitly; _fold() below also strips diacritics at match
+# time so any other diacritic spelling still matches its folded counterpart.
+_YES_WORDS_LT = {
+    "taip", "jo", "gerai", "davai", "leidžiu", "leidziu",
+    "leidžiam", "leidziam", "aha",
+}
+_NO_WORDS_LT = {
+    "ne", "nedaryk", "stop", "atšauk", "atsauk", "neleidžiu", "neleidziu",
+    "nereikia",
+}
+
+_YES_WORDS = _YES_WORDS | _YES_WORDS_LT
+_NO_WORDS = _NO_WORDS | _NO_WORDS_LT
+
+# Unicode word chars so a diacritic letter (e.g. "ž" in "leidžiu") stays part
+# of its token instead of splitting the word at the diacritic.
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+_DIACRITIC_FOLD = str.maketrans(
+    "ąčęėįšųūž", "aceeisuuz",
+)
+
+
+def _fold(token: str) -> str:
+    """ASCII-fold Lithuanian diacritics (e.g. "leidžiu" -> "leidziu") so a
+    token matches regardless of which form Whisper/the user actually typed."""
+    return token.translate(_DIACRITIC_FOLD)
 
 
 def parse_yes_no(text: str) -> bool | None:
@@ -241,8 +271,10 @@ def parse_yes_no(text: str) -> bool | None:
     tokens = _TOKEN_RE.findall(text.lower())
     if not tokens:
         return None
-    saw_yes = any(t in _YES_WORDS for t in tokens)
-    saw_no = any(t in _NO_WORDS for t in tokens)
+    folded = [_fold(t) for t in tokens]
+    all_tokens = tokens + folded
+    saw_yes = any(t in _YES_WORDS for t in all_tokens)
+    saw_no = any(t in _NO_WORDS for t in all_tokens)
     if saw_no and not saw_yes:
         return False
     if saw_yes and not saw_no:

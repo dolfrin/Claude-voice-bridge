@@ -118,6 +118,33 @@ def test_parse_yes_no_none(text):
     assert parse_yes_no(text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["taip", "Taip", "jo", "gerai", "davai", "leidžiu", "leidziu", "ok",
+     "leidžiam", "leidziam", "aha"],
+)
+def test_parse_yes_no_lithuanian_true(text):
+    assert parse_yes_no(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["ne", "Ne", "stop", "atšauk", "atsauk", "neleidžiu", "neleidziu", "nereikia",
+     "nedaryk"],
+)
+def test_parse_yes_no_lithuanian_false(text):
+    assert parse_yes_no(text) is False
+
+
+def test_parse_yes_no_lithuanian_sentence_true():
+    assert parse_yes_no("gerai, daryk") is True
+
+
+@pytest.mark.parametrize("text", ["nežinau", "gal"])
+def test_parse_yes_no_lithuanian_none(text):
+    assert parse_yes_no(text) is None
+
+
 # ---------------------------------------------------------------------------
 # ApprovalManager
 # ---------------------------------------------------------------------------

@@ -774,6 +774,15 @@ def test_parse_name_prefix_dash_with_no_trailing_space():
     )
 
 
+def test_parse_name_prefix_comma_separator():
+    # "Qwing, daryk x" — a comma right after the name must route, same as
+    # ":"/"-"/whitespace.
+    assert parse_name_prefix("Qwing, daryk x", ["qwing", "othersapp"]) == (
+        "qwing",
+        "daryk x",
+    )
+
+
 def test_parse_name_prefix_no_separator_at_all_does_not_match():
     # Exact-token guarantee preserved: no ":"/"-"/whitespace right after the
     # name means it is not a routing prefix at all.
@@ -855,6 +864,57 @@ async def test_make_inbound_name_prefix_to_disabled_project_sends_off_notice():
     assert telegram.disabled_prompts == [("qwing", "build")]
 
 
+@pytest.mark.asyncio
+async def test_make_inbound_urgent_bang_before_name_prefix_targets_named_project():
+    # "!qwing: fix" — the urgent '!' must be consumed BEFORE name-prefix
+    # routing, so the message still routes to "qwing" (not last-active) and
+    # interrupts qwing, delivering the prefix-stripped text.
+    store = FakeStore(last_active="othersapp", enabled={"qwing": True, "othersapp": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(text="!qwing: fix"))
+
+    assert sessions.interrupt_calls == ["qwing"]
+    assert sessions.delivered == [("qwing", "fix")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_urgent_without_name_prefix_still_targets_last_active():
+    # "!fix" — no name prefix present, urgent still falls back to last-active
+    # (unchanged behavior).
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(text="!fix"))
+
+    assert sessions.interrupt_calls == ["qwing"]
+    assert sessions.delivered == [("qwing", "fix")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_name_prefix_without_bang_is_not_urgent():
+    # "qwing: fix it" — non-urgent name-prefixed message must NOT interrupt.
+    store = FakeStore(last_active="othersapp", enabled={"qwing": True, "othersapp": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram()
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(text="qwing: fix it"))
+
+    assert sessions.interrupt_calls == []
+    assert sessions.delivered == [("qwing", "fix it")]
+
+
 # --------------------------------------------------------------------------- #
 # Recap
 # --------------------------------------------------------------------------- #
@@ -900,6 +960,51 @@ async def test_recap_ignores_transient_status_and_heartbeat_noise():
     assert "qwing" in text
     assert "1 atnaujinimai" in text
     assert "Done." in text
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_transient_does_not_steal_last_active():
+    # A transient send (heartbeat / "Working." status / verbose flush) must
+    # not hijack routing away from whatever the user is actively talking to.
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"V")}
+    telegram = FakeTelegram(ids=[701])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    controls = _Controls(sessions, store, FakeCfg(), tts_holder)
+    controls._mirror["qwing"] = {
+        "enabled": True, "mode": "safe", "voice": "echo",
+        "engine": "openai", "last_active": False,
+    }
+
+    outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
+    await outbound(
+        Outbound(project="qwing", text="Working.", spoken=" ", transient=True)
+    )
+
+    # map_message still happens (a reply to this send must still resolve) ...
+    assert store.mapped == [(701, "qwing")]
+    # ... but last-active tracking is untouched by a transient send.
+    assert store.last_active_calls == []
+    assert controls._mirror["qwing"]["last_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_make_outbound_non_transient_still_sets_last_active():
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"V")}
+    telegram = FakeTelegram(ids=[702])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    controls = _Controls(sessions, store, FakeCfg(), tts_holder)
+    controls._mirror["qwing"] = {
+        "enabled": True, "mode": "safe", "voice": "echo",
+        "engine": "openai", "last_active": False,
+    }
+
+    outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
+    await outbound(Outbound(project="qwing", text="Done.", spoken="Done."))
+
+    assert store.last_active_calls == ["qwing"]
+    assert controls._mirror["qwing"]["last_active"] is True
 
 
 @pytest.mark.asyncio

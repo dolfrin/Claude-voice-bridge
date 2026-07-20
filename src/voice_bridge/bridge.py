@@ -60,15 +60,15 @@ _MSG_YES_OR_NO = "Answer yes or no."
 _RECAP_MAX_LINES = 20
 
 # Separator between a name-prefix token ("qwing" / "Qwing") and the rest of
-# the message: EITHER a ":" or "-" followed by zero or more whitespace chars
-# (so "qwing:build", with no trailing space, matches), OR one or more
+# the message: EITHER a ":", "-" or "," followed by zero or more whitespace
+# chars (so "qwing:build", with no trailing space, matches), OR one or more
 # whitespace chars with no separator character at all. Either way the char
 # immediately after the name can never be a bare word char, so "qwingbuild"
 # (no separator) and "qwinger: x" (extra letters before the colon) still do
 # NOT match. Matched against the remainder of the text AFTER the literal
 # name is stripped off (see parse_name_prefix), so it never needs to know
 # what a "name" character is.
-_NAME_PREFIX_SEP_RE = re.compile(r"^\s*(?:[:\-]\s*|\s+)(.*)$", re.DOTALL)
+_NAME_PREFIX_SEP_RE = re.compile(r"^\s*(?:[:\-,]\s*|\s+)(.*)$", re.DOTALL)
 
 
 # --------------------------------------------------------------------------- #
@@ -212,14 +212,17 @@ def make_outbound(
 
     Synthesizes with the project's effective voice; reads the live TTS backend
     from ``tts_holder`` AT SEND TIME (C4). Empty/whitespace spoken text ->
-    text-only (no voice). Maps every returned message id to the project and
-    marks it last-active (also updating the Controls mirror). On a successful
-    send, also appends a one-line recap summary to the project's recap
-    buffer (B3b's ``/recap``) — skipped entirely when ``o.transient`` is True
-    (NOISE like the per-turn "Working." status, the heartbeat, and verbose
-    tool-activity flushes should not inflate the recap's update count) —
-    guarded so a recap-tracking failure can never break the never-raises send
-    path.
+    text-only (no voice). Maps every returned message id to the project
+    UNCONDITIONALLY (a reply to any sent message, even a transient one, must
+    still resolve to its project). Marking last-active (both the store and
+    the Controls mirror) and appending a one-line recap summary to the
+    project's recap buffer (B3b's ``/recap``) are both skipped when
+    ``o.transient`` is True: NOISE like the per-turn "Working." status, the
+    heartbeat, and verbose tool-activity flushes must not inflate the
+    recap's update count, nor hijack routing away from whatever project the
+    user is actively conversing with while a background project's transient
+    send fires — guarded so a recap-tracking failure can never break the
+    never-raises send path.
     """
 
     async def outbound(o: Outbound) -> None:
@@ -263,8 +266,9 @@ def make_outbound(
 
         for mid in ids:
             await store.map_message(mid, o.project)
-        await store.set_last_active(o.project)
-        controls.mark_last_active(o.project)
+        if not o.transient:
+            await store.set_last_active(o.project)
+            controls.mark_last_active(o.project)
         try:
             if not o.transient:
                 controls.record_recap(o.project, _recap_summary_line(spoken, full_text))
@@ -297,7 +301,13 @@ def make_inbound(
     1. Voice -> transcribe; empty transcript -> ask to repeat and stop.
     2. If ``reply_to`` has a pending approval -> parse yes/no; unparseable ->
        ask again; otherwise resolve. Never delivered as a turn.
-    3. Routing precedence:
+    3. The urgent ``"!"`` prefix (:func:`_consume_urgent_prefix`) is consumed
+       NEXT, BEFORE any routing — a leading "!" would otherwise defeat the
+       name-prefix match below (``"!qwing: fix"`` doesn't start with a known
+       name) and silently fall back to last-active, interrupting the wrong
+       project. Stripping it first means "!qwing: fix" is treated exactly
+       like "qwing: fix" for routing purposes, just urgent.
+    4. Routing precedence:
        * an explicit ``reply_to`` that resolves to a KNOWN project wins
          outright (a quote-reply is unambiguous) — routed via
          :func:`resolve_target`, unchanged from before;
@@ -307,7 +317,7 @@ def make_inbound(
          prefix stripped from the delivered text;
        * otherwise fall back to :func:`resolve_target` (last_active/off/none).
        ``none`` -> ask which project; ``off`` -> tell the user it is
-       disabled; ``ok`` -> deliver.
+       disabled; ``ok`` -> deliver (interrupting first if urgent).
     """
 
     async def inbound(msg: dict) -> None:
@@ -334,6 +344,15 @@ def make_inbound(
             approvals.resolve(rid, ans)
             return
 
+        # Urgent '!' is consumed BEFORE name-prefix routing: otherwise
+        # "!qwing: fix it" fails parse_name_prefix (text starts with '!', not
+        # a known name) and falls back to last-active, interrupting the
+        # WRONG project and delivering the literal "qwing: fix it". Stripping
+        # '!' first turns it into "qwing: fix it" so name-prefix routing sees
+        # the name normally, and "!fix it" (no name) still falls back to
+        # last-active exactly as before.
+        urgent, text = _consume_urgent_prefix(text)
+
         reply_project = await store.project_for_message(rid) if rid is not None else None
         if reply_project is not None:
             # A quote-reply that resolves to a known project is unambiguous
@@ -358,7 +377,6 @@ def make_inbound(
         if reason == "off":
             await telegram.send_disabled_project_prompt(project, text)
             return
-        urgent, text = _consume_urgent_prefix(text)
         if urgent and hasattr(sessions, "interrupt"):
             await sessions.interrupt(project)
         await sessions.deliver(project, text)
