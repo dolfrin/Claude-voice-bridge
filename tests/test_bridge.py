@@ -1552,6 +1552,28 @@ async def test_controls_set_mode_sends_notice(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_controls_set_mode_warns_when_autonomy_persist_fails():
+    # SECURITY: if the autonomy override can't be persisted, a demotion would
+    # silently re-escalate on restart — the user must be told.
+    controls, sessions, store, cfg, tts_holder = _make_controls()
+    await controls.seed()
+    telegram = FakeTelegram()
+    controls.attach_telegram(telegram)
+
+    async def boom(project, field, value):
+        raise RuntimeError("db locked")
+
+    store.set_override = boom
+    await controls.set_mode("qwing", "safe")  # a demotion from yaml "full"
+
+    # in-memory change still applied (never blocked)
+    assert sessions.mode_calls == [("qwing", "safe")]
+    # the user got BOTH the normal "mode changed" notice AND the persist warning
+    texts = [t for _, t in telegram.questions]
+    assert any("nepavyko išsaugoti" in t for t in texts)
+
+
+@pytest.mark.asyncio
 async def test_controls_set_verbose_updates_mirror_and_sessions():
     controls, sessions, *_ = _make_controls()
     await controls.seed()

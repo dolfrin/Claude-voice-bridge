@@ -665,19 +665,24 @@ class _Controls:
         self.mark_last_active(target)
         return f"{target}: interrupted." if stopped else f"{target}: restarted."
 
-    async def _persist_override(self, project: str, field: str, value) -> None:
-        """Best-effort persist of a runtime override (Task A).
+    async def _persist_override(self, project: str, field: str, value) -> bool:
+        """Best-effort persist of a runtime override (Task A). Returns whether
+        the store write SUCCEEDED.
 
         A store write failure must NEVER crash the command or block the
         in-memory change: it is logged and swallowed. Persisting the change
         (esp. a demoted autonomy) is what makes it survive a restart instead of
-        silently reverting to — or re-escalating from — the yaml default."""
+        silently reverting to — or re-escalating from — the yaml default. The
+        caller uses the return value to surface a failed AUTONOMY persist (a
+        security setting) to the user; voice/verbose/effort stay silent."""
         try:
             await self._store.set_override(project, field, value)
+            return True
         except Exception:  # noqa: BLE001 - persist is best-effort
             logger.exception(
                 "persist override %s=%r for %s failed", field, value, project
             )
+            return False
 
     async def _persist_created(
         self, name: str, cwd: str, display_name: str | None = None
@@ -693,11 +698,13 @@ class _Controls:
 
     async def set_mode(self, project: str | None, mode: str) -> None:
         targets = [project] if project is not None else list(self._mirror)
+        persist_failed = False
         for name in targets:
             if name in self._mirror:
                 self._mirror[name]["mode"] = mode
             await self._sessions.set_mode(name, mode)
-            await self._persist_override(name, "autonomy", mode)
+            if not await self._persist_override(name, "autonomy", mode):
+                persist_failed = True
         # Forwarded from Task 8: a live set_mode restarts the session and drops
         # any in-flight turn silently. Tell the user so they can re-issue it.
         if self._telegram is not None:
@@ -707,6 +714,16 @@ class _Controls:
                 f"Mode changed to {mode} ({label}). "
                 "If a task was running, send it again.",
             )
+            # SECURITY: autonomy is the one override whose failed persist is
+            # dangerous — a demotion that isn't saved silently re-escalates to
+            # the yaml default on the next restart. Surface it so the user knows
+            # the setting is not durable (voice/verbose/effort stay silent).
+            if persist_failed:
+                await self._telegram.send_question(
+                    "bridge",
+                    "⚠️ Režimo nepavyko išsaugoti — po perkrovimo grįš prie "
+                    "projects.yaml numatytojo. Patikrink diską / DB.",
+                )
 
     async def set_voice(self, project: str | None, voice: str) -> None:
         targets = [project] if project is not None else list(self._mirror)
