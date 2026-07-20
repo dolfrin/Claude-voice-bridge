@@ -130,7 +130,8 @@ class FakeTTS:
 
 
 class FakeTelegram:
-    def __init__(self, ids=None):
+    def __init__(self, ids=None, ask_by_message=None, single_ask=None,
+                 resolve_ask_result=True):
         self.ids = ids or [101]
         self.updates: list[tuple] = []
         self.files: list[tuple] = []
@@ -139,6 +140,23 @@ class FakeTelegram:
         self.disabled_prompts: list[tuple[str, str]] = []
         self.ran = 0
         self.stopped = 0
+        # I2 ask_user interception surface. ``ask_by_message`` maps a question
+        # message_id -> token (quote-reply path); ``single_ask`` is the sole
+        # outstanding token (single-pending fallback path).
+        self._ask_by_message = dict(ask_by_message or {})
+        self._single_ask = single_ask
+        self._resolve_ask_result = resolve_ask_result
+        self.resolved_asks: list[tuple[str, str]] = []
+
+    def pending_ask_token_for_message(self, message_id):
+        return self._ask_by_message.get(message_id)
+
+    def single_pending_ask_token(self):
+        return self._single_ask
+
+    def resolve_ask(self, token, answer_text):
+        self.resolved_asks.append((token, answer_text))
+        return self._resolve_ask_result
 
     async def send_update(self, project, voice_label, text, voice_bytes):
         self.updates.append((project, voice_label, text, voice_bytes))
@@ -2244,3 +2262,161 @@ async def test_persisted_mode_override_survives_rebuild(tmp_path, monkeypatch):
     proj = captured["projects"][0]
     assert proj.name == "qwing"
     assert effective_autonomy(proj, cfg) == "safe"  # NOT re-escalated to "full"
+
+
+# --------------------------------------------------------------------------- #
+# make_inbound: I2 pending ask_user interception (answer by text/voice reply)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_quote_reply_to_ask_resolves_it_no_deliver():
+    store = FakeStore(by_message={}, last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing")])
+    # A quote-reply to ask message 900 -> its token "7".
+    telegram = FakeTelegram(ask_by_message={900: "7"})
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=900, text="rollback"))
+
+    assert telegram.resolved_asks == [("7", "rollback")]
+    assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_quote_reply_to_ask_wins_even_with_multiple_pending():
+    # The quote-reply path does NOT require the single-ask condition: a reply
+    # to a specific ask message resolves it even if several are outstanding
+    # (single_ask None here == "not exactly one pending").
+    store = FakeStore(by_message={}, last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram(ask_by_message={900: "7"}, single_ask=None)
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=900, text="2"))
+
+    assert telegram.resolved_asks == [("7", "2")]
+    assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_single_pending_ask_plain_text_resolves_it():
+    store = FakeStore(by_message={}, last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram(single_ask="3")
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, text="first one please"))
+
+    assert telegram.resolved_asks == [("3", "first one please")]
+    assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_single_pending_ask_voice_reply_resolves_it():
+    store = FakeStore(by_message={}, last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber(text="rollback it")
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram(single_ask="3")
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, is_voice=True, audio=b"OGG"))
+
+    assert transcriber.calls == [b"OGG"]
+    assert telegram.resolved_asks == [("3", "rollback it")]
+    assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_single_pending_ask_with_name_prefix_delivers_turn():
+    # A leading "<project>:" is explicit routing intent, so even with one ask
+    # outstanding the message is delivered as a NEW turn (not the answer).
+    store = FakeStore(last_active="othersapp",
+                      enabled={"qwing": True, "othersapp": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram(single_ask="3")
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, text="qwing: build"))
+
+    assert telegram.resolved_asks == []
+    assert sessions.delivered == [("qwing", "build")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_two_pending_asks_plain_text_routes_normally():
+    # Two asks outstanding -> single_pending_ask_token() is None, and there is
+    # no quote-reply, so the message must NOT be hijacked: it routes as a turn.
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram(single_ask=None)  # None == not exactly one pending
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, text="continue"))
+
+    assert telegram.resolved_asks == []
+    assert sessions.delivered == [("qwing", "continue")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_reply_to_project_while_ask_pending_routes_turn():
+    # A quote-reply to a PROJECT message (not the ask) while a single ask is
+    # pending elsewhere still routes as a turn -- the reply target is explicit.
+    store = FakeStore(by_message={42: "qwing"}, enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing")])
+    # 42 is NOT an ask message; single ask "3" is pending elsewhere.
+    telegram = FakeTelegram(ask_by_message={}, single_ask="3")
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=42, text="continue"))
+
+    assert telegram.resolved_asks == []
+    assert sessions.delivered == [("qwing", "continue")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_resolve_ask_false_falls_through_to_routing():
+    # resolve_ask returning False (empty/stale/already-answered) must fall
+    # through to normal routing rather than swallowing the turn.
+    store = FakeStore(by_message={}, last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram(single_ask="3", resolve_ask_result=False)
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, text="hello"))
+
+    assert telegram.resolved_asks == [("3", "hello")]
+    assert sessions.delivered == [("qwing", "hello")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_pending_approval_takes_precedence_over_ask():
+    # The approval interception runs FIRST: a reply to a pending approval is a
+    # yes/no, never routed to an ask, even if an ask is also outstanding.
+    store = FakeStore()
+    approvals = FakeApprovals(pending=[55])
+    transcriber = FakeTranscriber()
+    sessions = FakeSessions()
+    telegram = FakeTelegram(single_ask="3")
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=55, text="yes"))
+
+    assert approvals.resolved == [(55, True)]
+    assert telegram.resolved_asks == []
+    assert sessions.delivered == []

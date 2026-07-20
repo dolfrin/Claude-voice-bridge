@@ -390,6 +390,33 @@ def make_inbound(
             approvals.resolve(rid, ans)
             return
 
+        # I2: a text/voice reply that answers an outstanding ``ask_user``
+        # question resolves THAT question instead of becoming a new project
+        # turn — the whole point of hands-free use is hearing the question and
+        # just speaking the answer. Mirrors the pending-approval interception
+        # just above (has_pending -> parse -> resolve), for asks. ``text`` here
+        # is still pre-urgent-strip on purpose: an ask answer is not a routing
+        # decision, so a leading '!' carries no meaning for it.
+        ask_token = None
+        if rid is not None:
+            # A quote-reply to a SPECIFIC ask message answers that one, even
+            # when several asks are outstanding.
+            ask_token = telegram.pending_ask_token_for_message(rid)
+        if ask_token is None and telegram.single_pending_ask_token() is not None:
+            # No explicit reply target: fall back to the sole outstanding ask,
+            # but ONLY when this message carries no other routing intent — no
+            # quote-reply at all, and no leading "<project>:" name-prefix — so a
+            # legitimate new turn is never hijacked.
+            if rid is None:
+                names = sessions.names() if hasattr(sessions, "names") else []
+                prefix_project, _ = parse_name_prefix(text, names)
+                if prefix_project is None:
+                    ask_token = telegram.single_pending_ask_token()
+        if ask_token is not None and telegram.resolve_ask(ask_token, text):
+            return
+        # resolve_ask False (blank/stale/already-answered) falls through to
+        # normal routing below.
+
         # Urgent '!' is consumed BEFORE name-prefix routing: otherwise
         # "!qwing: fix it" fails parse_name_prefix (text starts with '!', not
         # a known name) and falls back to last-active, interrupting the
@@ -1119,6 +1146,26 @@ async def build() -> Wiring:
 
         async def ask_user(self, project, question, choices):
             return await telegram_ref["io"].ask_user(project, question, choices)
+
+        # I2: sync pass-throughs for the inbound ask-interception. They are
+        # sync because make_inbound calls them without ``await`` (resolve_ask
+        # fires its cosmetic edit as a background task). Before telegram_ref is
+        # wired ("io" absent), report "no pending asks" and refuse to resolve.
+        def pending_ask_token_for_message(self, message_id):
+            io = telegram_ref.get("io")
+            return (
+                io.pending_ask_token_for_message(message_id)
+                if io is not None
+                else None
+            )
+
+        def single_pending_ask_token(self):
+            io = telegram_ref.get("io")
+            return io.single_pending_ask_token() if io is not None else None
+
+        def resolve_ask(self, token, answer_text):
+            io = telegram_ref.get("io")
+            return io.resolve_ask(token, answer_text) if io is not None else False
 
     lazy_telegram = _LazyTelegram()
 

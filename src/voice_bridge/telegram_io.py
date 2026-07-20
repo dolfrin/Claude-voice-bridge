@@ -48,6 +48,7 @@ from telegram.ext import (
     filters,
 )
 
+from .approvals import _TOKEN_RE, _fold
 from .config import Config
 from .transcript import transcript_path
 from .tts import available_voices
@@ -239,6 +240,81 @@ def _next(seq: list[str], current: str) -> str:
     return seq[(i + 1) % len(seq)]
 
 
+# I2: 1-based ordinal words (EN + LT) a spoken answer might use instead of a
+# bare number ("the first one" / "pirmas"). Keys are ALREADY diacritic-folded
+# (see approvals._fold) because the answer's tokens are folded before lookup,
+# so "trečias" -> "trecias" -> 3 and every diacritic spelling collapses to one
+# entry. Kept small on purpose: a multiple-choice ask rarely has >5 options.
+_ORDINAL_WORDS: dict[str, int] = {
+    # English (word + "1st"/"2nd"/… numeric-ordinal forms)
+    "first": 1, "1st": 1,
+    "second": 2, "2nd": 2,
+    "third": 3, "3rd": 3,
+    "fourth": 4, "4th": 4,
+    "fifth": 5, "5th": 5,
+    # Lithuanian (folded)
+    "pirmas": 1, "pirma": 1, "pirmasis": 1, "pirmoji": 1,
+    "antras": 2, "antra": 2, "antrasis": 2, "antroji": 2,
+    "trecias": 3, "trecia": 3, "treciasis": 3, "trecioji": 3,
+    "ketvirtas": 4, "ketvirta": 4, "ketvirtasis": 4,
+    "penktas": 5, "penkta": 5, "penktasis": 5,
+}
+
+
+def _match_choice(answer_text: str, choices: list[str]) -> str | None:
+    """Map a free-text/voice answer to one of *choices*, or None if none fits.
+
+    This is what makes an ask answerable hands-free: the user hears the options
+    and just talks. Matching is tried most-specific first so an explicit pick
+    always wins over a fuzzy one:
+
+    1. a bare 1-based number ("2") -> that choice (ignored if out of range);
+    2. an ordinal word, EN or LT, diacritics folded ("second" / "trečias") ->
+       that choice — only when the answer names EXACTLY ONE in-range ordinal
+       (ambiguous "first or second" falls through);
+    3. a case-insensitive, diacritic-folded EXACT match to a choice label;
+    4. a case-insensitive, diacritic-folded UNIQUE substring (answer inside a
+       label OR a label inside the answer) — skipped when >1 label matches.
+
+    Returns the matched choice's ORIGINAL label (not the folded form), or None
+    so :meth:`TelegramIO.resolve_ask` can pass the raw answer through as
+    free-form. Pure; never raises."""
+    stripped = answer_text.strip()
+    if not stripped:
+        return None
+    lowered = stripped.lower()
+
+    # 1. bare number (1-based).
+    if lowered.isdigit():
+        idx = int(lowered) - 1
+        return choices[idx] if 0 <= idx < len(choices) else None
+
+    # 2. ordinal word(s) — only an unambiguous single ordinal counts.
+    folded_tokens = [_fold(t) for t in _TOKEN_RE.findall(lowered)]
+    ordinals = {_ORDINAL_WORDS[t] for t in folded_tokens if t in _ORDINAL_WORDS}
+    if len(ordinals) == 1:
+        idx = next(iter(ordinals)) - 1
+        if 0 <= idx < len(choices):
+            return choices[idx]
+
+    # 3. exact label (case + diacritic folded).
+    folded_answer = _fold(lowered)
+    for choice in choices:
+        if _fold(choice.lower()) == folded_answer:
+            return choice
+
+    # 4. unique substring, either direction.
+    substring_hits = [
+        choice
+        for choice in choices
+        if (folded_choice := _fold(choice.lower()))
+        and (folded_answer in folded_choice or folded_choice in folded_answer)
+    ]
+    if len(substring_hits) == 1:
+        return substring_hits[0]
+    return None
+
+
 class TelegramIO:
     def __init__(
         self,
@@ -265,6 +341,16 @@ class TelegramIO:
         self._pending_off_seq = 0
         self._pending_asks: dict[str, tuple[asyncio.Future[str], list[str]]] = {}
         self._pending_ask_seq = 0
+        # I2: token -> the ask question's message_id, so a quote-reply (text or
+        # voice) to THAT message can resolve THAT specific ask. Kept in lockstep
+        # with _pending_asks (set after a successful send in ask_user, popped by
+        # ask_user's finally on the button/timeout path and by resolve_ask on
+        # the phone-answer path).
+        self._ask_msg_ids: dict[str, int] = {}
+        # Live references to the fire-and-forget "Answered: …" edit tasks
+        # spawned by resolve_ask (which is sync). Held so the tasks are not
+        # garbage-collected mid-flight; each drops itself on completion.
+        self._ask_edit_tasks: set[asyncio.Task] = set()
 
     # --- whitelist -------------------------------------------------------
     def _allowed(self, user_id: int | None) -> bool:
@@ -501,7 +587,7 @@ class TelegramIO:
         ]
         bot = self.app.bot
         try:
-            await _send_with_retry(
+            msg = await _send_with_retry(
                 lambda: bot.send_message(
                     chat_id=self._chat_id,
                     text=f"[{project}] {question}",
@@ -518,12 +604,109 @@ class TelegramIO:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
         self._pending_asks[token] = (future, clean_choices)
+        # I2: map the question's message_id -> token so a quote-reply to THIS
+        # message resolves THIS ask (see resolve_ask / the inbound router).
+        # Defensive: if the send returned no usable message_id, skip the mapping
+        # — the single-pending fallback still lets a plain reply answer the sole
+        # outstanding question.
+        message_id = getattr(msg, "message_id", None)
+        if message_id is not None:
+            self._ask_msg_ids[token] = message_id
         try:
             return await asyncio.wait_for(future, timeout=self.cfg.approval_timeout)
         except asyncio.TimeoutError:
             return ""
         finally:
             self._pending_asks.pop(token, None)
+            self._ask_msg_ids.pop(token, None)
+
+    # --- I2: answer a pending ask from the phone (text/voice), not just taps --
+    def pending_ask_token_for_message(self, message_id: int) -> str | None:
+        """Token of the pending ask whose question is *message_id*, or None.
+
+        Reverse lookup for the inbound router: a quote-reply to a specific
+        ``ask_user`` question resolves THAT question. A mapping whose token is
+        no longer in ``_pending_asks`` (already answered / expired) is ignored
+        so a stale message_id never matches. Pure; never raises."""
+        for token, mid in self._ask_msg_ids.items():
+            if mid == message_id and token in self._pending_asks:
+                return token
+        return None
+
+    def single_pending_ask_token(self) -> str | None:
+        """The sole outstanding ask token, or None unless EXACTLY one is pending.
+
+        Lets the inbound router treat a plain reply (no quote-reply, no
+        name-prefix) as the answer when there is no ambiguity about which
+        question it answers. With zero or several pending, the message routes
+        normally. Pure."""
+        if len(self._pending_asks) == 1:
+            return next(iter(self._pending_asks))
+        return None
+
+    def has_pending_asks(self) -> bool:
+        """True if any ``ask_user`` question is currently awaiting an answer."""
+        return bool(self._pending_asks)
+
+    def resolve_ask(self, token: str, answer_text: str) -> bool:
+        """Resolve a pending ask from a phone reply. Return True if resolved.
+
+        SYNC by design: the inbound router calls it without ``await`` (like the
+        approval interception it mirrors), so the cosmetic "Answered: …" edit is
+        fired-and-forgotten rather than awaited. Returns False (message falls
+        through to normal routing) when the token is unknown / already answered,
+        or the answer is blank — never on a mere no-match, since a free-text
+        answer is itself a valid, useful reply for a hands-free user.
+
+        *answer_text* is mapped to a choice via :func:`_match_choice`; on a match
+        the future resolves to that choice's LABEL, otherwise to the RAW answer
+        (free-form passthrough — ``ask_user`` returns a plain string to the
+        agent). The ``_pending_asks`` pop stays with ``ask_user``'s finally (the
+        awaiter owns it, same as the button path); only ``_ask_msg_ids`` is
+        popped here."""
+        pending = self._pending_asks.get(token)
+        if pending is None:
+            return False
+        future, choices = pending
+        if future.done():
+            return False
+        if not answer_text or not answer_text.strip():
+            return False
+        matched = _match_choice(answer_text, choices)
+        resolved = matched if matched is not None else answer_text
+        if not future.done():
+            future.set_result(resolved)
+        message_id = self._ask_msg_ids.pop(token, None)
+        if message_id is not None:
+            self._schedule_ask_edit(message_id, resolved)
+        return True
+
+    def _schedule_ask_edit(self, message_id: int, resolved: str) -> None:
+        """Fire-and-forget the "Answered: …" message edit (best-effort).
+
+        resolve_ask is sync, so the async edit is scheduled as a task instead of
+        awaited. With no running loop (unusual — resolve_ask runs inside the
+        inbound coroutine) the edit is simply skipped; the answer is already
+        delivered to the agent, which is what matters."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._edit_ask_message(message_id, resolved))
+        self._ask_edit_tasks.add(task)
+        task.add_done_callback(self._ask_edit_tasks.discard)
+
+    async def _edit_ask_message(self, message_id: int, resolved: str) -> None:
+        try:
+            await self.app.bot.edit_message_text(
+                chat_id=self._chat_id,
+                message_id=message_id,
+                text=f"Answered: {resolved}",
+            )
+        except TelegramError:
+            # Cosmetic only (mark the question answered); the agent already has
+            # its answer, so a failed edit must never surface as a failure.
+            logger.debug("resolve_ask: message edit failed for %s", message_id)
 
     async def send_file(
         self,

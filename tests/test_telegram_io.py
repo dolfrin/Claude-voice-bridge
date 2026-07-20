@@ -2950,3 +2950,234 @@ async def test_stop_is_noop_when_never_run():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     # app is None; stop must not raise.
     await io.stop()
+
+
+# --------------------------------------------------------------------------
+# I2: answer a pending ask_user question from the phone (text/voice), not just
+# by tapping a button. telegram_io side: message_id capture, the reverse/
+# single-pending lookups, and resolve_ask's answer->choice matching.
+# --------------------------------------------------------------------------
+
+
+def _register_pending_ask(io, token, choices, *, message_id=None):
+    """Register a pending ask future the way ask_user does, for unit tests of
+    the query/resolve helpers without driving the whole send+await flow."""
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    io._pending_asks[token] = (future, choices)
+    if message_id is not None:
+        io._ask_msg_ids[token] = message_id
+    return future
+
+
+def _io_with_bot():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=320))
+    bot.edit_message_text = AsyncMock()
+    io.app = MagicMock()
+    io.app.bot = bot
+    return io, bot
+
+
+@pytest.mark.asyncio
+async def test_ask_user_records_message_id_for_reverse_lookup():
+    io, bot = _io_with_bot()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=777))
+
+    task = asyncio.create_task(io.ask_user("qwing", "Rinktis?", ["A", "B"]))
+    await asyncio.sleep(0)
+
+    token = next(iter(io._pending_asks))
+    assert io._ask_msg_ids[token] == 777
+    # reverse lookup resolves that message_id -> the token
+    assert io.pending_ask_token_for_message(777) == token
+
+    future, _ = io._pending_asks[token]
+    future.set_result("A")
+    assert await task == "A"
+    # cleanup pops BOTH maps
+    assert io._pending_asks == {}
+    assert io._ask_msg_ids == {}
+
+
+@pytest.mark.asyncio
+async def test_pending_ask_token_for_message_hit_and_miss():
+    io, _ = _io_with_bot()
+    _register_pending_ask(io, "5", ["A", "B"], message_id=900)
+
+    assert io.pending_ask_token_for_message(900) == "5"
+    assert io.pending_ask_token_for_message(901) is None
+
+
+@pytest.mark.asyncio
+async def test_pending_ask_token_for_message_ignores_stale_mapping():
+    # A message_id mapping whose token is no longer pending must not match
+    # (the ask already resolved / expired).
+    io, _ = _io_with_bot()
+    io._ask_msg_ids["5"] = 900  # mapping without a live _pending_asks entry
+    assert io.pending_ask_token_for_message(900) is None
+
+
+@pytest.mark.asyncio
+async def test_single_pending_ask_token_zero_one_two():
+    io, _ = _io_with_bot()
+    assert io.single_pending_ask_token() is None  # zero
+
+    _register_pending_ask(io, "1", ["A", "B"])
+    assert io.single_pending_ask_token() == "1"  # exactly one
+    assert io.has_pending_asks() is True
+
+    _register_pending_ask(io, "2", ["C", "D"])
+    assert io.single_pending_ask_token() is None  # two -> ambiguous
+    assert io.has_pending_asks() is True
+
+
+@pytest.mark.asyncio
+async def test_has_pending_asks_false_when_none():
+    io, _ = _io_with_bot()
+    assert io.has_pending_asks() is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_numeric_picks_choice_by_index():
+    io, bot = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["Deploy", "Rollback"], message_id=900)
+
+    assert io.resolve_ask("1", "2") is True
+    assert future.result() == "Rollback"
+    await asyncio.sleep(0)
+    bot.edit_message_text.assert_awaited_once()
+    assert bot.edit_message_text.await_args.kwargs["text"] == "Answered: Rollback"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_numeric_out_of_range_falls_to_free_form():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["A", "B"])
+    # "5" is numeric but out of range -> not a choice; free-form passthrough.
+    assert io.resolve_ask("1", "5") is True
+    assert future.result() == "5"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_ordinal_english():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["Deploy", "Rollback", "Wait"])
+    assert io.resolve_ask("1", "second") is True
+    assert future.result() == "Rollback"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_ordinal_lithuanian_with_diacritics():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["Deploy", "Rollback", "Wait"])
+    # "trečias" folds to "trecias" -> third choice.
+    assert io.resolve_ask("1", "trečias") is True
+    assert future.result() == "Wait"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_ordinal_lithuanian_pirmas():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["Deploy", "Rollback"])
+    assert io.resolve_ask("1", "pirmas") is True
+    assert future.result() == "Deploy"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_exact_label_case_and_diacritic_folded():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["Tęsk", "Stok"])
+    # Whisper may drop the diacritic: "tesk" must still match "Tęsk".
+    assert io.resolve_ask("1", "TESK") is True
+    assert future.result() == "Tęsk"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_unique_substring():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["Deploy to prod", "Rollback"])
+    assert io.resolve_ask("1", "deploy") is True
+    assert future.result() == "Deploy to prod"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_ambiguous_substring_falls_to_free_form():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["deploy prod", "deploy staging"])
+    # "deploy" is a substring of BOTH -> not unique -> free-form passthrough.
+    assert io.resolve_ask("1", "deploy") is True
+    assert future.result() == "deploy"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_free_form_passthrough_when_no_match():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["A", "B"])
+    assert io.resolve_ask("1", "let me think about the tradeoffs") is True
+    assert future.result() == "let me think about the tradeoffs"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_empty_answer_returns_false_and_does_not_resolve():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["A", "B"])
+    assert io.resolve_ask("1", "   ") is False
+    assert not future.done()
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_stale_token_returns_false():
+    io, _ = _io_with_bot()
+    assert io.resolve_ask("does-not-exist", "1") is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_already_done_future_returns_false():
+    io, _ = _io_with_bot()
+    future = _register_pending_ask(io, "1", ["A", "B"])
+    future.set_result("A")  # already answered (e.g. via a button tap)
+    assert io.resolve_ask("1", "2") is False
+    assert future.result() == "A"  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_message_edit_is_best_effort():
+    # A TelegramError from the cosmetic edit must NOT flip the result to False
+    # or raise -- the answer is already delivered to the agent.
+    io, bot = _io_with_bot()
+    bot.edit_message_text = AsyncMock(side_effect=BadRequest("message not found"))
+    future = _register_pending_ask(io, "1", ["A", "B"], message_id=900)
+
+    assert io.resolve_ask("1", "1") is True
+    assert future.result() == "A"
+    await asyncio.sleep(0)  # let the fire-and-forget edit task run and swallow
+
+
+@pytest.mark.asyncio
+async def test_resolve_ask_pops_msg_id_but_leaves_pending_for_ask_user():
+    # resolve_ask owns the _ask_msg_ids pop; the _pending_asks pop stays with
+    # ask_user's finally (same ownership as the button path).
+    io, _ = _io_with_bot()
+    _register_pending_ask(io, "1", ["A", "B"], message_id=900)
+    assert io.resolve_ask("1", "1") is True
+    assert "1" not in io._ask_msg_ids
+    assert "1" in io._pending_asks  # still awaited by ask_user
+
+
+@pytest.mark.asyncio
+async def test_ask_user_returns_and_cleans_up_when_resolved_via_resolve_ask():
+    # End-to-end: ask_user is awaiting; a phone reply resolves it via
+    # resolve_ask; ask_user returns the resolved value and cleans up BOTH maps.
+    io, bot = _io_with_bot()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=555))
+
+    task = asyncio.create_task(io.ask_user("qwing", "Rinktis?", ["A", "B"]))
+    await asyncio.sleep(0)
+    token = next(iter(io._pending_asks))
+
+    assert io.resolve_ask(token, "first") is True
+    assert await task == "A"
+    assert io._pending_asks == {}
+    assert io._ask_msg_ids == {}
