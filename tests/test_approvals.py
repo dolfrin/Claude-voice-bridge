@@ -1156,6 +1156,21 @@ def test_signature_quoted_redirect_target_with_space_escaping_cwd(tmp_path):
     assert is_risky("Bash", {"command": 'echo x > "out file.txt"'}, str(tmp_path)) is False
 
 
+def test_signature_backslash_escaped_redirect_target_escaping_cwd(tmp_path):
+    # Bash keeps a backslash-escaped delimiter (`a\ b`, `a\;b`) as a literal
+    # part of the filename; a word capture that treats the escaped char as a
+    # boundary truncates before the `../` escape and misses the out-of-cwd
+    # write. Unescaping in normalization must let realpath see bash's path.
+    (tmp_path / "sub" / "a b").mkdir(parents=True)
+    esc = r"echo PWNED > sub/a\ b/../../../victim.txt"
+    assert is_risky("Bash", {"command": esc}, str(tmp_path)) is True
+    gp = r"git push > sub/a\ b/../../../victim.txt"
+    assert signature_for("Bash", {"command": gp}, str(tmp_path)) != "git push"
+    # An escaped-space target that stays INSIDE cwd is not over-flagged.
+    (tmp_path / "a b").mkdir()
+    assert is_risky("Bash", {"command": r"echo x > a\ b/keep.txt"}, str(tmp_path)) is False
+
+
 def test_signature_odd_input_never_raises_and_has_no_broad_risky_key():
     # Malformed input must never raise. A Bash call with no/empty command is
     # NON-risky, so it degrades to the harmless "ok:Bash" fallback (only ever

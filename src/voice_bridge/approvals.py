@@ -101,10 +101,15 @@ _RISKY_COMMAND_PATTERNS.append(
 # metachars that end a word/redirection) terminate the word. `_AMP_WORD`'s first
 # element additionally forbids a leading digit/`-` so an fd-dup (`>&1`) is not
 # read as a file.
-_WORD_CHUNK = r'"[^"]*"|\'[^\']*\'|[^\s"\'|;&<>]'
+# `\\.` FIRST: a backslash escapes the next char (incl. a delimiter — `a\ b`,
+# `a\;b`), which bash keeps as a literal part of the filename. Capturing it as a
+# two-char unit stops the word from terminating at the escaped delimiter and
+# hiding a `../` escape after it. The backslashes are removed in normalization
+# (see _risky_redirect_targets) so realpath sees bash's true path.
+_WORD_CHUNK = r'\\.|"[^"]*"|\'[^\']*\'|[^\s"\'|;&<>]'
 _REDIRECT_WORD = r"(?:" + _WORD_CHUNK + r")+"
 _AMP_WORD = (
-    r'(?:"[^"]*"|\'[^\']*\'|[^\s"\'|;&<>0-9-])(?:' + _WORD_CHUNK + r")*"
+    r'(?:\\.|"[^"]*"|\'[^\']*\'|[^\s"\'|;&<>0-9-])(?:' + _WORD_CHUNK + r")*"
 )
 _SAFE_REDIRECT_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr"}
 
@@ -337,11 +342,12 @@ def _risky_redirect_targets(command: str, cwd: str) -> list[str]:
     for pattern in (_REDIRECT_TARGET_RE, _REDIRECT_AMP_TARGET_RE):
         for match in pattern.finditer(command):
             raw = match.group(1)
-            # Bash strips quotes and expands ~/$VAR BEFORE opening the file, so
-            # the raw captured word differs from the path actually written:
-            # `> "/etc/passwd"` opens /etc/passwd, `> ~/.bashrc` opens $HOME/….
-            # Normalize (drop the quote chars bash removes) before classifying.
-            target = raw.replace('"', "").replace("'", "")
+            # Bash removes backslash-escapes and quotes and expands ~/$VAR
+            # BEFORE opening the file, so the raw captured word differs from the
+            # path actually written: `> "/etc/passwd"` opens /etc/passwd,
+            # `> a\ b/../x` opens `a b/../x`, `> ~/.bashrc` opens $HOME/….
+            # Normalize (unescape, then drop the quote chars) before classifying.
+            target = re.sub(r"\\(.)", r"\1", raw).replace('"', "").replace("'", "")
             if target in _SAFE_REDIRECT_TARGETS:
                 continue
             if (
