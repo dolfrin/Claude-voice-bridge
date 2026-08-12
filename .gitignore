@@ -12,3 +12,4 @@ docs/superpowers/
 .claude/
 /var/
 .venv/
+.serena/

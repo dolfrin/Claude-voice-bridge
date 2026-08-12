@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
+import time
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
 
@@ -27,6 +29,7 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MessageEntity,
     Update,
 )
 from telegram.error import BadRequest
@@ -40,8 +43,11 @@ from telegram.ext import (
 )
 
 from .config import Config
+from .routing import project_of
 from .transcript import transcript_path
 from .tts import available_voices
+
+logger = logging.getLogger(__name__)
 
 
 class Controls(Protocol):
@@ -66,14 +72,34 @@ class Controls(Protocol):
     async def set_engine(self, name: str) -> None: ...
     async def interrupt(self, project: str | None) -> str: ...
 
+    # conversations (one Claude session each, one sub-topic each)
+    async def open_conversation(
+        self, project: str, resume: str | None = None, fork: bool = False
+    ) -> str | None: ...
+    async def stage_conversation(self, project: str, resume: str) -> str | None: ...
+    async def attach_conversation(self, key: str) -> bool: ...
+    def project_sessions(self, project: str, limit: int | None = None) -> tuple[list, int]: ...
+    def session_history_text(self, project: str, uuid: str) -> str: ...
+    def session_transcript_file(self, project: str, uuid: str): ...
+    async def close_conversation(self, key: str) -> bool: ...
+    async def reload_conversations(self) -> None: ...
+    def conversation_rows(self) -> list[dict]: ...
+    def resume_options(self, project: str) -> list: ...
+    def history_text(self, key: str, limit: int = 12) -> str: ...
 
-_MODES = ["safe", "full", "ask"]
+
+_MODES = ["auto", "safe", "full", "ask"]
 _ENGINES = ["auto", "openai", "piper", "together"]
 _PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 _AUDIO_SUFFIXES = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 _BOT_COMMANDS = [
     BotCommand("menu", "🏠 Main menu"),
+    BotCommand("new", "➕ New session sub-topic"),
+    BotCommand("resume", "🔄 Attach an existing Claude session"),
+    BotCommand("sessions", "📋 Open sessions"),
+    BotCommand("history", "📜 Session transcript"),
+    BotCommand("close", "🗑 Close this session"),
     BotCommand("panel", "🎛 Control panel"),
     BotCommand("projects", "🟢 Active projects"),
     BotCommand("projects_all", "📚 All projects"),
@@ -87,6 +113,13 @@ _BOT_COMMANDS = [
     BotCommand("voice", "🔊 List or set TTS voice"),
     BotCommand("engine", "🧠 Change TTS backend"),
 ]
+
+# Text posted into a project's own topic is not a turn: that topic is the
+# control desk, the agent lives in the numbered sub-topics.
+_HUB_HINT = (
+    "\U0001F5C2 <b>{name}</b> — control topic.\n"
+    "Agent work happens in the <b>#N</b> sub-topics."
+)
 
 
 def _next(seq: list[str], current: str) -> str:
@@ -159,6 +192,14 @@ def build_projects_list_markup(
 def build_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("➕ New session", callback_data="menu:new"),
+            InlineKeyboardButton("🔄 Resume", callback_data="menu:resume"),
+        ],
+        [
+            InlineKeyboardButton("📋 Sessions", callback_data="clist:"),
+            InlineKeyboardButton("📜 History", callback_data="menu:history"),
+        ],
+        [
             InlineKeyboardButton("🟢 Active", callback_data="menu:projects"),
             InlineKeyboardButton("📚 All", callback_data="menu:projects_all"),
         ],
@@ -170,6 +211,57 @@ def build_menu_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⛔ Stop", callback_data="menu:stop"),
             InlineKeyboardButton("🔎 Refresh", callback_data="menu:refresh"),
         ],
+    ])
+
+
+def build_project_pick_markup(
+    snapshot: list[dict], action: str, show_all: bool = False
+) -> InlineKeyboardMarkup:
+    """Pick a project, then run *action* on it.
+
+    ``/new`` and ``/resume`` need a project, and the main menu is opened from
+    General where no topic names one — so the menu asks first.
+    """
+    rows = []
+    for idx, row in _project_list_rows(snapshot, show_all=show_all):
+        status = "\U0001F7E2" if row["enabled"] else "⚪"
+        name = row.get("display_name") or row["project"]
+        rows.append([
+            InlineKeyboardButton(f"{status} {name}", callback_data=f"{action}:{idx}")
+        ])
+    rows.append([InlineKeyboardButton("« menu", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def format_session_index(label: str, sessions: list, total: int) -> str:
+    """Header for a project's session list, naming what the cap left out."""
+    if not sessions:
+        return f"{html.escape(label)}: no Claude sessions on disk."
+    shown = (
+        f"showing {len(sessions)} of {total}" if total > len(sessions)
+        else f"{total} session{'s' if total != 1 else ''}"
+    )
+    return f"\U0001F4DC <b>{html.escape(label)}</b> — {shown}"
+
+
+def build_session_pick_markup(idx: int, sessions: list, action: str) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'🟢 ' if s.live else ''}{(s.title or s.uuid)[:44]}",
+                callback_data=f"{action}:{idx}:{s.uuid}",
+            )
+        ]
+        for s in sessions
+    ]
+    rows.append([InlineKeyboardButton("« menu", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_transcript_markup(idx: int, uuid: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Full transcript", callback_data=f"cfull:{idx}:{uuid}")],
+        [InlineKeyboardButton("« back", callback_data=f"chp:{idx}")],
     ])
 
 
@@ -202,10 +294,18 @@ def _find_project_row(snapshot: list[dict], project: str) -> dict | None:
     return snapshot[0] if snapshot else None
 
 
-def _tail_for_telegram(text: str, limit: int = 3500) -> str:
+def tail_for_telegram(text: str, limit: int = 3500) -> str:
     if len(text) <= limit:
         return text
     return "...\n" + text[-limit:]
+
+
+# Telegram rejects a sendMessage body longer than this.
+TELEGRAM_MAX_MESSAGE = 4096
+
+def _utf16_len(text: str) -> int:
+    """Telegram entity offsets/lengths count UTF-16 code units, not chars."""
+    return len(text.encode("utf-16-le")) // 2
 
 
 def _clean_choices(choices: list[str], limit: int = 6) -> list[str]:
@@ -293,20 +393,192 @@ def build_voice_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def build_hub_markup(idx: int) -> InlineKeyboardMarkup:
+    """Buttons of a project's control topic."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("➕ New session", callback_data=f"cnew:{idx}"),
+            InlineKeyboardButton("🔄 Resume", callback_data=f"cres:{idx}"),
+        ],
+        [
+            InlineKeyboardButton("📋 Sessions", callback_data=f"clist:{idx}"),
+            InlineKeyboardButton("🎛 Panel", callback_data="menu:panel"),
+        ],
+    ])
+
+
+def topic_link(chat_id: int, thread_id: int) -> str | None:
+    """``t.me`` deep link to a forum topic, for supergroups only."""
+    text = str(chat_id)
+    if not text.startswith("-100"):
+        return None
+    return f"https://t.me/c/{text[4:]}/{thread_id}"
+
+
+def format_conversations(rows: list[dict]) -> str:
+    """Render the open-sessions list.
+
+    Two names per row on purpose: the topic it lives in, and what Claude calls
+    the session. The topic name alone is just a number.
+    """
+    if not rows:
+        return "No open sessions. Use /new in a project topic."
+    lines: list[str] = []
+    for row in rows:
+        if row.get("busy"):
+            status = "⚡"
+        elif row.get("running"):
+            status = "\U0001F7E2"
+        else:
+            status = "⚪"
+        title = html.escape(row.get("title") or row["key"])
+        lines.append(f"{status} <b>{title}</b>")
+        session_title = row.get("session_title") or ""
+        lines.append(
+            f"    ↳ <i>{html.escape(session_title[:60])}</i>"
+            if session_title
+            else "    ↳ <i>new session, no name yet</i>"
+        )
+    lines.append("\n⚡ working now · 🟢 live, waiting · ⚪ stopped")
+    return "\n".join(lines)
+
+
+def conversation_label(row: dict, limit: int = 42) -> str:
+    """``Paprika ASR #2 · Fix topic routing bug``, clipped to fit a button."""
+    label = row.get("title") or row["key"]
+    session_title = row.get("session_title") or ""
+    if not session_title:
+        return label
+    room = limit - len(label) - 3
+    if room < 8:
+        return label
+    return f"{label} · {session_title[:room]}"
+
+
+def build_conversations_markup(rows: list[dict], chat_id: int | None) -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
+    for row in rows:
+        label = conversation_label(row)
+        link = (
+            topic_link(chat_id, row["thread_id"])
+            if chat_id is not None and row.get("thread_id")
+            else None
+        )
+        open_button = (
+            InlineKeyboardButton(f"\U0001F5C2 {label}", url=link)
+            if link
+            else InlineKeyboardButton(f"\U0001F5C2 {label}", callback_data="noop:0")
+        )
+        buttons.append([
+            open_button,
+            InlineKeyboardButton("🗑", callback_data=f"cdel:{row['key']}"),
+        ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def format_resume_options(project_label: str, sessions: list) -> str:
+    """Render the Claude-session picker: title, when, where we left off."""
+    if not sessions:
+        return f"{html.escape(project_label)}: no Claude sessions on disk yet."
+    lines = [f"\U0001F4C2 <b>{html.escape(project_label)}</b>\n"]
+    for i, session in enumerate(sessions, 1):
+        when = time.strftime("%m-%d %H:%M", time.localtime(session.mtime))
+        live = (
+            f" \U0001F7E2 <i>open in {html.escape(session.live)}</i>"
+            if session.live
+            else ""
+        )
+        lines.append(f"<b>{i}. {html.escape(session.title[:60])}</b>{live}")
+        lines.append(f"    <i>{when}</i>")
+        if session.last_prompt:
+            lines.append(f"    ↳ <i>{html.escape(session.last_prompt[:70])}</i>")
+    lines.append(
+        "\n\U0001F7E2 = open elsewhere → attaches as a <b>fork</b> "
+        "(the original is untouched)."
+    )
+    return "\n".join(lines)
+
+
+def build_resume_markup(idx: int, sessions: list) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"{i}. {'🟢 ' if s.live else ''}{(s.title or s.uuid)[:40]}",
+                callback_data=f"rs:{idx}:{s.uuid}",
+            )
+        ]
+        for i, s in enumerate(sessions, 1)
+    ])
+
+
+def format_attach_card(key: str, session, transcript: str) -> str:
+    """The card posted INTO a staged session's own topic.
+
+    Everything needed to recognise a session before reopening it: what Claude
+    calls it, where it runs, when it was last touched, and how it ended.
+    """
+    when = time.strftime("%m-%d %H:%M", time.localtime(session.mtime))
+    lines = [
+        f"\U0001F504 <b>{html.escape(session.title or session.uuid)}</b>",
+        f"\U0001F4C2 <code>{html.escape(session.cwd)}</code>",
+        f"\U0001F551 {when} · <code>{html.escape(session.uuid[:8])}</code>",
+    ]
+    if session.last_prompt:
+        lines.append(f"↳ <i>{html.escape(session.last_prompt[:120])}</i>")
+    if session.live:
+        lines.append(
+            f"\U0001F7E2 open in <b>{html.escape(session.live)}</b> → "
+            "will attach as a <b>fork</b>, the original stays untouched"
+        )
+    if transcript:
+        lines.append("")
+        lines.append(transcript)
+    return "\n".join(lines)
+
+
+def build_attach_markup(key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔗 Attach", callback_data=f"cok:{key}"),
+        InlineKeyboardButton("🗑 Cancel", callback_data=f"cdel:{key}"),
+    ]])
+
+
+def build_progress_markup(key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⛔ Stop", callback_data=f"pstop:{key}")]
+    ])
+
+
 class TelegramIO:
     def __init__(
         self,
         cfg: Config,
         on_user_message: Callable[[dict], Awaitable[None]],
         controls: Controls,
+        store=None,
+        projects=None,
     ) -> None:
         self.cfg = cfg
         self.on_user_message = on_user_message
         self.controls = controls
+        # Both only needed in group mode, to create and persist the per-project
+        # forum topics once the Application exists.
+        self._store = store
+        self._projects = list(projects or [])
+        # project name -> control topic; conversation key -> its own sub-topic.
+        self._topics: dict[str, int] = {}
+        self._conv_topics: dict[str, int] = {}
+        # conversation key -> the live progress message being edited in place.
+        self._progress_msgs: dict[str, int] = {}
         self.app: Application | None = None
         self._pending_off_sends: dict[str, tuple[str, str]] = {}
         self._pending_off_seq = 0
-        self._pending_asks: dict[str, tuple[asyncio.Future[str], list[str]]] = {}
+        # token -> (future, labels, bodies). bodies is None for ask_user
+        # (single-message flow, no Edit) and carries the untruncated option
+        # bodies for ask_per_message so the Edit tap can dump the text.
+        self._pending_asks: dict[
+            str, tuple[asyncio.Future[str | None], list[str], list[str] | None]
+        ] = {}
         self._pending_ask_seq = 0
 
     # --- whitelist -------------------------------------------------------
@@ -315,8 +587,159 @@ class TelegramIO:
 
     @property
     def _chat_id(self) -> int:
-        # Single-chat bot: the only authorized user is also the chat target.
+        # Group mode posts into the configured supergroup; otherwise the only
+        # authorized user is also the chat target.
+        if self.cfg.telegram_chat_id is not None:
+            return self.cfg.telegram_chat_id
         return self.cfg.telegram_allowed_user_id
+
+    def _dest(self, target: str | None) -> dict:
+        """Destination kwargs for any send: the chat, and the right topic.
+
+        *target* is either a conversation key (``"paprika#1"`` — its own
+        sub-topic) or a project name (its control topic). In private-chat mode
+        there are no topics and this is just the chat id. Anything without a
+        topic yet falls back to the group's General thread rather than failing
+        the send.
+        """
+        dest = {"chat_id": self._chat_id}
+        thread_id = None
+        if target:
+            thread_id = self._conv_topics.get(target)
+            if thread_id is None:
+                thread_id = self._topics.get(project_of(target))
+        if thread_id is not None:
+            dest["message_thread_id"] = thread_id
+        return dest
+
+    def project_for_thread(self, thread_id: int | None) -> str | None:
+        """Which project's CONTROL topic this is, if any."""
+        if thread_id is None:
+            return None
+        for name, tid in self._topics.items():
+            if tid == thread_id:
+                return name
+        return None
+
+    def conversation_for_thread(self, thread_id: int | None) -> str | None:
+        """Which conversation owns an incoming sub-topic, if any."""
+        if thread_id is None:
+            return None
+        for key, tid in self._conv_topics.items():
+            if tid == thread_id:
+                return key
+        return None
+
+    async def ensure_topics(self, projects: list | None = None) -> None:
+        """Create one forum topic per project, reusing any already recorded.
+
+        No-op outside group mode. A failure to create one topic is logged and
+        skipped: that project simply keeps landing in General, which is far
+        better than refusing to start the bot.
+        """
+        chat_id = self.cfg.telegram_chat_id
+        if chat_id is None or self._store is None:
+            return
+        self._topics = await self._store.topics_for_chat(chat_id)
+        for project in self._projects if projects is None else projects:
+            if project.name in self._topics:
+                continue
+            title = (project.display_name or project.name)[:128]
+            try:
+                topic = await self.app.bot.create_forum_topic(
+                    chat_id=chat_id, name=title
+                )
+            except Exception:  # noqa: BLE001 - one bad topic must not stop startup
+                logger.exception("could not create a forum topic for %s", project.name)
+                continue
+            self._topics[project.name] = topic.message_thread_id
+            await self._store.set_topic(
+                project.name, chat_id, topic.message_thread_id
+            )
+
+    async def load_conversation_topics(self) -> None:
+        """Remember the sub-topics of every open conversation (restart-safe)."""
+        if self._store is None:
+            return
+        self._conv_topics = {
+            conv.key: conv.thread_id
+            for conv in await self._store.conversations()
+            if conv.thread_id is not None
+        }
+
+    async def open_conversation_topic(
+        self, key: str, project: str, ordinal: int
+    ) -> int | None:
+        """Create the ``<project> #N`` sub-topic for a new conversation.
+
+        Outside group mode there is nothing to create; the conversation simply
+        shares the private chat, which is the pre-topics behaviour.
+        """
+        chat_id = self.cfg.telegram_chat_id
+        if chat_id is None or self.app is None:
+            return None
+        base = next(
+            (p.display_name or p.name for p in self._projects if p.name == project),
+            project,
+        )
+        title = f"{base} #{ordinal}"[:128]
+        try:
+            topic = await self.app.bot.create_forum_topic(chat_id=chat_id, name=title)
+        except Exception:  # noqa: BLE001 - fall back to General, never fail the open
+            logger.exception("could not create a sub-topic for %s", key)
+            return None
+        self._conv_topics[key] = topic.message_thread_id
+        if self._store is not None:
+            await self._store.set_conversation_topic(
+                key, chat_id, topic.message_thread_id
+            )
+        return topic.message_thread_id
+
+    async def close_conversation_topic(self, key: str) -> None:
+        """Delete a closed conversation's sub-topic; a left-behind one only
+        clutters the forum, and its conversation can never be reopened."""
+        thread_id = self._conv_topics.pop(key, None)
+        self._progress_msgs.pop(key, None)
+        chat_id = self.cfg.telegram_chat_id
+        if thread_id is None or chat_id is None or self.app is None:
+            return
+        try:
+            await self.app.bot.delete_forum_topic(
+                chat_id=chat_id, message_thread_id=thread_id
+            )
+        except Exception:  # noqa: BLE001 - already gone / no rights
+            logger.info("could not delete sub-topic for %s", key, exc_info=True)
+
+    async def send_progress(self, key: str, text: str, final: bool) -> None:
+        """Show what the agent is doing right now, editing ONE message.
+
+        A new message per tool call would bury the conversation, so the live
+        view is a single message edited in place — and dropped once the turn
+        ends, leaving only the final one-line summary.
+        """
+        bot = self.app.bot
+        message_id = self._progress_msgs.get(key)
+        markup = None if final else build_progress_markup(key)
+        if message_id is None:
+            if final:
+                return
+            msg = await bot.send_message(
+                **self._dest(key), text=text, reply_markup=markup
+            )
+            self._progress_msgs[key] = msg.message_id
+            return
+        try:
+            await bot.edit_message_text(
+                chat_id=self._chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=markup,
+            )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                logger.debug("progress edit failed for %s: %s", key, exc)
+        if final:
+            self._progress_msgs.pop(key, None)
 
     # --- inbound handlers ------------------------------------------------
     @staticmethod
@@ -325,19 +748,54 @@ class TelegramIO:
             return msg.reply_to_message.message_id
         return None
 
+    async def _hub_of(self, msg) -> str | None:
+        """The project whose CONTROL topic this message landed in, if any.
+
+        A hit means the message is not a turn: it is answered with the hub's
+        buttons instead of being forwarded to an agent.
+        """
+        thread_id = getattr(msg, "message_thread_id", None)
+        if self.conversation_for_thread(thread_id) is not None:
+            return None
+        return self.project_for_thread(thread_id)
+
+    async def _reply_hub(self, msg, project: str) -> None:
+        snapshot = self.controls.snapshot()
+        idx = next(
+            (i for i, row in enumerate(snapshot) if row["project"] == project), None
+        )
+        row = snapshot[idx] if idx is not None else None
+        name = (row.get("display_name") or project) if row else project
+        await msg.reply_text(
+            _HUB_HINT.format(name=html.escape(name)),
+            parse_mode="HTML",
+            reply_markup=build_hub_markup(idx) if idx is not None else None,
+        )
+
+    def _inbound(self, msg, key: str | None, **extra) -> dict:
+        payload = {
+            "message_id": msg.message_id,
+            "reply_to": self._reply_to(msg),
+            "project": key,
+            "text": "",
+            "is_voice": False,
+            "audio": None,
+        }
+        payload.update(extra)
+        return payload
+
     async def _handle_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        await self.on_user_message({
-            "message_id": msg.message_id,
-            "reply_to": self._reply_to(msg),
-            "text": msg.text or "",
-            "is_voice": False,
-            "audio": None,
-        })
+        hub = await self._hub_of(msg)
+        if hub is not None:
+            await self._reply_hub(msg, hub)
+            return
+        key = self.conversation_for_thread(getattr(msg, "message_thread_id", None))
+        await self.on_user_message(self._inbound(msg, key, text=msg.text or ""))
 
     async def _handle_voice(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -345,15 +803,16 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
+        hub = await self._hub_of(msg)
+        if hub is not None:
+            await self._reply_hub(msg, hub)
+            return
         tg_file = await msg.voice.get_file()
         audio = bytes(await tg_file.download_as_bytearray())
-        await self.on_user_message({
-            "message_id": msg.message_id,
-            "reply_to": self._reply_to(msg),
-            "text": "",
-            "is_voice": True,
-            "audio": audio,
-        })
+        key = self.conversation_for_thread(getattr(msg, "message_thread_id", None))
+        await self.on_user_message(
+            self._inbound(msg, key, is_voice=True, audio=audio)
+        )
 
     async def _handle_attachment(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -361,17 +820,19 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
+        hub = await self._hub_of(msg)
+        if hub is not None:
+            await self._reply_hub(msg, hub)
+            return
         attachment = await _download_attachment(msg)
         if attachment is None:
             return
-        await self.on_user_message({
-            "message_id": msg.message_id,
-            "reply_to": self._reply_to(msg),
-            "text": msg.caption or "",
-            "is_voice": False,
-            "audio": None,
-            "attachments": [attachment],
-        })
+        key = self.conversation_for_thread(getattr(msg, "message_thread_id", None))
+        await self.on_user_message(
+            self._inbound(
+                msg, key, text=msg.caption or "", attachments=[attachment]
+            )
+        )
 
     # --- outbound --------------------------------------------------------
     async def send_update(
@@ -386,13 +847,13 @@ class TelegramIO:
         bot = self.app.bot
         ids: list[int] = []
         text_msg = await bot.send_message(
-            chat_id=self._chat_id,
+            **self._dest(project),
             text=f"[{project}] {text}",
         )
         ids.append(text_msg.message_id)
         if voice_bytes is not None:
             voice_msg = await bot.send_voice(
-                chat_id=self._chat_id,
+                **self._dest(project),
                 voice=voice_bytes,
                 caption=f"{project} · {voice_label}",
             )
@@ -403,10 +864,58 @@ class TelegramIO:
         """Send one message and return its message_id (keys approvals)."""
         bot = self.app.bot
         msg = await bot.send_message(
-            chat_id=self._chat_id,
+            **self._dest(project),
             text=f"[{project}] {text}",
         )
         return msg.message_id
+
+    async def ask_per_message(
+        self,
+        project: str,
+        options: list[tuple[str, str]],
+        button: str = "Accept this",
+    ) -> str | None:
+        """Send one message per option, each carrying its own accept button.
+
+        Unlike :meth:`ask_user`, which puts every choice on one message, this
+        gives each option a full message of its own so long bodies stay
+        readable. Returns the accepted option's label, or ``""`` if nothing was
+        tapped before ``approval_timeout``. The first tap resolves the choice
+        and expires the rest.
+        Returns ``None`` when the user taps Edit: the tapped message is
+        replaced with the raw transcript as a tap-to-copy code block and the
+        caller must abort silently — the user resends corrected text as a
+        normal message.
+        """
+        labels = [
+            " ".join(str(label).split())[:48] or f"option {idx + 1}"
+            for idx, (label, _body) in enumerate(options)
+        ]
+        self._pending_ask_seq += 1
+        token = str(self._pending_ask_seq)
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+        self._pending_asks[token] = (
+            future,
+            labels,
+            [body for _label, body in options],
+        )
+        for idx, (_label, body) in enumerate(options):
+            header = f"[{project}] {labels[idx]}\n\n"
+            await self.app.bot.send_message(
+                **self._dest(project),
+                text=(header + body)[:TELEGRAM_MAX_MESSAGE],
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(button, callback_data=f"ask:{token}:{idx}"),
+                    InlineKeyboardButton("Edit", callback_data=f"ask:{token}:e{idx}"),
+                ]]),
+            )
+        try:
+            return await asyncio.wait_for(future, timeout=self.cfg.approval_timeout)
+        except asyncio.TimeoutError:
+            return ""
+        finally:
+            self._pending_asks.pop(token, None)
 
     async def ask_user(self, project: str, question: str, choices: list[str]) -> str:
         clean_choices = _clean_choices(choices)
@@ -416,13 +925,13 @@ class TelegramIO:
         token = str(self._pending_ask_seq)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
-        self._pending_asks[token] = (future, clean_choices)
+        self._pending_asks[token] = (future, clean_choices, None)
         rows = [
             [InlineKeyboardButton(choice, callback_data=f"ask:{token}:{idx}")]
             for idx, choice in enumerate(clean_choices)
         ]
         await self.app.bot.send_message(
-            chat_id=self._chat_id,
+            **self._dest(project),
             text=f"[{project}] {question}",
             reply_markup=InlineKeyboardMarkup(rows),
         )
@@ -451,25 +960,25 @@ class TelegramIO:
         with path.open("rb") as fh:
             if suffix in _PHOTO_SUFFIXES:
                 msg = await bot.send_photo(
-                    chat_id=self._chat_id,
+                    **self._dest(project),
                     photo=fh,
                     caption=caption,
                 )
             elif suffix in _AUDIO_SUFFIXES:
                 msg = await bot.send_audio(
-                    chat_id=self._chat_id,
+                    **self._dest(project),
                     audio=fh,
                     caption=caption,
                 )
             elif suffix in _VIDEO_SUFFIXES:
                 msg = await bot.send_video(
-                    chat_id=self._chat_id,
+                    **self._dest(project),
                     video=fh,
                     caption=caption,
                 )
             else:
                 msg = await bot.send_document(
-                    chat_id=self._chat_id,
+                    **self._dest(project),
                     document=fh,
                     caption=caption,
                     filename=path.name,
@@ -478,7 +987,7 @@ class TelegramIO:
 
         if voice_bytes is not None:
             voice_msg = await bot.send_voice(
-                chat_id=self._chat_id,
+                **self._dest(project),
                 voice=voice_bytes,
                 caption=f"{project} · {voice_label}",
             )
@@ -499,7 +1008,7 @@ class TelegramIO:
             [InlineKeyboardButton("Cancel", callback_data=f"offcancel:{token}")],
         ])
         msg = await self.app.bot.send_message(
-            chat_id=self._chat_id,
+            **self._dest(project),
             text=(
                 f"[bridge] {project} is disabled.\n"
                 "Enable the project and send the last message?"
@@ -562,17 +1071,47 @@ class TelegramIO:
         if action == "menu":
             await self._handle_menu_callback(query, index_str)
             return
+        if action in {"cnew", "cres", "clist", "chp", "chs", "cfull",
+                      "rs", "cok", "cdel", "pstop"}:
+            await self._handle_conversation_callback(query, action, index_str)
+            return
         if action == "ask":
             try:
                 token, choice_idx = index_str.split(":", 1)
-                idx = int(choice_idx)
             except (ValueError, TypeError):
                 return
             pending = self._pending_asks.get(token)
             if pending is None:
                 await query.edit_message_text("This choice has expired.")
                 return
-            future, choices = pending
+            future, choices, bodies = pending
+            if choice_idx.startswith("e"):
+                # Edit: dump the raw body as a tap-to-copy code block and
+                # abort the choice silently (future resolves to None).
+                try:
+                    idx = int(choice_idx[1:])
+                except ValueError:
+                    return
+                if bodies is None or not 0 <= idx < len(bodies):
+                    return
+                body = bodies[idx][:TELEGRAM_MAX_MESSAGE]
+                await query.edit_message_text(
+                    body,
+                    entities=[
+                        MessageEntity(
+                            type=MessageEntity.CODE,
+                            offset=0,
+                            length=_utf16_len(body),
+                        )
+                    ],
+                )
+                if not future.done():
+                    future.set_result(None)
+                return
+            try:
+                idx = int(choice_idx)
+            except ValueError:
+                return
             if idx < 0 or idx >= len(choices):
                 return
             choice = choices[idx]
@@ -648,9 +1187,157 @@ class TelegramIO:
         new_markup = build_panel_markup(self.controls.snapshot())
         await self._edit_callback_markup(query, new_markup)
 
+    async def _handle_conversation_callback(
+        self, query, action: str, payload: str
+    ) -> None:
+        if action == "clist":
+            await self.controls.reload_conversations()
+            rows = self.controls.conversation_rows()
+            await self._edit_callback_text(
+                query,
+                format_conversations(rows),
+                build_conversations_markup(rows, self.cfg.telegram_chat_id),
+            )
+            return
+        if action in {"chp", "chs", "cfull"}:
+            await self._handle_history_callback(query, action, payload)
+            return
+        if action == "cdel":
+            closed = await self.controls.close_conversation(payload)
+            await self._edit_callback_text(
+                query,
+                f"Closed {payload}." if closed else f"{payload} is already gone.",
+                build_menu_markup(),
+            )
+            return
+        if action == "pstop":
+            await self._edit_callback_text(
+                query, await self.controls.interrupt(payload), build_menu_markup()
+            )
+            return
+        if action == "rs":
+            await self._stage_session(query, payload)
+            return
+        if action == "cok":
+            started = await self.controls.attach_conversation(payload)
+            await self._edit_callback_text(
+                query,
+                f"✅ <b>Attached</b> — write here to continue {html.escape(payload)}."
+                if started
+                else "Could not attach that session.",
+                None,
+            )
+            return
+
+        project = self._project_by_index(payload)
+        if project is None:
+            return
+        if action == "cnew":
+            key = await self.controls.open_conversation(project)
+            await self._edit_callback_text(
+                query,
+                f"Opened {key}." if key else "Could not open a session.",
+                build_menu_markup(),
+            )
+        elif action == "cres":
+            view = self._resume_view(project, int(payload))
+            await self._edit_callback_text(
+                query, view["text"], view["reply_markup"] or build_menu_markup()
+            )
+
+    async def _handle_history_callback(self, query, action: str, payload: str) -> None:
+        """Browse a project's real Claude history: project -> session -> text.
+
+        This reads what is on disk, not the conversations the bridge happens to
+        have open — a project can have dozens of sessions the bridge never
+        touched, and those are usually the ones you want to look back at.
+        """
+        index_str, _, uuid = payload.partition(":")
+        project = self._project_by_index(index_str)
+        if project is None:
+            return
+        idx = int(index_str)
+        row = _find_project_row(self.controls.snapshot(), project)
+        label = (row.get("display_name") or project) if row else project
+
+        if action == "chp":
+            sessions, total = self.controls.project_sessions(
+                project, self.cfg.history_limit
+            )
+            await self._edit_callback_text(
+                query,
+                format_session_index(label, sessions, total),
+                build_session_pick_markup(idx, sessions, "chs")
+                if sessions
+                else build_menu_markup(),
+            )
+            return
+
+        if action == "chs":
+            await self._edit_callback_text(
+                query,
+                self.controls.session_history_text(project, uuid),
+                build_transcript_markup(idx, uuid),
+            )
+            return
+
+        # cfull: the message can only ever hold a fragment; send the whole thing.
+        transcript = self.controls.session_transcript_file(project, uuid)
+        if transcript is None:
+            await query.answer("nothing on disk", show_alert=True)
+            return
+        filename, data = transcript
+        await self.app.bot.send_document(
+            **self._dest_of(query),
+            document=data,
+            filename=filename,
+            caption=f"📄 {label} · {uuid[:8]}",
+        )
+
+    def _dest_of(self, query) -> dict:
+        """Reply in the topic the button was tapped in, whichever that is."""
+        dest = {"chat_id": self._chat_id}
+        message = getattr(query, "message", None)
+        thread_id = getattr(message, "message_thread_id", None) if message else None
+        if thread_id is not None:
+            dest["message_thread_id"] = thread_id
+        return dest
+
+    def _project_by_index(self, index_str: str) -> str | None:
+        try:
+            idx = int(index_str)
+        except (TypeError, ValueError):
+            return None
+        snapshot = self.controls.snapshot()
+        if idx < 0 or idx >= len(snapshot):
+            return None
+        return snapshot[idx]["project"]
+
     async def _handle_menu_callback(self, query, action: str) -> None:
         snapshot = self.controls.snapshot()
-        if action == "projects":
+        if action == "home":
+            await self._edit_callback_text(
+                query, "🏠 Alex for Claude", build_menu_markup()
+            )
+        elif action == "new":
+            await self._edit_callback_text(
+                query,
+                "➕ New session in which project?",
+                build_project_pick_markup(snapshot, "cnew", show_all=True),
+            )
+        elif action == "resume":
+            await self._edit_callback_text(
+                query,
+                "🔄 Attach an existing Claude session — which project?",
+                build_project_pick_markup(snapshot, "cres", show_all=True),
+            )
+        elif action == "history":
+            await self._edit_callback_text(
+                query,
+                "📜 History of which project?",
+                build_project_pick_markup(snapshot, "chp", show_all=True),
+            )
+        elif action == "projects":
             await self._edit_callback_text(
                 query,
                 format_projects(snapshot),
@@ -703,8 +1390,13 @@ class TelegramIO:
                 reply_markup=markup,
             )
         except BadRequest as exc:
-            if "message is not modified" not in str(exc).lower():
-                raise
+            reason = str(exc).lower()
+            # "not modified" is a no-op; "not found" means the message went with
+            # the topic we just deleted, which is exactly what was asked for.
+            if "message is not modified" in reason or "not found" in reason:
+                logger.debug("callback edit skipped: %s", exc)
+                return
+            raise
 
     # --- text slash commands --------------------------------------------
     async def _cmd_projects(
@@ -786,7 +1478,7 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args or context.args[0] not in _MODES:
-            await msg.reply_text("usage: /mode <full|safe|ask> [project]")
+            await msg.reply_text("usage: /mode <auto|full|safe|ask> [project]")
             return
         mode = context.args[0]
         project = context.args[1] if len(context.args) > 1 else None
@@ -861,8 +1553,199 @@ class TelegramIO:
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if not text:
             return f"{label}: handoff history is empty."
-        tail = _tail_for_telegram(text)
+        tail = tail_for_telegram(text)
         return f"{label} handoff\n{_friendly_path(str(path))}\n\n{tail}"
+
+    # --- conversations ---------------------------------------------------
+    def _project_index(self, project: str) -> int | None:
+        return next(
+            (
+                i
+                for i, row in enumerate(self.controls.snapshot())
+                if row["project"] == project
+            ),
+            None,
+        )
+
+    def _target_project(self, msg, context) -> str | None:
+        """Which project a hub command means: argument, then topic, then active."""
+        if context.args:
+            row = _find_project_row(self.controls.snapshot(), context.args[0])
+            return row["project"] if row else None
+        thread_id = getattr(msg, "message_thread_id", None)
+        hub = self.project_for_thread(thread_id)
+        if hub is not None:
+            return hub
+        key = self.conversation_for_thread(thread_id)
+        if key is not None:
+            return project_of(key)
+        row = _find_project_row(self.controls.snapshot(), "")
+        return row["project"] if row else None
+
+    def _target_conversation(self, msg) -> str | None:
+        key = self.conversation_for_thread(getattr(msg, "message_thread_id", None))
+        if key is not None:
+            return key
+        rows = self.controls.conversation_rows()
+        return rows[0]["key"] if rows else None
+
+    def _topic_link_markup(self, key: str) -> InlineKeyboardMarkup | None:
+        """A tap-through to a conversation's own topic, when there is one."""
+        thread_id = self._conv_topics.get(key)
+        chat_id = self.cfg.telegram_chat_id
+        link = (
+            topic_link(chat_id, thread_id)
+            if chat_id is not None and thread_id is not None
+            else None
+        )
+        if link is None:
+            return None
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"\U0001F5C2 {key}", url=link)]
+        ])
+
+    async def _announce_opened(self, target, key: str | None) -> None:
+        if key is None:
+            await target.reply_text("Could not open a session.")
+            return
+        await target.reply_text(
+            f"Opened {key}.", reply_markup=self._topic_link_markup(key)
+        )
+
+    async def _stage_session(self, query, payload: str) -> None:
+        """Reserve a topic for a picked session and put its card inside it.
+
+        The picker lives wherever it was opened — often General — but the card
+        and the Attach button belong in the topic that will hold the session, so
+        nothing about it is left behind in a shared thread.
+        """
+        try:
+            index_str, uuid = payload.split(":", 1)
+        except ValueError:
+            return
+        project = self._project_by_index(index_str)
+        if project is None:
+            return
+        session = next(
+            (s for s in self.controls.resume_options(project) if s.uuid == uuid), None
+        )
+        if session is None:
+            await self._edit_callback_text(
+                query, "That session is no longer on disk.", build_menu_markup()
+            )
+            return
+        key = await self.controls.stage_conversation(project, uuid)
+        if key is None:
+            await self._edit_callback_text(
+                query, "Could not reserve a session.", build_menu_markup()
+            )
+            return
+        transcript = self.controls.history_text(key, 6, 3000)
+        if not transcript.startswith("\U0001F4DC"):
+            transcript = ""  # a "no transcript" notice adds nothing to the card
+        await self.app.bot.send_message(
+            **self._dest(key),
+            text=format_attach_card(key, session, transcript),
+            parse_mode="HTML",
+            reply_markup=build_attach_markup(key),
+        )
+        await self._edit_callback_text(
+            query,
+            f"→ <b>{html.escape(key)}</b> — confirm the attach in its topic.",
+            self._topic_link_markup(key) or build_menu_markup(),
+        )
+
+    async def _cmd_new(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        project = self._target_project(msg, context)
+        if project is None:
+            await msg.reply_text("usage: /new <project> (or run it in a project topic)")
+            return
+        key = await self.controls.open_conversation(project)
+        await self._announce_opened(msg, key)
+
+    async def _cmd_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        project = self._target_project(msg, context)
+        idx = self._project_index(project) if project else None
+        if project is None or idx is None:
+            await msg.reply_text("usage: /resume <project> (or run it in a project topic)")
+            return
+        await msg.reply_text(**self._resume_view(project, idx))
+
+    def _resume_view(self, project: str, idx: int) -> dict:
+        sessions = self.controls.resume_options(project)
+        row = _find_project_row(self.controls.snapshot(), project)
+        label = (row.get("display_name") or project) if row else project
+        return {
+            "text": format_resume_options(label, sessions),
+            "parse_mode": "HTML",
+            "reply_markup": build_resume_markup(idx, sessions) if sessions else None,
+        }
+
+    async def _cmd_sessions(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        await self.controls.reload_conversations()
+        rows = self.controls.conversation_rows()
+        await msg.reply_text(
+            format_conversations(rows),
+            parse_mode="HTML",
+            reply_markup=build_conversations_markup(rows, self.cfg.telegram_chat_id),
+        )
+
+    async def _cmd_history(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        # The session id is only known after the first turn answers, so refresh
+        # before reading rather than showing "no transcript yet" for a session
+        # that has one.
+        await self.controls.reload_conversations()
+        key = self._target_conversation(msg)
+        if key is None:
+            await msg.reply_text("No open session. Use /new in a project topic.")
+            return
+        limit = 12
+        if context.args:
+            try:
+                limit = max(1, min(50, int(context.args[0])))
+            except ValueError:
+                pass
+        await msg.reply_text(
+            self.controls.history_text(key, limit), parse_mode="HTML"
+        )
+
+    async def _cmd_close(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        key = self.conversation_for_thread(getattr(msg, "message_thread_id", None))
+        if key is None:
+            await msg.reply_text("Run /close inside a session topic.")
+            return
+        await msg.reply_text(
+            f"Close {key} and delete this topic?",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑 Yes", callback_data=f"cdel:{key}"),
+                InlineKeyboardButton("No", callback_data="noop:0"),
+            ]]),
+        )
 
     # --- lifecycle -------------------------------------------------------
     async def run(self) -> None:
@@ -878,6 +1761,16 @@ class TelegramIO:
 
         app.add_handler(
             CommandHandler("menu", self._cmd_menu, filters=only_me))
+        app.add_handler(
+            CommandHandler("new", self._cmd_new, filters=only_me))
+        app.add_handler(
+            CommandHandler("resume", self._cmd_resume, filters=only_me))
+        app.add_handler(
+            CommandHandler("sessions", self._cmd_sessions, filters=only_me))
+        app.add_handler(
+            CommandHandler("history", self._cmd_history, filters=only_me))
+        app.add_handler(
+            CommandHandler("close", self._cmd_close, filters=only_me))
         app.add_handler(
             CommandHandler("panel", self._cmd_panel, filters=only_me))
         app.add_handler(
@@ -903,8 +1796,12 @@ class TelegramIO:
         app.add_handler(
             CommandHandler("status", self._cmd_status, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
+        # block=False: a voice message may pause mid-handler to ask which
+        # transcript to accept. Updates are processed sequentially by default,
+        # so a blocking handler would stall the queue and the very button press
+        # it is waiting for could never arrive.
         app.add_handler(MessageHandler(
-            only_me & filters.VOICE, self._handle_voice))
+            only_me & filters.VOICE, self._handle_voice, block=False))
         app.add_handler(MessageHandler(
             only_me
             & (
@@ -921,6 +1818,8 @@ class TelegramIO:
 
         await app.initialize()
         await app.bot.set_my_commands(_BOT_COMMANDS)
+        await self.ensure_topics()
+        await self.load_conversation_topics()
         await app.start()
         await app.updater.start_polling()
 

@@ -8,6 +8,7 @@ SDK so the loop's ``isinstance`` checks pass, building minimal real instances.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -16,6 +17,7 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 import voice_bridge.sessions as sessions_mod
 from voice_bridge.sessions import SessionManager
 from voice_bridge.config import Config, ProjectConfig
+from voice_bridge.routing import Conversation
 from voice_bridge.types import Outbound
 
 
@@ -55,6 +57,9 @@ class FakeClaudeSDKClient:
         self.connected = False
         self.disconnected = False
         self.queries: list[str] = []
+        self.interrupts = 0
+        self.models: list = []
+        self.permission_modes: list = []
         # scripted_turns: list of (list-of-messages OR Exception), one per turn.
         self.scripted_turns: list = []
         self._turn_index = 0
@@ -68,6 +73,15 @@ class FakeClaudeSDKClient:
 
     async def query(self, prompt, session_id="default"):
         self.queries.append(prompt)
+
+    async def interrupt(self):
+        self.interrupts += 1
+
+    async def set_model(self, model=None):
+        self.models.append(model)
+
+    async def set_permission_mode(self, mode):
+        self.permission_modes.append(mode)
 
     async def receive_response(self):
         if self._turn_index < len(self.scripted_turns):
@@ -89,10 +103,17 @@ class FakeClaudeSDKClient:
 # --------------------------------------------------------------------------- #
 
 class FakeStore:
-    def __init__(self, enabled=None, session_ids=None):
+    """In-memory stand-in with the same conversation bookkeeping as the real one."""
+
+    def __init__(self, enabled=None, conversations=None):
         self._enabled = dict(enabled or {})
-        self._session_ids = dict(session_ids or {})
+        self._conversations: dict[str, Conversation] = {}
         self.set_session_calls: list[tuple[str, str]] = []
+        for key, session_id in (conversations or {}).items():
+            project, ordinal = key.split("#")
+            self._conversations[key] = Conversation(
+                key, project, int(ordinal), None, None, session_id, False, 0.0
+            )
 
     async def is_enabled(self, project):
         return self._enabled.get(project, True)
@@ -100,12 +121,48 @@ class FakeStore:
     async def set_enabled(self, project, enabled):
         self._enabled[project] = enabled
 
-    async def get_session_id(self, project):
-        return self._session_ids.get(project)
+    async def next_ordinal(self, project):
+        used = [c.ordinal for c in self._conversations.values() if c.project == project]
+        return (max(used) if used else 0) + 1
 
-    async def set_session_id(self, project, session_id):
-        self._session_ids[project] = session_id
-        self.set_session_calls.append((project, session_id))
+    async def add_conversation(self, key, project, ordinal, *, chat_id=None,
+                               thread_id=None, session_id=None, created=0.0):
+        self._conversations[key] = Conversation(
+            key, project, ordinal, chat_id, thread_id, session_id, False, created
+        )
+
+    async def conversations(self, project=None, include_closed=False):
+        return [
+            c
+            for c in self._conversations.values()
+            if (project is None or c.project == project)
+            and (include_closed or not c.closed)
+        ]
+
+    async def conversation(self, key):
+        return self._conversations.get(key)
+
+    async def set_conversation_session(self, key, session_id):
+        current = self._conversations.get(key)
+        if current is not None:
+            self._conversations[key] = replace(current, session_id=session_id)
+        self.set_session_calls.append((key, session_id))
+
+    async def set_conversation_topic(self, key, chat_id, thread_id):
+        current = self._conversations.get(key)
+        if current is not None:
+            self._conversations[key] = replace(
+                current, chat_id=chat_id, thread_id=thread_id
+            )
+
+    async def close_conversation(self, key):
+        current = self._conversations.get(key)
+        if current is not None:
+            self._conversations[key] = replace(current, closed=True)
+
+    def session_id(self, key):
+        conversation = self._conversations.get(key)
+        return conversation.session_id if conversation else None
 
 
 class FakeApprovals:
@@ -130,6 +187,10 @@ def make_cfg(**over):
         db_path=":memory:",
         open_vscode_on_enable=False,
         close_vscode_on_disable=False,
+        # Never read the developer's real ~/.claude while testing: the live
+        # session registry there would leak into the fork decision.
+        claude_projects_dir="/nonexistent/projects",
+        claude_sessions_dir="/nonexistent/sessions",
     )
     base.update(over)
     return Config(**base)
@@ -182,8 +243,8 @@ async def test_start_all_starts_only_enabled_projects():
     sm = make_sm(projects, store, on_outbound)
     await sm.start_all()
 
-    assert sm.is_running("qwing") is True
-    assert sm.is_running("other") is False
+    assert sm.is_running("qwing#1") is True
+    assert sm.is_running("other#1") is False
     assert len(FakeClaudeSDKClient.instances) == 1
     assert FakeClaudeSDKClient.instances[0].connected is True
 
@@ -223,17 +284,17 @@ async def test_deliver_drains_turn_captures_session_id_and_emits_outbound():
         result("sess-123"),
     ]]
 
-    await sm.deliver("qwing", "build the thing")
+    await sm.deliver("qwing#1", "build the thing")
 
     assert await _wait_for(lambda: len(outbound) >= 2)
 
     assert client.queries == ["build the thing"]
-    assert store._session_ids["qwing"] == "sess-123"
+    assert store.session_id("qwing#1") == "sess-123"
     assert outbound[0].text == "Working."
     assert outbound[0].spoken == " "
     final = outbound[-1]
     assert isinstance(final, Outbound)
-    assert final.project == "qwing"
+    assert final.project == "qwing#1"
     assert "Done." in final.text
     assert "diff here" in final.text
     assert final.spoken == ""
@@ -252,8 +313,8 @@ async def test_deliver_reports_queue_position_when_busy():
     sm = make_sm([project], store, on_outbound)
     await sm.start_all()
 
-    await sm.deliver("qwing", "first")
-    await sm.deliver("qwing", "second")
+    await sm.deliver("qwing#1", "first")
+    await sm.deliver("qwing#1", "second")
 
     assert await _wait_for(lambda: any(o.text.startswith("Queued:") for o in outbound))
     queued = [o for o in outbound if o.text.startswith("Queued:")][0]
@@ -263,7 +324,9 @@ async def test_deliver_reports_queue_position_when_busy():
     await sm.stop_all()
 
 
-async def test_interrupt_restarts_enabled_session_and_emits_status():
+async def test_interrupt_uses_the_sdk_and_keeps_the_session_alive():
+    # Tearing the client down would lose the conversation's context; the SDK's
+    # own interrupt stops the turn and keeps it.
     project = make_project("qwing")
     store = FakeStore(enabled={"qwing": True})
     outbound: list[Outbound] = []
@@ -275,13 +338,58 @@ async def test_interrupt_restarts_enabled_session_and_emits_status():
     await sm.start_all()
     first = FakeClaudeSDKClient.instances[0]
 
-    stopped = await sm.interrupt("qwing")
+    stopped = await sm.interrupt("qwing#1")
 
     assert stopped is True
-    assert first.disconnected is True
-    assert len(FakeClaudeSDKClient.instances) == 2
+    assert first.interrupts == 1
+    assert first.disconnected is False
+    assert len(FakeClaudeSDKClient.instances) == 1
     assert outbound[-1].text == "Interrupted."
     assert outbound[-1].spoken == " "
+
+    await sm.stop_all()
+
+
+async def test_interrupt_falls_back_to_a_restart_when_the_sdk_refuses():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    first = FakeClaudeSDKClient.instances[0]
+
+    async def boom():
+        raise RuntimeError("no turn in flight")
+
+    first.interrupt = boom
+
+    assert await sm.interrupt("qwing#1") is True
+    assert first.disconnected is True
+    assert len(FakeClaudeSDKClient.instances) == 2
+
+    await sm.stop_all()
+
+
+async def test_interrupt_drops_queued_turns():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+    client.scripted_turns = [[assistant("one"), result("s1")]]
+
+    await sm.deliver("qwing#1", "first")
+    await sm.deliver("qwing#1", "second")
+    await sm.interrupt("qwing#1")
+
+    assert sm._sessions["qwing#1"].queue.qsize() == 0
 
     await sm.stop_all()
 
@@ -299,7 +407,7 @@ async def test_deliver_mirrors_turns_to_project_transcript(tmp_path):
     client = FakeClaudeSDKClient.instances[0]
     client.scripted_turns = [[assistant("Padaryta."), result("sess-1")]]
 
-    await sm.deliver("qwing", "sutvarkyk sita vieta")
+    await sm.deliver("qwing#1", "sutvarkyk sita vieta")
 
     transcript = tmp_path / ".claude" / "voice-bridge-chat.md"
     assert await _wait_for(lambda: transcript.exists())
@@ -321,7 +429,7 @@ async def test_deliver_to_unstarted_project_is_noop():
 
     sm = make_sm([project], store, on_outbound)
     await sm.start_all()
-    await sm.deliver("qwing", "hello")  # must not raise
+    await sm.deliver("qwing#1", "hello")  # must not raise
     assert FakeClaudeSDKClient.instances == []
     await sm.stop_all()
 
@@ -352,16 +460,16 @@ async def test_set_enabled_false_stops_and_persists_then_true_restarts():
 
     sm = make_sm([project], store, on_outbound)
     await sm.start_all()
-    assert sm.is_running("qwing") is True
+    assert sm.is_running("qwing#1") is True
     first_client = FakeClaudeSDKClient.instances[0]
 
     await sm.set_enabled("qwing", False)
-    assert sm.is_running("qwing") is False
+    assert sm.is_running("qwing#1") is False
     assert first_client.disconnected is True
     assert store._enabled["qwing"] is False
 
     await sm.set_enabled("qwing", True)
-    assert sm.is_running("qwing") is True
+    assert sm.is_running("qwing#1") is True
     assert store._enabled["qwing"] is True
     assert len(FakeClaudeSDKClient.instances) == 2
 
@@ -400,7 +508,7 @@ async def test_set_enabled_true_opens_vscode_when_configured(monkeypatch):
 
     assert calls
     assert calls[0][0][:2] == ("/usr/bin/code", "/tmp/qwing")
-    assert sm.is_running("qwing") is True
+    assert sm.is_running("qwing#1") is True
 
     await sm.stop_all()
 
@@ -454,7 +562,10 @@ async def test_set_enabled_false_closes_matching_vscode_window(monkeypatch):
 # permission wiring / resume / mode
 # --------------------------------------------------------------------------- #
 
-async def test_full_mode_uses_bypass_permissions():
+async def test_full_mode_still_installs_the_permission_callback():
+    # bypassPermissions would skip can_use_tool entirely, and then switching a
+    # live session out of full mode would leave prompts nobody can answer. The
+    # callback itself allows everything while the mode is full.
     project = make_project("qwing", autonomy="full")
     store = FakeStore(enabled={"qwing": True})
 
@@ -465,8 +576,50 @@ async def test_full_mode_uses_bypass_permissions():
     await sm.start_all()
 
     opts = FakeClaudeSDKClient.instances[0].options
-    assert opts.permission_mode == "bypassPermissions"
-    assert opts.can_use_tool is None
+    assert opts.permission_mode == "default"
+    assert callable(opts.can_use_tool)
+
+    await sm.stop_all()
+
+
+async def test_auto_mode_hands_the_judgement_to_claude_code():
+    # What the VS Code extension does: the CLI approves the safe majority
+    # itself, so a read-only command does not cost a Telegram round trip.
+    project = make_project("qwing", autonomy="auto")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    opts = FakeClaudeSDKClient.instances[0].options
+    assert opts.permission_mode == "auto"
+    # Still installed: whatever the CLI escalates has to reach the user.
+    assert callable(opts.can_use_tool)
+
+    await sm.stop_all()
+
+
+async def test_switching_to_auto_pushes_the_mode_to_a_live_session():
+    project = make_project("qwing", autonomy="safe")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    client = FakeClaudeSDKClient.instances[0]
+
+    await sm.set_mode("qwing", "auto")
+
+    assert client.permission_modes == ["auto"]
+    assert client.disconnected is False  # no restart, no lost turn
+
+    await sm.set_mode("qwing", "safe")
+    assert client.permission_modes == ["auto", "default"]
 
     await sm.stop_all()
 
@@ -508,7 +661,7 @@ async def test_ask_mode_uses_can_use_tool_not_bypass():
 async def test_resume_session_id_passed_to_options():
     project = make_project("qwing", autonomy="safe")
     store = FakeStore(enabled={"qwing": True},
-                      session_ids={"qwing": "prev-sess-9"})
+                      conversations={"qwing#1": "prev-sess-9"})
 
     async def on_outbound(o):
         pass
@@ -559,7 +712,9 @@ async def test_system_prompt_includes_extra_and_split_instruction():
     await sm.stop_all()
 
 
-async def test_set_mode_rebuilds_session_with_new_permission_wiring():
+async def test_set_mode_takes_effect_without_restarting_the_session():
+    # A restart used to drop whatever turn was in flight; the mode is read per
+    # tool call now, so nothing is lost.
     project = make_project("qwing", autonomy="safe")
     store = FakeStore(enabled={"qwing": True})
 
@@ -568,17 +723,35 @@ async def test_set_mode_rebuilds_session_with_new_permission_wiring():
 
     sm = make_sm([project], store, on_outbound)
     await sm.start_all()
-    assert callable(FakeClaudeSDKClient.instances[0].options.can_use_tool)
     first_client = FakeClaudeSDKClient.instances[0]
 
     await sm.set_mode("qwing", "full")
 
-    assert first_client.disconnected is True
-    assert len(FakeClaudeSDKClient.instances) == 2
-    new_opts = FakeClaudeSDKClient.instances[1].options
-    assert new_opts.permission_mode == "bypassPermissions"
-    assert new_opts.can_use_tool is None
+    assert first_client.disconnected is False
+    assert len(FakeClaudeSDKClient.instances) == 1
     assert sm.project("qwing").autonomy == "full"
+
+    await sm.stop_all()
+
+
+async def test_set_model_switches_every_live_conversation():
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+    await sm.open("qwing")
+
+    await sm.set_model("qwing", "claude-opus-5")
+
+    assert sm.project("qwing").model == "claude-opus-5"
+    assert [c.models for c in FakeClaudeSDKClient.instances] == [
+        ["claude-opus-5"],
+        ["claude-opus-5"],
+    ]
 
     await sm.stop_all()
 
@@ -592,7 +765,7 @@ async def test_set_mode_when_not_running_only_updates_config():
 
     sm = make_sm([project], store, on_outbound)
     await sm.start_all()
-    assert sm.is_running("qwing") is False
+    assert sm.is_running("qwing#1") is False
 
     await sm.set_mode("qwing", "full")
     assert sm.project("qwing").autonomy == "full"
@@ -610,7 +783,7 @@ async def test_set_mode_invalid_mode_is_ignored():
 
     sm = make_sm([project], store, on_outbound)
     await sm.start_all()
-    assert sm.is_running("qwing") is True
+    assert sm.is_running("qwing#1") is True
     first_client = FakeClaudeSDKClient.instances[0]
 
     await sm.set_mode("qwing", "turbo")  # invalid mode
@@ -652,7 +825,7 @@ async def test_notify_callback_emits_outbound_with_detail_and_summary(monkeypatc
     await on_notify("Need a decision", "Should I push to main?")
 
     assert len(outbound) == 1
-    assert outbound[0].project == "qwing"
+    assert outbound[0].project == "qwing#1"
     assert outbound[0].text == "Should I push to main?"
     assert outbound[0].spoken == "Need a decision"
 
@@ -690,7 +863,7 @@ async def test_send_file_callback_emits_project_file_outbound(tmp_path, monkeypa
 
     assert result == "delivered"
     assert len(outbound) == 1
-    assert outbound[0].project == "qwing"
+    assert outbound[0].project == "qwing#1"
     assert outbound[0].text == "rezultatas"
     assert outbound[0].spoken == ""
     assert outbound[0].file_path == str(target.resolve())
@@ -760,7 +933,7 @@ async def test_ask_user_callback_routes_to_injected_callback(monkeypatch):
     result = await captured["on_ask_user"]("Rinktis?", ["A", "B"])
 
     assert result == "B"
-    assert calls == [("qwing", "Rinktis?", ["A", "B"])]
+    assert calls == [("qwing#1", "Rinktis?", ["A", "B"])]
 
     await sm.stop_all()
 
@@ -789,7 +962,7 @@ async def test_each_project_gets_its_own_notify_server(monkeypatch):
     await notifies[0]("s0", "d0")
     await notifies[1]("s1", "d1")
     projects_seen = {o.project for o in outbound}
-    assert projects_seen == {"qwing", "beta"}
+    assert projects_seen == {"qwing#1", "beta#1"}
 
     await sm.stop_all()
 
@@ -816,19 +989,19 @@ async def test_receive_response_error_emits_error_outbound_and_keeps_other_sessi
     qwing_client.scripted_turns = [RuntimeError("boom")]
     beta_client.scripted_turns = [[assistant("hi from beta"), result("beta-1")]]
 
-    await sm.deliver("qwing", "do crash")
-    await sm.deliver("beta", "do work")
+    await sm.deliver("qwing#1", "do crash")
+    await sm.deliver("beta#1", "do work")
 
     assert await _wait_for(lambda: len(outbound) >= 2)
 
     texts = {o.project: o for o in outbound}
-    assert "Sesija krito" in texts["qwing"].text
-    assert texts["qwing"].spoken == "The session crashed. Check the text."
-    assert "beta" in texts and "hi from beta" in texts["beta"].text
+    assert "Sesija krito" in texts["qwing#1"].text
+    assert texts["qwing#1"].spoken == "The session crashed. Check the text."
+    assert "beta#1" in texts and "hi from beta" in texts["beta#1"].text
 
     # The crashed session is marked stopped; beta keeps running.
-    assert sm.is_running("qwing") is False
-    assert sm.is_running("beta") is True
+    assert sm.is_running("qwing#1") is False
+    assert sm.is_running("beta#1") is True
 
     await sm.stop_all()
 
@@ -863,5 +1036,5 @@ async def test_stop_all_disconnects_every_running_client():
     await sm.stop_all()
 
     assert all(c.disconnected for c in FakeClaudeSDKClient.instances)
-    assert sm.is_running("qwing") is False
-    assert sm.is_running("beta") is False
+    assert sm.is_running("qwing#1") is False
+    assert sm.is_running("beta#1") is False

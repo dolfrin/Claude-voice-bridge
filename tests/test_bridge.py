@@ -17,6 +17,7 @@ from voice_bridge.bridge import (
     resolve_target,
     run_until_stopped,
 )
+from voice_bridge.routing import Conversation
 from voice_bridge.types import Outbound
 
 
@@ -28,7 +29,8 @@ from voice_bridge.types import Outbound
 class FakeStore:
     """In-memory stand-in for routing.Store covering the methods bridge uses."""
 
-    def __init__(self, by_message=None, last_active=None, enabled=None):
+    def __init__(self, by_message=None, last_active=None, enabled=None,
+                 conversations=None):
         self._by_message = dict(by_message or {})
         self._last_active = last_active
         self._enabled = dict(enabled or {})
@@ -36,6 +38,20 @@ class FakeStore:
         self.last_active_calls: list[str] = []
         self.inited = 0
         self.seeded: list[list] = []
+        self.closed: list[str] = []
+        # Every project a test mentions gets a #1 conversation, which is what
+        # start_all would have created for it.
+        if conversations is None:
+            names = {n.split("#")[0] for n in self._enabled}
+            names |= {v.split("#")[0] for v in self._by_message.values()}
+            if last_active:
+                names.add(last_active.split("#")[0])
+            conversations = [f"{name}#1" for name in sorted(names)]
+        self._conversations = {
+            key: Conversation(key, key.split("#")[0], int(key.split("#")[1]),
+                              None, None, None, False, 0.0)
+            for key in conversations
+        }
 
     async def init(self):
         self.inited += 1
@@ -65,6 +81,37 @@ class FakeStore:
 
     async def enabled_map(self):
         return dict(self._enabled)
+
+    async def conversations(self, project=None, include_closed=False):
+        return [
+            c
+            for c in self._conversations.values()
+            if (project is None or c.project == project)
+            and (include_closed or not c.closed)
+        ]
+
+    async def conversation(self, key):
+        return self._conversations.get(key)
+
+    async def next_ordinal(self, project):
+        used = [c.ordinal for c in self._conversations.values() if c.project == project]
+        return (max(used) if used else 0) + 1
+
+    async def add_conversation(self, key, project, ordinal, **kw):
+        self._conversations[key] = Conversation(
+            key, project, ordinal, kw.get("chat_id"), kw.get("thread_id"),
+            kw.get("session_id"), False, kw.get("created", 0.0),
+        )
+
+    async def set_conversation_session(self, key, session_id):
+        pass
+
+    async def set_conversation_topic(self, key, chat_id, thread_id):
+        pass
+
+    async def close_conversation(self, key):
+        self.closed.append(key)
+        self._conversations.pop(key, None)
 
 
 class FakeTTS:
@@ -130,11 +177,15 @@ class FakeSessions:
         self.enabled_calls: list[tuple[str, bool]] = []
         self.mode_calls: list[tuple[str, str]] = []
         self.interrupt_calls: list[str] = []
+        self.open_calls: list[tuple] = []
+        self.close_calls: list[str] = []
+        self.running = None
         self.started = 0
         self.stopped = 0
 
     def project(self, name):
-        return self._projects.get(name)
+        # Mirrors the real lookup: a conversation key resolves to its project.
+        return self._projects.get(name.split("#")[0]) if name else None
 
     def names(self):
         return list(self._projects)
@@ -161,6 +212,21 @@ class FakeSessions:
         self.interrupt_calls.append(project)
         return True
 
+    def is_running(self, key):
+        # Tests that care set `running` to the exact set of live keys.
+        return key in self.running if self.running is not None else True
+
+    def is_busy(self, key):
+        return False
+
+    async def open(self, project, resume=None, fork=False):
+        self.open_calls.append((project, resume, fork))
+        return f"{project}#1"
+
+    async def close(self, key):
+        self.close_calls.append(key)
+        return True
+
     async def start_all(self):
         self.started += 1
 
@@ -182,13 +248,18 @@ class FakeApprovals:
 
 
 class FakeTranscriber:
-    def __init__(self, text="transcribed"):
+    def __init__(self, text="transcribed", models=("fake",)):
         self.text = text
+        self.models = models
         self.calls: list[bytes] = []
 
     async def transcribe(self, audio):
         self.calls.append(audio)
         return self.text
+
+    async def transcribe_all(self, audio):
+        self.calls.append(audio)
+        return [{"model": name, "text": self.text} for name in self.models]
 
 
 class FakeCfg:
@@ -224,14 +295,14 @@ async def test_resolve_target_reply_to_maps_to_project():
     store = FakeStore(by_message={42: "qwing"}, last_active="othersapp",
                       enabled={"qwing": True})
     project, reason = await resolve_target(_msg(reply_to=42, text="go on"), store)
-    assert (project, reason) == ("qwing", "ok")
+    assert (project, reason) == ("qwing#1", "ok")
 
 
 @pytest.mark.asyncio
 async def test_resolve_target_no_reply_falls_back_to_last_active():
     store = FakeStore(last_active="othersapp", enabled={"othersapp": True})
     project, reason = await resolve_target(_msg(reply_to=None, text="go on"), store)
-    assert (project, reason) == ("othersapp", "ok")
+    assert (project, reason) == ("othersapp#1", "ok")
 
 
 @pytest.mark.asyncio
@@ -239,7 +310,7 @@ async def test_resolve_target_reply_to_unknown_falls_back_to_last_active():
     store = FakeStore(by_message={}, last_active="othersapp",
                       enabled={"othersapp": True})
     project, reason = await resolve_target(_msg(reply_to=999), store)
-    assert (project, reason) == ("othersapp", "ok")
+    assert (project, reason) == ("othersapp#1", "ok")
 
 
 @pytest.mark.asyncio
@@ -253,7 +324,7 @@ async def test_resolve_target_none_when_nothing():
 async def test_resolve_target_off_when_disabled():
     store = FakeStore(by_message={42: "qwing"}, enabled={"qwing": False})
     project, reason = await resolve_target(_msg(reply_to=42), store)
-    assert (project, reason) == ("qwing", "off")
+    assert (project, reason) == ("qwing#1", "off")
 
 
 # --------------------------------------------------------------------------- #
@@ -387,7 +458,7 @@ async def test_make_inbound_text_reply_routes_to_replied_project():
     await inbound(_msg(reply_to=42, text="continue"))
 
     assert transcriber.calls == []
-    assert sessions.delivered == [("qwing", "continue")]
+    assert sessions.delivered == [("qwing#1", "continue")]
     assert approvals.resolved == []
 
 
@@ -403,7 +474,7 @@ async def test_make_inbound_voice_transcribed_then_delivered():
     await inbound(_msg(reply_to=None, is_voice=True, audio=b"OGG"))
 
     assert transcriber.calls == [b"OGG"]
-    assert sessions.delivered == [("qwing", "tęsk darbą")]
+    assert sessions.delivered == [("qwing#1", "tęsk darbą")]
 
 
 @pytest.mark.asyncio
@@ -417,8 +488,8 @@ async def test_make_inbound_bang_prefix_interrupts_then_delivers_without_prefix(
     inbound = _inbound(transcriber, store, approvals, sessions, telegram)
     await inbound(_msg(text="! stop and do this"))
 
-    assert sessions.interrupt_calls == ["qwing"]
-    assert sessions.delivered == [("qwing", "stop and do this")]
+    assert sessions.interrupt_calls == ["qwing#1"]
+    assert sessions.delivered == [("qwing#1", "stop and do this")]
 
 
 @pytest.mark.asyncio
@@ -531,7 +602,7 @@ async def test_make_inbound_disabled_target_asks_to_enable_and_send():
 
     assert sessions.delivered == []
     assert telegram.questions == []
-    assert telegram.disabled_prompts == [("qwing", "go")]
+    assert telegram.disabled_prompts == [("qwing#1", "go")]
 
 
 # --------------------------------------------------------------------------- #
@@ -576,7 +647,7 @@ async def test_make_inbound_attachment_is_saved_and_added_to_prompt(tmp_path):
 
     assert len(sessions.delivered) == 1
     project, prompt = sessions.delivered[0]
-    assert project == "qwing"
+    assert project == "qwing#1"
     assert "peržiūrėk" in prompt
     assert ".claude/voice-bridge-inbox/" in prompt
     assert "log.txt" in prompt
@@ -610,7 +681,7 @@ async def test_make_inbound_audio_attachment_is_transcribed_and_saved(tmp_path):
 
     assert transcriber.calls == [b"MP3"]
     project, prompt = sessions.delivered[0]
-    assert project == "qwing"
+    assert project == "qwing#1"
     assert "Audio transkripcija" in prompt
     assert "čia garso tekstas" in prompt
     assert "note.mp3" in prompt
@@ -671,8 +742,8 @@ async def test_controls_enable_and_deliver_starts_project_then_sends_text():
     await controls.enable_and_deliver("othersapp", "go")
 
     assert sessions.enabled_calls == [("othersapp", True)]
-    assert sessions.delivered == [("othersapp", "go")]
-    assert store.last_active_calls == ["othersapp"]
+    assert sessions.delivered == [("othersapp#1", "go")]
+    assert store.last_active_calls == ["othersapp#1"]
     snap = {row["project"]: row for row in controls.snapshot()}
     assert snap["othersapp"]["enabled"] is True
     assert snap["othersapp"]["last_active"] is True
@@ -686,9 +757,9 @@ async def test_controls_interrupt_defaults_to_last_active_project():
 
     result = await controls.interrupt(None)
 
-    assert result == "qwing: interrupted."
-    assert sessions.interrupt_calls == ["qwing"]
-    assert store.last_active_calls == ["qwing"]
+    assert result == "qwing#1: interrupted."
+    assert sessions.interrupt_calls == ["qwing#1"]
+    assert store.last_active_calls == ["qwing#1"]
 
 
 @pytest.mark.asyncio
@@ -726,15 +797,13 @@ async def test_controls_set_voice_updates_mirror_and_project():
 
 
 @pytest.mark.asyncio
-async def test_controls_set_mode_sends_notice(monkeypatch):
+async def test_controls_set_mode_forwards_to_sessions(monkeypatch):
+    # No user notice any more: the mode is read per tool call, so a live switch
+    # cannot drop an in-flight turn.
     controls, sessions, store, cfg, tts_holder = _make_controls()
     await controls.seed()
-    telegram = FakeTelegram()
-    controls.attach_telegram(telegram)
     await controls.set_mode("qwing", "ask")
     assert sessions.mode_calls == [("qwing", "ask")]
-    assert len(telegram.questions) == 1
-    assert "ask" in telegram.questions[0][1]
 
 
 @pytest.mark.asyncio
@@ -796,7 +865,7 @@ async def test_build_wires_and_run_loop(monkeypatch):
     monkeypatch.setattr(bridge_mod, "SessionManager",
                         lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda cfg, on_user_message, controls: telegram)
+                        lambda cfg, on_user_message, controls, **kw: telegram)
 
     wired = await build()
     assert store.inited == 1
@@ -838,11 +907,32 @@ async def test_build_inbound_forwards_disabled_project_prompt(monkeypatch):
     )
     monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
     monkeypatch.setattr(
-        bridge_mod, "TelegramIO", lambda cfg, on_user_message, controls: telegram
+        bridge_mod, "TelegramIO", lambda cfg, on_user_message, controls, **kw: telegram
     )
 
     wired = await build()
     await wired.inbound(_msg(text="go"))
 
-    assert telegram.disabled_prompts == [("qwing", "go")]
+    assert telegram.disabled_prompts == [("qwing#1", "go")]
     assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_edit_tap_aborts_voice_turn_silently():
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    approvals = FakeApprovals()
+    transcriber = FakeTranscriber(text="tekstas", models=("a", "b"))
+    sessions = FakeSessions()
+    telegram = FakeTelegram()
+
+    async def _edit_tapped(project, options, button="Accept this"):
+        return None
+
+    telegram.ask_per_message = _edit_tapped
+
+    inbound = _inbound(transcriber, store, approvals, sessions, telegram)
+    await inbound(_msg(reply_to=None, is_voice=True, audio=b"OGG"))
+
+    # Nothing delivered to Claude, no "did not understand" either.
+    assert sessions.delivered == []
+    assert telegram.questions == []

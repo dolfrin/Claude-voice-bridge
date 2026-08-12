@@ -5,6 +5,8 @@ import pytest
 from voice_bridge.config import (
     Config,
     ProjectConfig,
+    claude_projects_path,
+    claude_sessions_path,
     effective_autonomy,
     effective_voice,
     load_config,
@@ -51,7 +53,7 @@ def test_load_config_parses_all_fields_with_correct_types():
     assert cfg.tts_voice == "alloy"
     assert cfg.piper_voice_path == "/opt/piper/en_US.onnx"
     assert cfg.whisper_model == "large-v3"
-    assert cfg.autonomy_mode == "safe"
+    assert cfg.autonomy_mode == "safe"  # what this env asks for
     assert cfg.approval_timeout == 300
     assert isinstance(cfg.approval_timeout, int)
     assert cfg.db_path == "/var/lib/voice-bridge/state.db"
@@ -76,7 +78,8 @@ def test_load_config_applies_defaults_for_optional_keys():
     assert cfg.tts_voice == "alloy"
     assert cfg.piper_voice_path == ""
     assert cfg.whisper_model == "large-v3"
-    assert cfg.autonomy_mode == "safe"
+    # auto is the default: Claude Code judges each call, like the extension.
+    assert cfg.autonomy_mode == "auto"
     assert cfg.approval_timeout == 300
     assert cfg.db_path == "voice-bridge.db"
     assert cfg.auto_discover_projects is False
@@ -260,3 +263,38 @@ def test_effective_voice_falls_back_to_global():
 def test_outbound_fields():
     o = Outbound(project="qwing", text="full", spoken="say")
     assert (o.project, o.text, o.spoken) == ("qwing", "full", "say")
+
+
+# ---------------------------------------------------------------------------
+# Claude history + live progress settings
+# ---------------------------------------------------------------------------
+
+def test_session_history_defaults_point_at_claude_code():
+    cfg = load_config(_full_env())
+
+    assert cfg.claude_projects_dir == "~/.claude/projects"
+    assert cfg.claude_sessions_dir == "~/.claude/sessions"
+    assert cfg.resume_limit == 8
+    assert cfg.stream_progress is True
+    assert cfg.stream_interval == 1.5
+
+
+def test_history_paths_are_expanded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg = load_config({**_full_env(), "CLAUDE_PROJECTS_DIR": "~/custom/projects"})
+
+    assert claude_projects_path(cfg) == tmp_path / "custom" / "projects"
+    assert claude_sessions_path(cfg) == tmp_path / ".claude" / "sessions"
+
+
+def test_stream_interval_accepts_a_fraction():
+    cfg = load_config({**_full_env(), "STREAM_INTERVAL": "0.5"})
+
+    assert cfg.stream_interval == 0.5
+
+
+def test_a_non_numeric_stream_interval_is_rejected():
+    with pytest.raises(ValueError) as exc:
+        load_config({**_full_env(), "STREAM_INTERVAL": "slow"})
+
+    assert "STREAM_INTERVAL" in str(exc.value)

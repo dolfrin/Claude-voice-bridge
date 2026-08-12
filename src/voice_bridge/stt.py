@@ -1,9 +1,11 @@
-"""Speech-to-text via faster-whisper.
+"""Speech-to-text via a remote Paprika ASR service, or local faster-whisper.
 
-Accepts Telegram OGG/Opus voice bytes and returns a transcript. The blocking
-faster-whisper model load and inference run off the event loop in a worker
-thread so the single asyncio loop is never blocked. Language is auto-detected
-by default.
+Accepts Telegram OGG/Opus voice bytes and returns a transcript. When
+``PAPRIKA_URL`` is set the audio is posted to that service and nothing is
+transcribed on this machine; otherwise a local faster-whisper model is loaded.
+The blocking local model load and inference run off the event loop in a worker
+thread so the single asyncio loop is never blocked. Language is auto-detected by
+default.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import tempfile
 
 
 class Transcriber:
-    """Wraps a faster-whisper model for OGG/Opus -> text transcription."""
+    """OGG/Opus -> text, remote over HTTP or local via faster-whisper."""
 
     def __init__(self, model_name: str, language: str | None = None) -> None:
         self.model_name = model_name
@@ -43,7 +45,39 @@ class Transcriber:
             except OSError:
                 pass
 
+    async def _remote_results(self, base_url: str, audio: bytes) -> list[dict]:
+        import httpx
+
+        token = os.environ.get("PAPRIKA_TOKEN", "")
+        timeout = float(os.environ.get("PAPRIKA_TIMEOUT", "120"))
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url}/transcribe",
+                headers={"Authorization": f"Bearer {token}"},
+                files={"file": ("voice.ogg", audio, "audio/ogg")},
+            )
+        response.raise_for_status()
+        # One entry per model loaded on the server; the first is the primary.
+        # Order is decided by PAPRIKA_MODELS there, not here.
+        return [
+            {"model": r.get("model") or "?", "text": (r.get("text") or "").strip()}
+            for r in (response.json().get("results") or [])
+        ]
+
+    async def transcribe_all(self, audio: bytes) -> list[dict]:
+        """Every available transcript for ``audio``, primary first.
+
+        A local model yields exactly one; the remote service yields one per
+        model it has loaded, which is what lets the caller offer a choice.
+        """
+        base_url = os.environ.get("PAPRIKA_URL", "").rstrip("/")
+        if base_url:
+            return await self._remote_results(base_url, audio)
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, self._transcribe_sync, audio)
+        return [{"model": self.model_name, "text": text}]
+
     async def transcribe(self, audio: bytes) -> str:
         """Transcribe OGG/Opus ``audio`` bytes to text (off the event loop)."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._transcribe_sync, audio)
+        results = await self.transcribe_all(audio)
+        return results[0]["text"] if results else ""

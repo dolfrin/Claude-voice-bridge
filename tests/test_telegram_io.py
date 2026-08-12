@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telegram import MessageEntity
 from telegram.error import BadRequest
 
 from voice_bridge.config import Config
@@ -145,6 +146,7 @@ async def test_text_message_from_allowed_user_routes_to_callback():
     assert received == [{
         "message_id": 11,
         "reply_to": 7,
+        "project": None,
         "text": "kaip sekasi",
         "is_voice": False,
         "audio": None,
@@ -174,6 +176,7 @@ async def test_voice_message_downloads_bytes_and_marks_is_voice():
     assert received == [{
         "message_id": 12,
         "reply_to": None,
+        "project": None,
         "text": "",
         "is_voice": True,
         "audio": b"OGGDATA",
@@ -207,6 +210,7 @@ async def test_document_message_downloads_attachment_with_caption():
     assert received == [{
         "message_id": 15,
         "reply_to": 7,
+        "project": None,
         "text": "peržiūrėk",
         "is_voice": False,
         "audio": None,
@@ -424,6 +428,10 @@ def test_build_menu_markup_has_primary_actions():
     markup = build_menu_markup()
     callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
     assert callbacks == [
+        "menu:new",
+        "menu:resume",
+        "clist:",
+        "menu:history",
         "menu:projects",
         "menu:projects_all",
         "menu:panel",
@@ -911,7 +919,7 @@ async def test_cmd_menu_replies_with_main_menu():
     sent = upd.message.reply_text.await_args.args[0]
     markup = upd.message.reply_text.await_args.kwargs["reply_markup"]
     assert "Alex for Claude" in sent
-    assert markup.inline_keyboard[0][0].callback_data == "menu:projects"
+    assert markup.inline_keyboard[0][0].callback_data == "menu:new"
 
 
 @pytest.mark.asyncio
@@ -951,7 +959,7 @@ async def test_menu_stop_callback_interrupts_active_project():
     assert ("interrupt", None) in controls.calls
     kwargs = query.edit_message_text.await_args.kwargs
     assert "active: nutraukta" in kwargs["text"]
-    assert kwargs["reply_markup"].inline_keyboard[2][0].callback_data == "menu:stop"
+    assert kwargs["reply_markup"].inline_keyboard[4][0].callback_data == "menu:stop"
 
 
 # --------------------------------------------------------------------------
@@ -1243,18 +1251,27 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     # on, off, stop, mode, voice, engine, status, callback, text, voice, attachments.
     assert len(added) >= 17
 
+    # The voice handler must not block the update queue: it can pause to ask
+    # which transcript to accept, and the answering button press is itself an
+    # update that would never be processed while the queue is stalled.
+    # Bound methods are recreated per attribute access, so compare by equality.
+    voice = [h for h in added if getattr(h, "callback", None) == io._handle_voice]
+    assert voice and voice[0].block is False
+
     cmd_names = set()
     for h in added:
         cmds = getattr(h, "commands", None)
         if cmds:
             cmd_names |= set(cmds)
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off", "stop",
-            "mode", "voice", "engine", "status"} <= cmd_names
+    assert {"menu", "new", "resume", "sessions", "history", "close", "panel",
+            "projects", "projects_all", "projects_refresh", "handoff", "on", "off",
+            "stop", "mode", "voice", "engine", "status"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off", "stop",
-            "mode", "voice", "engine"} == registered_names
+    assert {"menu", "new", "resume", "sessions", "history", "close", "panel",
+            "projects", "projects_all", "projects_refresh", "handoff", "status",
+            "on", "off", "stop", "mode", "voice", "engine"} == registered_names
 
 
 @pytest.mark.asyncio
@@ -1308,3 +1325,67 @@ async def test_stop_is_noop_when_never_run():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     # app is None; stop must not raise.
     await io.stop()
+
+
+@pytest.mark.asyncio
+async def test_ask_per_message_edit_dumps_copyable_text_and_returns_none():
+    from telegram import MessageEntity
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=320))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    task = asyncio.create_task(
+        io.ask_per_message("stt", [("m1", "labas žeme"), ("m2", "kitas tekstas")])
+    )
+    await asyncio.sleep(0)
+
+    # Every transcript message carries [Accept this][Edit] on one row.
+    row = bot.send_message.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0]
+    assert [b.text for b in row] == ["Accept this", "Edit"]
+    assert row[0].callback_data == "ask:1:0"
+    assert row[1].callback_data == "ask:1:e0"
+
+    query = MagicMock()
+    query.from_user = MagicMock(id=42)
+    query.data = "ask:1:e0"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+    await io._handle_callback(update, MagicMock())
+
+    # Edit resolves the ask with the None sentinel...
+    assert await task is None
+    # ...and replaces the tapped message with the bare body as a code entity.
+    args, kwargs = query.edit_message_text.await_args
+    assert args[0] == "labas žeme"
+    entity = kwargs["entities"][0]
+    assert entity.type == MessageEntity.CODE
+    assert entity.offset == 0
+    assert entity.length == 10  # UTF-16 units of "labas žeme"
+
+
+@pytest.mark.asyncio
+async def test_ask_per_message_accept_still_returns_label():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=321))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    task = asyncio.create_task(io.ask_per_message("stt", [("m1", "a"), ("m2", "b")]))
+    await asyncio.sleep(0)
+
+    query = MagicMock()
+    query.from_user = MagicMock(id=42)
+    query.data = "ask:1:1"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+    await io._handle_callback(update, MagicMock())
+
+    assert await task == "m2"
+    query.edit_message_text.assert_awaited_once_with("Selected: m2")

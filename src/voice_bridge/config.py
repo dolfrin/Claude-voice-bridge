@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 import yaml
 
 _VALID_TTS_BACKENDS = {"auto", "openai", "piper", "together"}
-_VALID_AUTONOMY_MODES = {"full", "safe", "ask"}
+_VALID_AUTONOMY_MODES = {"full", "auto", "safe", "ask"}
 
 
 @dataclass
@@ -32,6 +33,20 @@ class Config:
     auto_discover_limit: int = 12
     open_vscode_on_enable: bool = False
     close_vscode_on_disable: bool = False
+    # Supergroup to run in, one forum topic per project. Unset keeps the
+    # original behaviour: everything in the allowed user's private chat.
+    telegram_chat_id: int | None = None
+    # Where Claude Code keeps its own history, so the bridge can list and resume
+    # the same sessions the CLI and the VS Code extension show.
+    claude_projects_dir: str = "~/.claude/projects"
+    claude_sessions_dir: str = "~/.claude/sessions"
+    resume_limit: int = 8
+    # /history browses everything on disk, so it lists more than the attach
+    # picker; a project can easily have 75 sessions.
+    history_limit: int = 20
+    # Edit a live progress message while the agent works.
+    stream_progress: bool = True
+    stream_interval: float = 1.5
 
 
 @dataclass
@@ -71,6 +86,16 @@ def _optional_int(env: Mapping[str, str], key: str, default: int) -> int:
         raise ValueError(f"Config key {key} must be an integer, got: {raw!r}")
 
 
+def _optional_float(env: Mapping[str, str], key: str, default: float) -> float:
+    raw = env.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"Config key {key} must be a number, got: {raw!r}")
+
+
 def _optional_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
     raw = env.get(key)
     if raw is None or raw == "":
@@ -81,6 +106,17 @@ def _optional_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Config key {key} must be a boolean, got: {raw!r}")
+
+
+def _optional_chat_id(env: Mapping[str, str], key: str) -> int | None:
+    """Supergroup ids are negative; absent means private-chat mode."""
+    raw = env.get(key)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw.strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"Config key {key} must be an integer, got: {raw!r}")
 
 
 def _together_language(env: Mapping[str, str]) -> str:
@@ -103,7 +139,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             f"{sorted(_VALID_TTS_BACKENDS)}, got: {tts_backend!r}"
         )
 
-    autonomy_mode = env.get("AUTONOMY_MODE") or "safe"
+    autonomy_mode = env.get("AUTONOMY_MODE") or "auto"
     if autonomy_mode not in _VALID_AUTONOMY_MODES:
         raise ValueError(
             f"Config key AUTONOMY_MODE must be one of "
@@ -134,7 +170,22 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         auto_discover_limit=_optional_int(env, "AUTO_DISCOVER_LIMIT", 12),
         open_vscode_on_enable=_optional_bool(env, "OPEN_VSCODE_ON_ENABLE", False),
         close_vscode_on_disable=_optional_bool(env, "CLOSE_VSCODE_ON_DISABLE", False),
+        telegram_chat_id=_optional_chat_id(env, "TELEGRAM_CHAT_ID"),
+        claude_projects_dir=env.get("CLAUDE_PROJECTS_DIR") or "~/.claude/projects",
+        claude_sessions_dir=env.get("CLAUDE_SESSIONS_DIR") or "~/.claude/sessions",
+        resume_limit=_optional_int(env, "RESUME_LIMIT", 8),
+        history_limit=_optional_int(env, "HISTORY_LIMIT", 20),
+        stream_progress=_optional_bool(env, "STREAM_PROGRESS", True),
+        stream_interval=_optional_float(env, "STREAM_INTERVAL", 1.5),
     )
+
+
+def claude_projects_path(cfg: Config) -> Path:
+    return Path(cfg.claude_projects_dir).expanduser()
+
+
+def claude_sessions_path(cfg: Config) -> Path:
+    return Path(cfg.claude_sessions_dir).expanduser()
 
 
 def load_projects(path: str = "projects.yaml") -> list[ProjectConfig]:

@@ -210,6 +210,20 @@ async def test_can_use_tool_full_allows_without_asking():
 
 
 @pytest.mark.asyncio
+async def test_can_use_tool_auto_asks_only_about_what_the_cli_escalated():
+    # In auto mode the CLI approves the safe majority before the callback runs,
+    # so anything that does arrive here is worth a question rather than an
+    # is_risky second-guess.
+    mgr = _FakeManager(decision=True)
+    fn = make_can_use_tool(_proj(autonomy="auto"), _cfg(), mgr)
+
+    result = await fn("Read", {"file_path": f"{CWD}/a.py"}, None)
+
+    assert _decision_kind(result) == "PermissionResultAllow"
+    assert len(mgr.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_can_use_tool_ask_requests_even_safe():
     mgr = _FakeManager(decision=True)
     fn = make_can_use_tool(_proj(autonomy="ask"), _cfg(), mgr)
