@@ -171,6 +171,56 @@ async def test_approval_manager_timeout_denies():
 
 
 @pytest.mark.asyncio
+async def test_a_timed_out_approval_says_so_instead_of_going_quiet():
+    # Silence is indistinguishable from "still waiting": the question sits there
+    # looking open while the agent gave up on the tool minutes ago.
+    sent: list[tuple[str, str]] = []
+
+    async def send_question(project: str, text: str) -> int:
+        sent.append((project, text))
+        return len(sent)
+
+    mgr = ApprovalManager(send_question, timeout=0.05)
+
+    assert await mgr.request("qwing#1", "Bash", {"command": "git push"}) is False
+
+    assert len(sent) == 2
+    project, notice = sent[1]
+    assert project == "qwing#1"  # lands in the same topic as the question
+    assert "denied" in notice
+    assert "Bash" in notice
+
+
+@pytest.mark.asyncio
+async def test_an_answered_approval_sends_no_timeout_notice():
+    sent: list[str] = []
+
+    async def send_question(project: str, text: str) -> int:
+        sent.append(text)
+        return 7
+
+    mgr = ApprovalManager(send_question, timeout=5)
+    task = asyncio.create_task(mgr.request("qwing", "Bash", {"command": "ls"}))
+    await asyncio.sleep(0)
+    mgr.resolve(7, True)
+
+    assert await task is True
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failing_timeout_notice_still_denies():
+    async def send_question(project: str, text: str) -> int:
+        if "denied" in text:
+            raise RuntimeError("telegram down")
+        return 1
+
+    mgr = ApprovalManager(send_question, timeout=0.05)
+
+    assert await mgr.request("qwing", "Bash", {"command": "rm -rf /"}) is False
+
+
+@pytest.mark.asyncio
 async def test_resolve_unknown_returns_false():
     async def send_question(project: str, text: str) -> int:
         return 1

@@ -165,6 +165,17 @@ class ApprovalManager:
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
         except asyncio.TimeoutError:
+            # Silence here is indistinguishable from "still waiting": the
+            # question keeps sitting there unanswered while the agent has long
+            # since given up on the tool and moved on without it.
+            try:
+                await self._send_question(
+                    project,
+                    f"⏱ No answer in {self._timeout}s — denied: {tool_name}. "
+                    "The agent carried on without it.",
+                )
+            except Exception:  # noqa: BLE001 - the denial stands either way
+                logger.exception("could not report the approval timeout for %s", project)
             return False
         finally:
             self._pending.pop(message_id, None)
