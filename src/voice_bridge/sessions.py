@@ -314,19 +314,17 @@ class SessionManager:
     # ------------------------------------------------------------------ #
 
     async def start_all(self) -> None:
-        """Restore every open conversation of every enabled project.
+        """Restore the conversations that already exist, and only those.
 
-        A project enabled with no conversation yet gets ``#1`` — so a fresh
-        install still ends up with one working topic without any command.
+        Deliberately creates nothing: a session appearing in a topic nobody
+        asked for is indistinguishable from a stray one, and ten enabled
+        projects meant ten empty topics and ten idle agents on every start. New
+        conversations come from ``/new`` or ``/resume``.
         """
         for name in self._projects:
             if not await self._store.is_enabled(name):
                 continue
-            existing = await self._store.conversations(name)
-            if not existing:
-                await self.open(name)
-                continue
-            for conv in existing:
+            for conv in await self._store.conversations(name):
                 await self._start(conv.key, resume=conv.session_id)
 
     async def stage(self, project: str, *, resume: str | None = None) -> str | None:
@@ -338,6 +336,12 @@ class SessionManager:
         throws both away.
         """
         if project not in self._projects:
+            return None
+        # Disabled means the user switched this project off; opening a session
+        # in it anyway would quietly undo that. start_all used to be the only
+        # caller and carried this check itself.
+        if not await self._store.is_enabled(project):
+            logger.info("refusing to open a conversation in disabled project %s", project)
             return None
         ordinal = await self._store.next_ordinal(project)
         key = conversation_key(project, ordinal)
@@ -433,11 +437,9 @@ class SessionManager:
         if enabled:
             if self._cfg.open_vscode_on_enable:
                 await self._open_vscode(self._projects[project])
-            existing = await self._store.conversations(project)
-            if not existing:
-                await self.open(project)
-                return
-            for conv in existing:
+            # Same rule as start_all: enabling a project makes it available,
+            # it does not conjure a conversation the user never asked for.
+            for conv in await self._store.conversations(project):
                 await self._start(conv.key, resume=conv.session_id)
         else:
             for key in list(self._sessions):

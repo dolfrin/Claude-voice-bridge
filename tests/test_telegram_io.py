@@ -23,6 +23,26 @@ from voice_bridge.telegram_io import (
 from voice_bridge.transcript import transcript_path
 
 
+class _FakeBuilder:
+    """Chainable stand-in: every builder method returns the builder itself.
+
+    Records the calls so a test can still check the token was passed.
+    """
+
+    def __init__(self, app):
+        self._app = app
+        self.calls: list[tuple] = []
+
+    def __getattr__(self, name):
+        def record(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            return self
+        return record
+
+    def build(self):
+        return self._app
+
+
 def make_cfg(allowed_id=42):
     return Config(
         telegram_bot_token="TESTTOKEN",
@@ -285,6 +305,75 @@ async def test_send_update_sends_text_then_voice_and_returns_ids():
     assert "Pushintas kodas" in sent_text
     bot.send_voice.assert_awaited_once()
     assert bot.send_voice.await_args.kwargs["voice"] == b"OGGVOICE"
+
+
+@pytest.mark.asyncio
+async def test_send_update_renders_markdown_as_telegram_html():
+    # Without parse_mode Telegram printed "**bold**" with the asterisks showing.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=100))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    await io.send_update(
+        project="qwing", voice_label="alloy",
+        text="**Kas įvyko**\n\n`git push` failed",
+        voice_bytes=None,
+    )
+
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["parse_mode"] == "HTML"
+    assert "<b>Kas įvyko</b>" in kwargs["text"]
+    assert "<code>git push</code>" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_update_splits_an_answer_too_long_for_one_message():
+    # Over 4096 characters Telegram refuses the send and the answer is lost.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=[
+        MagicMock(message_id=1), MagicMock(message_id=2), MagicMock(message_id=3),
+    ])
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    ids = await io.send_update(
+        project="qwing", voice_label="alloy",
+        text="\n".join(f"line {i} " + "y" * 60 for i in range(120)),
+        voice_bytes=None,
+    )
+
+    assert len(ids) > 1
+    assert bot.send_message.await_count == len(ids)
+    # Only the first piece carries the project tag.
+    first = bot.send_message.await_args_list[0].kwargs["text"]
+    second = bot.send_message.await_args_list[1].kwargs["text"]
+    assert first.startswith("[qwing]")
+    assert not second.startswith("[qwing]")
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_html_body_is_resent_as_plain_text():
+    # A conversion bug must never cost the user the answer itself.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=[
+        BadRequest("can't parse entities"), MagicMock(message_id=55),
+    ])
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    ids = await io.send_update(
+        project="qwing", voice_label="alloy", text="**oops", voice_bytes=None,
+    )
+
+    assert ids == [55]
+    assert bot.send_message.await_count == 2
+    retry = bot.send_message.await_args_list[1].kwargs
+    assert "parse_mode" not in retry
+    assert "**oops" in retry["text"]
 
 
 @pytest.mark.asyncio
@@ -1229,9 +1318,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.updater = MagicMock()
     fake_app.updater.start_polling = AsyncMock()
 
-    fake_builder = MagicMock()
-    fake_builder.token.return_value = fake_builder
-    fake_builder.build.return_value = fake_app
+    fake_builder = _FakeBuilder(fake_app)
 
     monkeypatch.setattr(
         mod.Application, "builder",
@@ -1241,7 +1328,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     await io.run()
 
-    fake_builder.token.assert_called_once_with("TESTTOKEN")
+    assert ("token", ("TESTTOKEN",), {}) in fake_builder.calls
     assert io.app is fake_app
     fake_app.initialize.assert_awaited_once()
     fake_app.bot.set_my_commands.assert_awaited_once()
@@ -1288,9 +1375,7 @@ async def test_run_returns_without_blocking(monkeypatch):
     fake_app.updater = MagicMock()
     fake_app.updater.start_polling = AsyncMock()
 
-    fake_builder = MagicMock()
-    fake_builder.token.return_value = fake_builder
-    fake_builder.build.return_value = fake_app
+    fake_builder = _FakeBuilder(fake_app)
     monkeypatch.setattr(
         mod.Application, "builder",
         classmethod(lambda cls: fake_builder),

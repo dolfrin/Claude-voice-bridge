@@ -44,6 +44,7 @@ from telegram.ext import (
 
 from .config import Config
 from .routing import project_of
+from .telegram_md import TELEGRAM_MAX_MESSAGE, split_markdown, to_html
 from .transcript import transcript_path
 from .tts import available_voices
 
@@ -258,10 +259,20 @@ def build_session_pick_markup(idx: int, sessions: list, action: str) -> InlineKe
     return InlineKeyboardMarkup(rows)
 
 
-def build_transcript_markup(idx: int, uuid: str) -> InlineKeyboardMarkup:
+def build_transcript_markup(idx: int, uuid: str, live: bool = False) -> InlineKeyboardMarkup:
+    """Reading a session is usually the step before continuing it, so the
+    attach lives here too — including for a session that is running, which is
+    exactly the case that needs a fork rather than a second writer."""
+    attach = "🌿 Fork it" if live else "🔗 Attach"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Full transcript", callback_data=f"cfull:{idx}:{uuid}")],
-        [InlineKeyboardButton("« back", callback_data=f"chp:{idx}")],
+        [
+            InlineKeyboardButton(attach, callback_data=f"rs:{idx}:{uuid}"),
+            InlineKeyboardButton("📄 Full", callback_data=f"cfull:{idx}:{uuid}"),
+        ],
+        [
+            InlineKeyboardButton("« back", callback_data=f"chp:{idx}"),
+            InlineKeyboardButton("« menu", callback_data="menu:home"),
+        ],
     ])
 
 
@@ -299,9 +310,6 @@ def tail_for_telegram(text: str, limit: int = 3500) -> str:
         return text
     return "...\n" + text[-limit:]
 
-
-# Telegram rejects a sendMessage body longer than this.
-TELEGRAM_MAX_MESSAGE = 4096
 
 def _utf16_len(text: str) -> int:
     """Telegram entity offsets/lengths count UTF-16 code units, not chars."""
@@ -473,6 +481,7 @@ def build_conversations_markup(rows: list[dict], chat_id: int | None) -> InlineK
             open_button,
             InlineKeyboardButton("🗑", callback_data=f"cdel:{row['key']}"),
         ])
+    buttons.append([InlineKeyboardButton("« menu", callback_data="menu:home")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -835,6 +844,26 @@ class TelegramIO:
         )
 
     # --- outbound --------------------------------------------------------
+    async def _send_rich(self, project: str, body: str) -> int:
+        """Send one message as Telegram HTML, falling back to plain text.
+
+        A conversion bug or an exotic character must never cost the user the
+        answer itself, so a rejected HTML body is resent verbatim.
+        """
+        bot = self.app.bot
+        try:
+            msg = await bot.send_message(
+                **self._dest(project),
+                text=to_html(body),
+                parse_mode="HTML",
+            )
+        except BadRequest:
+            logger.exception("HTML send rejected for %s; resending as plain text", project)
+            msg = await bot.send_message(
+                **self._dest(project), text=body[:TELEGRAM_MAX_MESSAGE]
+            )
+        return msg.message_id
+
     async def send_update(
         self,
         project: str,
@@ -842,15 +871,13 @@ class TelegramIO:
         text: str,
         voice_bytes: bytes | None,
     ) -> list[int]:
-        """Send a TEXT message (full, may contain code) and, if voice_bytes
-        is provided, a VOICE message. Return the message_ids sent."""
+        """Send the answer as TEXT — rendered, and split if long — plus a VOICE
+        message when voice_bytes is given. Returns every message_id sent."""
         bot = self.app.bot
         ids: list[int] = []
-        text_msg = await bot.send_message(
-            **self._dest(project),
-            text=f"[{project}] {text}",
-        )
-        ids.append(text_msg.message_id)
+        for i, chunk in enumerate(split_markdown(text)):
+            body = f"[{project}] {chunk}" if i == 0 else chunk
+            ids.append(await self._send_rich(project, body))
         if voice_bytes is not None:
             voice_msg = await bot.send_voice(
                 **self._dest(project),
@@ -1274,10 +1301,14 @@ class TelegramIO:
             return
 
         if action == "chs":
+            sessions, _total = self.controls.project_sessions(
+                project, self.cfg.history_limit
+            )
+            live = any(s.uuid == uuid and s.live for s in sessions)
             await self._edit_callback_text(
                 query,
                 self.controls.session_history_text(project, uuid),
-                build_transcript_markup(idx, uuid),
+                build_transcript_markup(idx, uuid, live=live),
             )
             return
 
@@ -1606,7 +1637,9 @@ class TelegramIO:
 
     async def _announce_opened(self, target, key: str | None) -> None:
         if key is None:
-            await target.reply_text("Could not open a session.")
+            await target.reply_text(
+                "Could not open a session — is the project enabled? Use /on."
+            )
             return
         await target.reply_text(
             f"Opened {key}.", reply_markup=self._topic_link_markup(key)
@@ -1747,6 +1780,29 @@ class TelegramIO:
             ]]),
         )
 
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Tell the user when a handler dies, instead of failing silently.
+
+        Without this, an exception is logged and swallowed by the library: the
+        user sees nothing at all and cannot tell a lost message from one still
+        being worked on. A voice download timing out looked exactly like the bot
+        ignoring them.
+        """
+        logger.exception("handler failed", exc_info=context.error)
+        message = getattr(update, "effective_message", None)
+        thread_id = getattr(message, "message_thread_id", None) if message else None
+        target = self.conversation_for_thread(thread_id) or self.project_for_thread(
+            thread_id
+        )
+        reason = type(context.error).__name__ if context.error else "error"
+        try:
+            await self.app.bot.send_message(
+                **self._dest(target),
+                text=f"⚠️ That did not go through ({reason}). Please send it again.",
+            )
+        except Exception:  # noqa: BLE001 - nothing left to try if this fails too
+            logger.exception("could not report the handler failure to the user")
+
     # --- lifecycle -------------------------------------------------------
     async def run(self) -> None:
         """Build the Application, register handlers, start polling, RETURN.
@@ -1754,7 +1810,18 @@ class TelegramIO:
         Per C3 the bridge main() owns the run-forever wait; this method must
         not block. ``stop()`` performs the symmetric shutdown.
         """
-        app = Application.builder().token(self.cfg.telegram_bot_token).build()
+        # The 5 s default is fine for sending text but not for pulling a voice
+        # file back out of Telegram: a slow link times out mid-download and the
+        # turn is lost before transcription is even attempted.
+        app = (
+            Application.builder()
+            .token(self.cfg.telegram_bot_token)
+            .read_timeout(30.0)
+            .connect_timeout(10.0)
+            .write_timeout(30.0)
+            .media_write_timeout(120.0)
+            .build()
+        )
         self.app = app
 
         only_me = filters.User(user_id=self.cfg.telegram_allowed_user_id)
@@ -1815,6 +1882,7 @@ class TelegramIO:
         ))
         app.add_handler(MessageHandler(
             only_me & filters.TEXT & ~filters.COMMAND, self._handle_text))
+        app.add_error_handler(self._on_error)
 
         await app.initialize()
         await app.bot.set_my_commands(_BOT_COMMANDS)

@@ -28,6 +28,7 @@ from test_sessions import (
     FakeStore,
     make_cfg,
     make_project,
+    start,
     _wait_for,
     assistant,
     result,
@@ -64,7 +65,7 @@ async def test_start_all_gives_an_enabled_project_its_first_conversation():
     store = FakeStore(enabled={"qwing": True})
     sm = make_sm([make_project("qwing")], store)
 
-    await sm.start_all()
+    await start(sm, "qwing")
 
     assert sm.running_keys() == ["qwing#1"]
     await sm.stop_all()
@@ -81,7 +82,7 @@ async def test_open_allocates_the_next_number_and_creates_its_topic():
         await store.set_conversation_topic(key, -100, 40 + ordinal)
 
     sm = make_sm([make_project("qwing")], store, on_open=on_open)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     second = await sm.open("qwing")
 
@@ -99,7 +100,7 @@ async def test_two_conversations_of_one_project_are_independent():
         outbound.append(o)
 
     sm = make_sm([make_project("qwing")], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     await sm.open("qwing")
 
     first, second = FakeClaudeSDKClient.instances
@@ -120,7 +121,7 @@ async def test_closing_a_conversation_stops_it_and_removes_its_topic():
         closed.append(key)
 
     sm = make_sm([make_project("qwing")], store, on_close=on_close)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     assert await sm.close("qwing#1") is True
 
@@ -141,7 +142,7 @@ async def test_a_closed_number_is_never_handed_out_again():
     # #2 reappearing would put a new conversation under the old topic's title.
     store = FakeStore(enabled={"qwing": True})
     sm = make_sm([make_project("qwing")], store)
-    await sm.start_all()
+    await start(sm, "qwing")
     await sm.open("qwing")
     await sm.close("qwing#2")
 
@@ -227,7 +228,7 @@ async def test_disabling_a_project_stops_all_its_conversations():
     sm = make_sm(
         [make_project("qwing"), make_project("beta", cwd="/tmp/beta")], store
     )
-    await sm.start_all()
+    await start(sm, "qwing", "beta")
     await sm.open("qwing")
 
     await sm.set_enabled("qwing", False)
@@ -278,7 +279,7 @@ async def test_progress_streams_tools_then_ends_with_a_summary():
         cfg=make_cfg(stream_progress=True, stream_interval=0.0),
         on_progress=on_progress,
     )
-    await sm.start_all()
+    await start(sm, "qwing")
     client = FakeClaudeSDKClient.instances[0]
     client.scripted_turns = [[
         AssistantMessage(
@@ -317,7 +318,7 @@ async def test_a_failed_tool_is_marked_as_failed():
         cfg=make_cfg(stream_progress=True, stream_interval=0.0),
         on_progress=on_progress,
     )
-    await sm.start_all()
+    await start(sm, "qwing")
     FakeClaudeSDKClient.instances[0].scripted_turns = [[
         AssistantMessage(
             content=[ToolUseBlock(id="t1", name="Bash", input={"command": "ls"})],
@@ -354,7 +355,7 @@ async def test_progress_off_falls_back_to_the_plain_working_status():
         cfg=make_cfg(stream_progress=False),
         on_progress=on_progress,
     )
-    await sm.start_all()
+    await start(sm, "qwing")
 
     await sm.deliver("qwing#1", "go")
     assert await _wait_for(lambda: len(outbound) >= 2)
@@ -378,7 +379,7 @@ async def test_progress_is_rate_limited_between_updates():
         cfg=make_cfg(stream_progress=True, stream_interval=60.0),
         on_progress=on_progress,
     )
-    await sm.start_all()
+    await start(sm, "qwing")
     FakeClaudeSDKClient.instances[0].scripted_turns = [[
         AssistantMessage(
             content=[ToolUseBlock(id=f"t{i}", name="Bash", input={"command": f"c{i}"})],
@@ -413,7 +414,7 @@ async def test_a_progress_failure_never_breaks_the_turn():
         cfg=make_cfg(stream_progress=True, stream_interval=0.0),
         on_progress=on_progress,
     )
-    await sm.start_all()
+    await start(sm, "qwing")
     FakeClaudeSDKClient.instances[0].scripted_turns = [[
         assistant("done anyway"), result("s"),
     ]]
@@ -437,7 +438,7 @@ async def test_is_busy_is_true_only_while_a_turn_runs():
         cfg=make_cfg(stream_progress=True, stream_interval=0.0),
         on_progress=on_progress,
     )
-    await sm.start_all()
+    await start(sm, "qwing")
     assert sm.is_busy("qwing#1") is False
 
     FakeClaudeSDKClient.instances[0].scripted_turns = [[assistant("x"), result("s")]]
@@ -596,6 +597,50 @@ async def test_a_final_update_with_nothing_to_edit_sends_nothing():
     await io.send_progress("paprika#1", "✅ done", True)
 
     io.app.bot.send_message.assert_not_awaited()
+
+
+async def test_a_handler_failure_tells_the_user_in_their_topic():
+    # A voice download timed out and the exception was swallowed by the
+    # library: the user saw nothing at all and could not tell a lost message
+    # from one still being worked on.
+    io = make_io()
+    io._conv_topics = {"rektbot#1": 9}
+    io.app.bot.send_message = AsyncMock()
+    update = MagicMock()
+    update.effective_message = MagicMock(message_thread_id=9)
+    context = MagicMock()
+    context.error = TimeoutError("Timed out")
+
+    await io._on_error(update, context)
+
+    sent = io.app.bot.send_message.await_args.kwargs
+    assert sent["message_thread_id"] == 9
+    assert "again" in sent["text"]
+    assert "TimeoutError" in sent["text"]
+
+
+async def test_a_handler_failure_outside_any_topic_still_reports():
+    io = make_io()
+    io.app.bot.send_message = AsyncMock()
+    update = MagicMock()
+    update.effective_message = MagicMock(message_thread_id=None)
+    context = MagicMock()
+    context.error = RuntimeError("boom")
+
+    await io._on_error(update, context)
+
+    io.app.bot.send_message.assert_awaited_once()
+
+
+async def test_a_failure_to_report_the_failure_is_not_fatal():
+    io = make_io()
+    io.app.bot.send_message = AsyncMock(side_effect=RuntimeError("telegram down"))
+    update = MagicMock()
+    update.effective_message = MagicMock(message_thread_id=None)
+    context = MagicMock()
+    context.error = RuntimeError("boom")
+
+    await io._on_error(update, context)  # must not raise
 
 
 async def test_the_progress_message_carries_a_stop_button():
@@ -1001,9 +1046,25 @@ async def test_picking_a_session_shows_its_transcript():
     controls.session_history_text.assert_called_once_with("qwing", "uuid-a")
     assert "hi" in query.edit_message_text.await_args.kwargs["text"]
     markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+    # Reading a session is the step before continuing it, so attach is here.
     assert [b.callback_data for row in markup.inline_keyboard for b in row] == [
-        "cfull:0:uuid-a", "chp:0",
+        "rs:0:uuid-a", "cfull:0:uuid-a", "chp:0", "menu:home",
     ]
+    assert markup.inline_keyboard[0][0].text == "🔗 Attach"
+
+
+async def test_a_running_session_offers_a_fork_from_history():
+    # The case that has no other way out: you cannot attach to a session that
+    # is already open, only branch off it.
+    controls = history_controls()
+    io = make_io(controls=controls)
+    query = menu_query()
+
+    await io._handle_history_callback(query, "chs", "0:uuid-b")  # live in VSCode
+
+    markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].text == "🌿 Fork it"
+    assert markup.inline_keyboard[0][0].callback_data == "rs:0:uuid-b"
 
 
 async def test_the_full_transcript_comes_as_a_file():
@@ -1285,7 +1346,7 @@ async def test_a_restored_session_forks_if_it_is_open_elsewhere(tmp_path, monkey
         cfg=make_cfg(claude_sessions_dir=str(registry)),
     )
 
-    await sm.start_all()
+    await start(sm, "qwing")
 
     assert FakeClaudeSDKClient.instances[0].options.fork_session is True
     await sm.stop_all()
@@ -1301,7 +1362,7 @@ async def test_a_restored_session_that_is_not_open_elsewhere_is_not_forked(tmp_p
         cfg=make_cfg(claude_sessions_dir=str(tmp_path / "empty")),
     )
 
-    await sm.start_all()
+    await start(sm, "qwing")
 
     assert FakeClaudeSDKClient.instances[0].options.fork_session is False
     await sm.stop_all()

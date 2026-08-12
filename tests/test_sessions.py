@@ -220,6 +220,18 @@ def _patch_sdk(monkeypatch):
     FakeClaudeSDKClient.instances = []
 
 
+async def start(sm, *projects):
+    """start_all() plus an explicit conversation per project.
+
+    Sessions are never created implicitly any more — a topic nobody asked for
+    is indistinguishable from a stray one — so tests that need a live
+    conversation open it themselves.
+    """
+    await sm.start_all()
+    for name in projects:
+        await sm.open(name)
+
+
 async def _wait_for(predicate, tries=300, delay=0.005):
     for _ in range(tries):
         if predicate():
@@ -241,9 +253,10 @@ async def test_start_all_starts_only_enabled_projects():
         outbound.append(o)
 
     sm = make_sm(projects, store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing", "other")
 
     assert sm.is_running("qwing#1") is True
+    # "other" is disabled: opening it is refused rather than silently started.
     assert sm.is_running("other#1") is False
     assert len(FakeClaudeSDKClient.instances) == 1
     assert FakeClaudeSDKClient.instances[0].connected is True
@@ -276,7 +289,7 @@ async def test_deliver_drains_turn_captures_session_id_and_emits_outbound():
         outbound.append(o)
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     client = FakeClaudeSDKClient.instances[0]
     client.scripted_turns = [[
@@ -311,7 +324,7 @@ async def test_deliver_reports_queue_position_when_busy():
         outbound.append(o)
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     await sm.deliver("qwing#1", "first")
     await sm.deliver("qwing#1", "second")
@@ -335,7 +348,7 @@ async def test_interrupt_uses_the_sdk_and_keeps_the_session_alive():
         outbound.append(o)
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     first = FakeClaudeSDKClient.instances[0]
 
     stopped = await sm.interrupt("qwing#1")
@@ -358,7 +371,7 @@ async def test_interrupt_falls_back_to_a_restart_when_the_sdk_refuses():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     first = FakeClaudeSDKClient.instances[0]
 
     async def boom():
@@ -381,7 +394,7 @@ async def test_interrupt_drops_queued_turns():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     client = FakeClaudeSDKClient.instances[0]
     client.scripted_turns = [[assistant("one"), result("s1")]]
 
@@ -403,7 +416,7 @@ async def test_deliver_mirrors_turns_to_project_transcript(tmp_path):
         outbound.append(o)
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     client = FakeClaudeSDKClient.instances[0]
     client.scripted_turns = [[assistant("Padaryta."), result("sess-1")]]
 
@@ -428,9 +441,9 @@ async def test_deliver_to_unstarted_project_is_noop():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     await sm.deliver("qwing#1", "hello")  # must not raise
-    assert FakeClaudeSDKClient.instances == []
+    assert FakeClaudeSDKClient.instances == []  # disabled: nothing was opened
     await sm.stop_all()
 
 
@@ -459,7 +472,7 @@ async def test_set_enabled_false_stops_and_persists_then_true_restarts():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     assert sm.is_running("qwing#1") is True
     first_client = FakeClaudeSDKClient.instances[0]
 
@@ -508,7 +521,8 @@ async def test_set_enabled_true_opens_vscode_when_configured(monkeypatch):
 
     assert calls
     assert calls[0][0][:2] == ("/usr/bin/code", "/tmp/qwing")
-    assert sm.is_running("qwing#1") is True
+    # Enabling makes the project available; it does not open a conversation.
+    assert sm.is_running("qwing#1") is False
 
     await sm.stop_all()
 
@@ -573,7 +587,7 @@ async def test_full_mode_still_installs_the_permission_callback():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     opts = FakeClaudeSDKClient.instances[0].options
     assert opts.permission_mode == "default"
@@ -592,7 +606,7 @@ async def test_auto_mode_hands_the_judgement_to_claude_code():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     opts = FakeClaudeSDKClient.instances[0].options
     assert opts.permission_mode == "auto"
@@ -610,7 +624,7 @@ async def test_switching_to_auto_pushes_the_mode_to_a_live_session():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     client = FakeClaudeSDKClient.instances[0]
 
     await sm.set_mode("qwing", "auto")
@@ -632,7 +646,7 @@ async def test_safe_mode_uses_can_use_tool_not_bypass():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     opts = FakeClaudeSDKClient.instances[0].options
     assert opts.permission_mode == "default"
@@ -649,7 +663,7 @@ async def test_ask_mode_uses_can_use_tool_not_bypass():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     opts = FakeClaudeSDKClient.instances[0].options
     assert opts.permission_mode == "default"
@@ -667,7 +681,7 @@ async def test_resume_session_id_passed_to_options():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     opts = FakeClaudeSDKClient.instances[0].options
     assert opts.resume == "prev-sess-9"
@@ -683,7 +697,7 @@ async def test_no_resume_when_no_session_id():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     opts = FakeClaudeSDKClient.instances[0].options
     assert opts.resume is None
@@ -699,7 +713,7 @@ async def test_system_prompt_includes_extra_and_split_instruction():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     sp = FakeClaudeSDKClient.instances[0].options.system_prompt
     assert isinstance(sp, dict)
@@ -722,7 +736,7 @@ async def test_set_mode_takes_effect_without_restarting_the_session():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     first_client = FakeClaudeSDKClient.instances[0]
 
     await sm.set_mode("qwing", "full")
@@ -742,7 +756,7 @@ async def test_set_model_switches_every_live_conversation():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     await sm.open("qwing")
 
     await sm.set_model("qwing", "claude-opus-5")
@@ -764,8 +778,8 @@ async def test_set_mode_when_not_running_only_updates_config():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
-    assert sm.is_running("qwing#1") is False
+    await start(sm, "qwing")
+    assert sm.is_running("qwing#1") is False  # disabled, so open() did nothing
 
     await sm.set_mode("qwing", "full")
     assert sm.project("qwing").autonomy == "full"
@@ -782,7 +796,7 @@ async def test_set_mode_invalid_mode_is_ignored():
         pass
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
     assert sm.is_running("qwing#1") is True
     first_client = FakeClaudeSDKClient.instances[0]
 
@@ -819,7 +833,7 @@ async def test_notify_callback_emits_outbound_with_detail_and_summary(monkeypatc
     monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     on_notify = captured["on_notify"]
     await on_notify("Need a decision", "Should I push to main?")
@@ -857,7 +871,7 @@ async def test_send_file_callback_emits_project_file_outbound(tmp_path, monkeypa
     monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     result = await captured["on_send_file"]("dist/out.txt", "rezultatas")
 
@@ -890,7 +904,7 @@ async def test_send_file_callback_denies_path_outside_project(tmp_path, monkeypa
     monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
 
     sm = make_sm([project], store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing")
 
     result = await captured["on_send_file"](str(outside), "no")
 
@@ -928,7 +942,7 @@ async def test_ask_user_callback_routes_to_injected_callback(monkeypatch):
         FakeApprovals(),
         ask_user,
     )
-    await sm.start_all()
+    await start(sm, "qwing")
 
     result = await captured["on_ask_user"]("Rinktis?", ["A", "B"])
 
@@ -956,7 +970,7 @@ async def test_each_project_gets_its_own_notify_server(monkeypatch):
     monkeypatch.setattr(sessions_mod, "make_notify_server", fake_make_notify_server)
 
     sm = make_sm(projects, store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing", "beta")
 
     assert len(notifies) == 2
     await notifies[0]("s0", "d0")
@@ -980,7 +994,7 @@ async def test_receive_response_error_emits_error_outbound_and_keeps_other_sessi
         outbound.append(o)
 
     sm = make_sm(projects, store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing", "beta")
 
     by_cwd = {c.options.cwd: c for c in FakeClaudeSDKClient.instances}
     qwing_client = by_cwd["/tmp/qwing"]
@@ -1030,7 +1044,7 @@ async def test_stop_all_disconnects_every_running_client():
         pass
 
     sm = make_sm(projects, store, on_outbound)
-    await sm.start_all()
+    await start(sm, "qwing", "beta")
     assert len(FakeClaudeSDKClient.instances) == 2
 
     await sm.stop_all()
