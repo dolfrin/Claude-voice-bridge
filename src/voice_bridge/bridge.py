@@ -208,6 +208,15 @@ def make_inbound(
             approvals.resolve(rid, ans)
             return
 
+        live_pid = msg.get("live_pid")
+        if live_pid is not None:
+            # This topic is attached to a Claude Code process running outside
+            # the bridge (VS Code, CLI). Its turns go down that session's socket
+            # instead of a bridge-owned session; telegram reports any failure
+            # into the same topic, so there is nothing to say here.
+            await telegram.deliver_live(live_pid, text)
+            return
+
         project, reason = await resolve_target(msg, store)
         if reason == "none":
             names = ", ".join(sessions.names()) if hasattr(sessions, "names") else ""
@@ -715,38 +724,19 @@ async def build() -> Wiring:
     approvals = ApprovalManager(send_question, cfg.approval_timeout)
 
     class _LazyTelegram:
-        async def send_update(self, project, voice_label, text, voice_bytes):
-            return await telegram_ref["io"].send_update(
-                project, voice_label, text, voice_bytes
-            )
+        """Forward every call to the TelegramIO that build() creates later.
 
-        async def send_file(self, project, voice_label, text, voice_bytes, file_path):
-            return await telegram_ref["io"].send_file(
-                project, voice_label, text, voice_bytes, file_path
-            )
+        Explicit one-line wrappers per method used to be listed here, and a
+        method added to TelegramIO without a wrapper failed at runtime with
+        AttributeError on the FIRST user who hit that path -- never in tests,
+        which inject their own double. Forwarding by name cannot go stale.
+        """
 
-        async def send_question(self, project, text):
-            return await telegram_ref["io"].send_question(project, text)
+        def __getattr__(self, name):
+            async def call(*args, **kwargs):
+                return await getattr(telegram_ref["io"], name)(*args, **kwargs)
 
-        async def send_disabled_project_prompt(self, project, text):
-            return await telegram_ref["io"].send_disabled_project_prompt(project, text)
-
-        async def ask_user(self, project, question, choices):
-            return await telegram_ref["io"].ask_user(project, question, choices)
-
-        async def ask_per_message(self, project, options, button="Accept this"):
-            return await telegram_ref["io"].ask_per_message(project, options, button)
-
-        async def open_conversation_topic(self, key, project, ordinal):
-            return await telegram_ref["io"].open_conversation_topic(
-                key, project, ordinal
-            )
-
-        async def close_conversation_topic(self, key):
-            return await telegram_ref["io"].close_conversation_topic(key)
-
-        async def send_progress(self, key, text, final):
-            return await telegram_ref["io"].send_progress(key, text, final)
+            return call
 
     lazy_telegram = _LazyTelegram()
 
@@ -848,6 +838,10 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
     await wiring.telegram.run()
     await wiring.sessions.start_all()
     await wiring.controls.reload_conversations()
+    # Topics attached with /live point at editor sessions that outlive this
+    # process; re-attach the ones still running instead of making the user
+    # pick them again after every restart.
+    await wiring.telegram.restore_live()
     try:
         await stop.wait()
     finally:

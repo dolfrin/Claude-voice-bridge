@@ -134,6 +134,8 @@ class FakeTelegram:
         self.files: list[tuple] = []
         self.questions: list[tuple[str, str]] = []
         self.disabled_prompts: list[tuple[str, str]] = []
+        self.live_sends: list[tuple[int, str]] = []
+        self.restored = 0
         self.ran = 0
         self.stopped = 0
 
@@ -152,6 +154,13 @@ class FakeTelegram:
     async def send_disabled_project_prompt(self, project, text):
         self.disabled_prompts.append((project, text))
         return 1000
+
+    async def deliver_live(self, pid, text):
+        self.live_sends.append((pid, text))
+        return True
+
+    async def restore_live(self):
+        self.restored += 1
 
     async def run(self):
         self.ran += 1
@@ -444,6 +453,41 @@ async def test_make_outbound_file_sends_file_and_maps_message(tmp_path):
 
 def _inbound(transcriber, store, approvals, sessions, telegram):
     return make_inbound(transcriber, store, approvals, sessions, telegram)
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_sends_an_attached_topic_to_the_live_session():
+    # A topic bound by /live belongs to a process the bridge does not own, so
+    # the turn must go down its socket and never reach a bridge session.
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    sessions = FakeSessions()
+    telegram = FakeTelegram()
+
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+    msg = _msg(text="tęsk")
+    msg["live_pid"] = 4321
+    await inbound(msg)
+
+    assert telegram.live_sends == [(4321, "tęsk")]
+    assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_transcribes_voice_before_the_live_session():
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    sessions = FakeSessions()
+    telegram = FakeTelegram()
+
+    inbound = _inbound(
+        FakeTranscriber(text="paleisk testus"), store, FakeApprovals(),
+        sessions, telegram,
+    )
+    msg = _msg(is_voice=True, audio=b"OGG")
+    msg["live_pid"] = 4321
+    await inbound(msg)
+
+    assert telegram.live_sends == [(4321, "paleisk testus")]
+    assert sessions.delivered == []
 
 
 @pytest.mark.asyncio

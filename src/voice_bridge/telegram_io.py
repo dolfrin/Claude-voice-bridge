@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import os
+import re
 import time
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
@@ -42,7 +45,8 @@ from telegram.ext import (
     filters,
 )
 
-from .config import Config
+from . import live
+from .config import Config, claude_projects_path, claude_sessions_path
 from .routing import project_of
 from .telegram_md import TELEGRAM_MAX_MESSAGE, split_markdown, to_html
 from .transcript import transcript_path
@@ -101,6 +105,7 @@ _BOT_COMMANDS = [
     BotCommand("sessions", "📋 Open sessions"),
     BotCommand("history", "📜 Session transcript"),
     BotCommand("close", "🗑 Close this session"),
+    BotCommand("live", "🖥 Join a session running on the PC"),
     BotCommand("panel", "🎛 Control panel"),
     BotCommand("projects", "🟢 Active projects"),
     BotCommand("projects_all", "📚 All projects"),
@@ -114,6 +119,13 @@ _BOT_COMMANDS = [
     BotCommand("voice", "🔊 List or set TTS voice"),
     BotCommand("engine", "🧠 Change TTS backend"),
 ]
+
+# How often a bound topic re-reads the live session's transcript, and the
+# Telegram text limit each posted chunk is clipped to.
+_LIVE_POLL_SECONDS = 2.0
+# meta-table key holding {thread_id: pid} so attachments survive a restart.
+_LIVE_META_KEY = "live_threads"
+_LIVE_CHUNK = 3500
 
 # Text posted into a project's own topic is not a turn: that topic is the
 # control desk, the agent lives in the numbered sub-topics.
@@ -130,6 +142,148 @@ def _next(seq: list[str], current: str) -> str:
     except ValueError:
         return seq[0]
     return seq[(i + 1) % len(seq)]
+
+
+def format_live_sessions(
+    sessions: list,
+    bound: int | None = None,
+    titles: dict | None = None,
+    scope: str = "",
+) -> str:
+    """The picker body for /live: what is running outside this bridge."""
+    where = f" in {scope}" if scope else ""
+    if not sessions:
+        return (
+            f"\U0001F5A5 <b>No other sessions{where}</b>\n"
+            "Nothing else is open in VS Code or a terminal right now."
+        )
+    titles = titles or {}
+    lines = [f"\U0001F5A5 <b>Sessions running on this machine{where}</b>"]
+    now = time.time()
+    for session in sessions:
+        age = _age_label(now - (session.started_at / 1000 if session.started_at else now))
+        mark = " ← attached here" if session.pid == bound else ""
+        status = f" · {html.escape(session.status)}" if session.status else ""
+        lines.append(
+            f"• <b>{html.escape(_live_title(session, titles))}</b>{mark}\n"
+            f"   {session.surface} · <code>{html.escape(session.cwd)}</code>"
+            f"{status} · {age} · <code>{html.escape(session.label)}</code>"
+        )
+    return "\n".join(lines)
+
+
+def _live_title(session, titles: dict, limit: int = 60) -> str:
+    """What the session is actually about, falling back to its derived name."""
+    text = (titles.get(session.pid) or "").strip() or session.label
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_ITALIC_RE = re.compile(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])")
+_STRIKE_RE = re.compile(r"~~(.+?)~~", re.DOTALL)
+_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
+_PLACEHOLDER = "\x00{}\x00"
+
+
+def markdown_html(text: str) -> str:
+    """Agent Markdown as the small HTML subset Telegram actually renders.
+
+    Claude writes Markdown; Telegram shows it literally, which is why a message
+    full of ``**bold**`` and backticks reads worse on the phone than in the
+    editor. Code is lifted out first so its contents are never parsed as markup,
+    and link targets that are not http(s) (``file.ts:12`` style references) are
+    kept as inline code, because Telegram cannot make those clickable.
+    """
+    blocks: list[str] = []
+
+    def stash(inner: str, tag: str) -> str:
+        blocks.append(f"<{tag}>{html.escape(inner)}</{tag}>")
+        return _PLACEHOLDER.format(len(blocks) - 1)
+
+    text = _FENCE_RE.sub(lambda m: stash(m.group(1).rstrip("\n"), "pre"), text)
+    text = _INLINE_CODE_RE.sub(lambda m: stash(m.group(1), "code"), text)
+    text = _table_to_pre(text, stash)
+
+    out = html.escape(text)
+    out = _HEADING_RE.sub(r"<b>\1</b>", out)
+    out = _BOLD_RE.sub(r"<b>\1</b>", out)
+    out = _STRIKE_RE.sub(r"<s>\1</s>", out)
+    out = _ITALIC_RE.sub(r"<i>\1</i>", out)
+    out = _LINK_RE.sub(_link_html, out)
+
+    for index, block in enumerate(blocks):
+        out = out.replace(_PLACEHOLDER.format(index), block)
+    return out
+
+
+def _link_html(match: re.Match) -> str:
+    label, target = match.group(1), match.group(2)
+    if target.startswith(("http://", "https://", "tg://")):
+        return f'<a href="{target}">{label}</a>'
+    return f"<code>{label}</code>"
+
+
+def _table_to_pre(text: str, stash) -> str:
+    """Markdown tables are unreadable when wrapped; keep them monospaced."""
+    lines = text.split("\n")
+    out: list[str] = []
+    run: list[str] = []
+    for line in lines + [""]:
+        if line.startswith("|"):
+            run.append(line)
+            continue
+        if len(run) >= 2:
+            out.append(stash("\n".join(run), "pre"))
+        else:
+            out.extend(run)
+        run = []
+        out.append(line)
+    return "\n".join(out[:-1])
+
+
+def _wants_all(context) -> bool:
+    args = getattr(context, "args", None) or []
+    return bool(args) and str(args[0]).lower() in {"all", "*"}
+
+
+def _same_dir(left: str, right: str) -> bool:
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except OSError:
+        return left == right
+
+
+def _age_label(seconds: float) -> str:
+    if seconds < 90:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def build_live_markup(
+    sessions: list, bound: int | None = None, titles: dict | None = None
+) -> InlineKeyboardMarkup:
+    """One button per joinable session, plus Detach when this topic is bound."""
+    titles = titles or {}
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'✅ ' if session.pid == bound else ''}"
+                f"{_live_title(session, titles, 38)}",
+                callback_data=f"live:{session.pid}",
+            )
+        ]
+        for session in sessions
+    ]
+    if bound is not None:
+        rows.append([InlineKeyboardButton("⏹ Detach", callback_data="live:off")])
+    return InlineKeyboardMarkup(rows) if rows else None
 
 
 def parse_callback(data: str) -> tuple[str, str]:
@@ -589,6 +743,13 @@ class TelegramIO:
             str, tuple[asyncio.Future[str | None], list[str], list[str] | None]
         ] = {}
         self._pending_ask_seq = 0
+        # Topics bound to a Claude Code session running OUTSIDE this bridge
+        # (VS Code, CLI): thread id -> pid, and the tail task feeding it. Kept
+        # in memory only, because the pids they name die with a reboot anyway.
+        self._live_threads: dict[int, int] = {}
+        self._live_tails: dict[int, asyncio.Task] = {}
+        # thread id -> (text so far, message being edited in place).
+        self._live_msgs: dict[int, tuple[str, int | None]] = {}
 
     # --- whitelist -------------------------------------------------------
     def _allowed(self, user_id: int | None) -> bool:
@@ -764,6 +925,11 @@ class TelegramIO:
         buttons instead of being forwarded to an agent.
         """
         thread_id = getattr(msg, "message_thread_id", None)
+        # A topic attached by /live is a turn destination even when it is a
+        # control topic: without this the hub hint answers instead, and the
+        # message never reaches the session the user is talking to.
+        if thread_id in self._live_threads:
+            return None
         if self.conversation_for_thread(thread_id) is not None:
             return None
         return self.project_for_thread(thread_id)
@@ -789,6 +955,11 @@ class TelegramIO:
             "text": "",
             "is_voice": False,
             "audio": None,
+            # Set only in a topic bound by /live: the turn then goes to that
+            # already-running process instead of a bridge-owned session.
+            "live_pid": self._live_threads.get(
+                getattr(msg, "message_thread_id", None)
+            ),
         }
         payload.update(extra)
         return payload
@@ -1097,6 +1268,9 @@ class TelegramIO:
             return
         if action == "menu":
             await self._handle_menu_callback(query, index_str)
+            return
+        if action == "live":
+            await self._handle_live_callback(query, index_str)
             return
         if action in {"cnew", "cres", "clist", "chp", "chs", "cfull",
                       "rs", "cok", "cdel", "pstop"}:
@@ -1762,6 +1936,266 @@ class TelegramIO:
             self.controls.history_text(key, limit), parse_mode="HTML"
         )
 
+    # --- live sessions running outside the bridge ------------------------
+    async def _cmd_live(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        # The bridge's own SDK sessions register here too, but they are already
+        # driven from their project sub-topics; offering them again would let
+        # two paths push turns into one session.
+        sessions = [
+            session
+            for session in live.list_sessions(
+                claude_sessions_path(self.cfg), skip_pid=os.getpid()
+            )
+            if session.surface != "bridge"
+        ]
+        # Run inside a project's topic (or one of its session sub-topics), /live
+        # means "what is open for THIS project", the same scoping /resume has.
+        # "/live all" and the General topic still show everything.
+        scope = "" if _wants_all(context) else self._topic_project(msg)
+        cwd = self._project_cwd(scope)
+        if cwd:
+            sessions = [s for s in sessions if _same_dir(s.cwd, cwd)]
+        titles = self._live_titles(sessions)
+        thread_id = getattr(msg, "message_thread_id", None)
+        bound = self._live_threads.get(thread_id)
+        await msg.reply_text(
+            format_live_sessions(sessions, bound, titles, scope),
+            parse_mode="HTML",
+            reply_markup=build_live_markup(sessions, bound, titles),
+        )
+
+    def _topic_project(self, msg) -> str:
+        """The project whose topic this message arrived in, "" outside one."""
+        thread_id = getattr(msg, "message_thread_id", None)
+        hub = self.project_for_thread(thread_id)
+        if hub is not None:
+            return hub
+        key = self.conversation_for_thread(thread_id)
+        return project_of(key) if key else ""
+
+    def _project_cwd(self, project: str) -> str:
+        if not project:
+            return ""
+        row = _find_project_row(self.controls.snapshot(), project)
+        return (row or {}).get("cwd") or ""
+
+    def _live_titles(self, sessions: list) -> dict:
+        root = claude_projects_path(self.cfg)
+        return {s.pid: live.title_of(root, s.session_id) for s in sessions}
+
+    def _live_find(self, pid: int):
+        return live.find(pid, claude_sessions_path(self.cfg))
+
+    async def _handle_live_callback(self, query, index_str: str) -> None:
+        thread_id = getattr(query.message, "message_thread_id", None)
+        if index_str == "off":
+            self._unbind_live(thread_id)
+            await self._save_live()
+            await self._edit_callback_text(
+                query, "Detached. This topic is free again.", None
+            )
+            return
+        try:
+            pid = int(index_str)
+        except ValueError:
+            return
+        session = self._live_find(pid)
+        if session is None:
+            await self._edit_callback_text(query, "That session is gone.", None)
+            return
+        self._unbind_live(thread_id)
+        self._live_threads[thread_id] = pid
+        self._live_tails[pid] = asyncio.create_task(self._tail_live(pid, thread_id))
+        await self._save_live()
+        name = live.title_of(claude_projects_path(self.cfg), session.session_id)
+        await self._edit_callback_text(
+            query,
+            f"\U0001F5A5 Attached to <b>{html.escape(name or session.label)}</b> "
+            f"({session.surface}, {html.escape(session.cwd)}).\n"
+            "Anything you write here goes into that running session; its output "
+            "comes back below. Tap Detach to stop.",
+            InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⏹ Detach", callback_data="live:off")]]
+            ),
+        )
+
+    async def _save_live(self) -> None:
+        """Keep the attachments across a bridge restart.
+
+        The editor sessions they name outlive the bot by hours, so dropping the
+        map on restart means re-attaching every topic by hand for no reason.
+        """
+        if self._store is None:
+            return
+        try:
+            await self._store.set_meta(
+                _LIVE_META_KEY,
+                json.dumps({str(t): p for t, p in self._live_threads.items()}),
+            )
+        except Exception:
+            logger.exception("could not persist live attachments")
+
+    async def restore_live(self) -> None:
+        """Re-attach the topics whose sessions are still running."""
+        if self._store is None:
+            return
+        try:
+            raw = await self._store.get_meta(_LIVE_META_KEY)
+            saved = json.loads(raw) if raw else {}
+        except (ValueError, TypeError):
+            return
+        except Exception:
+            logger.exception("could not read live attachments")
+            return
+        for thread, pid in saved.items():
+            thread_id = int(thread) if str(thread).lstrip("-").isdigit() else None
+            if thread_id is None or self._live_find(pid) is None:
+                continue
+            self._live_threads[thread_id] = pid
+            self._live_tails[pid] = asyncio.create_task(
+                self._tail_live(pid, thread_id)
+            )
+        if len(self._live_threads) != len(saved):
+            await self._save_live()
+
+    def _unbind_live(self, thread_id: int | None) -> None:
+        # Drop the rolling message too: a later attach must start a fresh one
+        # rather than keep growing the previous session's transcript.
+        self._live_msgs.pop(thread_id, None)
+        pid = self._live_threads.pop(thread_id, None)
+        task = self._live_tails.pop(pid, None) if pid is not None else None
+        if task is not None:
+            task.cancel()
+
+    async def _tail_live(self, pid: int, thread_id: int | None) -> None:
+        """Post one live session's own transcript into the topic it is bound to.
+
+        The socket carries turns INTO the session and nothing back, so its
+        ``.jsonl`` is the only place its answers appear. Reading starts at the
+        current end of the file: the point is to watch what happens from now on,
+        not to replay a session that may be hours old.
+        """
+        root = claude_projects_path(self.cfg)
+        session = self._live_find(pid)
+        path = live.transcript_of(root, session.session_id) if session else None
+        offset = live.end_of(path)
+        while True:
+            await asyncio.sleep(_LIVE_POLL_SECONDS)
+            if self._live_find(pid) is None:
+                self._live_threads.pop(thread_id, None)
+                self._live_tails.pop(pid, None)
+                self._live_msgs.pop(thread_id, None)
+                await self._save_live()
+                await self._post_live(thread_id, "⚠ That session has exited.")
+                return
+            if path is None:
+                # The .jsonl only appears once the session has written a turn.
+                session = self._live_find(pid)
+                path = live.transcript_of(root, session.session_id) if session else None
+                offset = live.end_of(path)
+                continue
+            try:
+                lines, offset = live.read_new(path, offset)
+            except Exception:
+                logger.exception("live tail failed for pid %s", pid)
+                return
+            if lines:
+                await self._stream_live(thread_id, lines)
+
+    async def _stream_live(self, thread_id: int | None, lines: list[str]) -> None:
+        """Grow ONE message as the session works, starting a new one when full.
+
+        A busy session emits a tool call every second or two. As separate
+        messages that is a wall of notifications with the actual answer buried
+        in it; edited in place it reads like the editor's own transcript.
+        """
+        buffer, message_id = self._live_msgs.get(thread_id, ("", None))
+        for line in lines:
+            candidate = f"{buffer}\n{line}" if buffer else line
+            if message_id is not None and len(candidate) <= _LIVE_CHUNK:
+                buffer = candidate
+                continue
+            if message_id is not None:
+                await self._edit_live(thread_id, message_id, buffer)
+            buffer = line[:_LIVE_CHUNK]
+            message_id = await self._post_live(thread_id, buffer)
+        if message_id is not None:
+            await self._edit_live(thread_id, message_id, buffer)
+        self._live_msgs[thread_id] = (buffer, message_id)
+
+    async def _edit_live(self, thread_id: int | None, message_id: int, text: str) -> None:
+        try:
+            await self.app.bot.edit_message_text(
+                chat_id=self._chat_id,
+                message_id=message_id,
+                text=markdown_html(text),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except BadRequest as exc:
+            if "not modified" in str(exc).lower():
+                return
+            logger.warning("live edit failed, falling back to plain text: %s", exc)
+            try:
+                await self.app.bot.edit_message_text(
+                    chat_id=self._chat_id, message_id=message_id, text=text
+                )
+            except BadRequest:
+                logger.exception("live edit failed for thread %s", thread_id)
+        except Exception:
+            logger.exception("live edit failed for thread %s", thread_id)
+
+    async def _post_live(self, thread_id: int | None, text: str) -> int | None:
+        dest = {"chat_id": self._chat_id}
+        if thread_id is not None:
+            dest["message_thread_id"] = thread_id
+        try:
+            sent = await self.app.bot.send_message(
+                **dest,
+                text=markdown_html(text[:_LIVE_CHUNK]),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                disable_notification=True,
+            )
+            return sent.message_id
+        except BadRequest:
+            logger.warning("live post rejected as HTML, sending plain")
+        except Exception:
+            logger.exception("could not post live output to thread %s", thread_id)
+            return None
+        try:
+            sent = await self.app.bot.send_message(
+                **dest, text=text[:_LIVE_CHUNK], disable_notification=True
+            )
+            return sent.message_id
+        except Exception:
+            logger.exception("could not post live output to thread %s", thread_id)
+            return None
+
+    async def deliver_live(self, pid: int, text: str) -> bool:
+        """Send one turn into a live session; report failure into its topic."""
+        thread_id = next(
+            (tid for tid, bound in self._live_threads.items() if bound == pid), None
+        )
+        session = self._live_find(pid)
+        if session is None:
+            self._unbind_live(thread_id)
+            await self._save_live()
+            await self._post_live(thread_id, "⚠ That session has exited.")
+            return False
+        try:
+            await live.send(session.socket_path, text)
+        except (OSError, asyncio.TimeoutError) as exc:
+            logger.warning("live send to pid %s failed: %s", pid, exc)
+            await self._post_live(thread_id, f"⚠ Could not reach it: {exc}")
+            return False
+        return True
+
     async def _cmd_close(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1839,6 +2273,8 @@ class TelegramIO:
         app.add_handler(
             CommandHandler("close", self._cmd_close, filters=only_me))
         app.add_handler(
+            CommandHandler("live", self._cmd_live, filters=only_me))
+        app.add_handler(
             CommandHandler("panel", self._cmd_panel, filters=only_me))
         app.add_handler(
             CommandHandler("projects", self._cmd_projects, filters=only_me))
@@ -1893,6 +2329,10 @@ class TelegramIO:
 
     async def stop(self) -> None:
         """Stop polling and shut the Application down (idempotent)."""
+        for task in list(self._live_tails.values()):
+            task.cancel()
+        self._live_tails.clear()
+        self._live_threads.clear()
         app = self.app
         if app is None:
             return

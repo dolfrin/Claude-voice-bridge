@@ -170,6 +170,7 @@ async def test_text_message_from_allowed_user_routes_to_callback():
         "text": "kaip sekasi",
         "is_voice": False,
         "audio": None,
+        "live_pid": None,
     }]
 
 
@@ -200,6 +201,7 @@ async def test_voice_message_downloads_bytes_and_marks_is_voice():
         "text": "",
         "is_voice": True,
         "audio": b"OGGDATA",
+        "live_pid": None,
     }]
 
 
@@ -234,6 +236,7 @@ async def test_document_message_downloads_attachment_with_caption():
         "text": "peržiūrėk",
         "is_voice": False,
         "audio": None,
+        "live_pid": None,
         "attachments": [{
             "kind": "document",
             "file_name": "report.pdf",
@@ -1357,8 +1360,8 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "new", "resume", "sessions", "history", "close", "panel",
-            "projects", "projects_all", "projects_refresh", "handoff", "status",
-            "on", "off", "stop", "mode", "voice", "engine"} == registered_names
+            "live", "projects", "projects_all", "projects_refresh", "handoff",
+            "status", "on", "off", "stop", "mode", "voice", "engine"} == registered_names
 
 
 @pytest.mark.asyncio
@@ -1474,3 +1477,265 @@ async def test_ask_per_message_accept_still_returns_label():
 
     assert await task == "m2"
     query.edit_message_text.assert_awaited_once_with("Selected: m2")
+
+
+# --------------------------------------------------------------------------
+# /live: topics attached to a Claude Code session running outside the bridge
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_text_in_an_attached_topic_carries_the_live_pid():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    io._live_threads[77] = 4321
+
+    update = MagicMock()
+    update.message = make_message(message_id=3, text="tęsk")
+    update.message.message_thread_id = 77
+    update.callback_query = None
+
+    await io._handle_text(update, MagicMock())
+
+    assert received[0]["live_pid"] == 4321
+
+
+@pytest.mark.asyncio
+async def test_attached_control_topic_forwards_instead_of_the_hub_hint():
+    # A project's control topic normally answers with its buttons. Once /live
+    # attaches it, the text belongs to that session instead.
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    io._topics = {"qwing": 55}
+    io._live_threads[55] = 4321
+
+    update = MagicMock()
+    update.message = make_message(text="koks oras siandien")
+    update.message.message_thread_id = 55
+    update.message.reply_text = AsyncMock()
+    update.callback_query = None
+
+    await io._handle_text(update, MagicMock())
+
+    assert [d["live_pid"] for d in received] == [4321]
+    update.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_attachments_survive_a_restart():
+    from voice_bridge import telegram_io as mod
+    from voice_bridge.live import LiveSession
+
+    class FakeStore:
+        def __init__(self):
+            self.meta = {}
+
+        async def set_meta(self, key, value):
+            self.meta[key] = value
+
+        async def get_meta(self, key):
+            return self.meta.get(key)
+
+    store = FakeStore()
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), store=store)
+    io._live_threads[77] = 4321
+    io._live_threads[88] = 9999
+    await io._save_live()
+
+    fresh = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), store=store)
+    alive = LiveSession(pid=4321, session_id="a", cwd="/root", socket_path="/s")
+    # 9999 has since exited: it must not come back as an attachment.
+    fresh._live_find = lambda pid: alive if pid == 4321 else None
+
+    await fresh.restore_live()
+
+    assert fresh._live_threads == {77: 4321}
+    assert 4321 in fresh._live_tails
+    for task in fresh._live_tails.values():
+        task.cancel()
+    assert "9999" not in store.meta[mod._LIVE_META_KEY]
+
+
+@pytest.mark.asyncio
+async def test_detach_frees_the_topic_and_stops_the_tail():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    task = asyncio.create_task(asyncio.sleep(30))
+    io._live_threads[77] = 4321
+    io._live_tails[4321] = task
+
+    query = MagicMock()
+    query.message = MagicMock()
+    query.message.message_thread_id = 77
+    query.edit_message_text = AsyncMock()
+
+    await io._handle_live_callback(query, "off")
+
+    assert io._live_threads == {}
+    assert io._live_tails == {}
+    assert task.cancelled() or task.cancelling()
+
+
+@pytest.mark.asyncio
+async def test_deliver_live_unbinds_and_says_so_when_the_session_is_gone():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.app = MagicMock()
+    io.app.bot.send_message = AsyncMock()
+    io._live_threads[77] = 4321
+    io._live_find = lambda pid: None
+
+    assert await io.deliver_live(4321, "labas") is False
+    assert io._live_threads == {}
+    text = io.app.bot.send_message.await_args.kwargs["text"]
+    assert "exited" in text
+
+
+def test_live_picker_lists_sessions_and_marks_the_attached_one():
+    from voice_bridge.live import LiveSession
+    from voice_bridge.telegram_io import build_live_markup, format_live_sessions
+
+    sessions = [
+        LiveSession(pid=1, session_id="a", cwd="/root/app", socket_path="/s1",
+                    name="app-1", entrypoint="claude-vscode", status="busy"),
+        LiveSession(pid=2, session_id="b", cwd="/root/api", socket_path="/s2",
+                    name="api-2", entrypoint="cli"),
+    ]
+
+    body = format_live_sessions(sessions, bound=2)
+    assert "app-1" in body and "VSCode" in body and "busy" in body
+    assert "← attached here" in body
+
+    rows = build_live_markup(sessions, bound=2).inline_keyboard
+    assert rows[0][0].callback_data == "live:1"
+    assert rows[-1][0].callback_data == "live:off"
+
+
+def test_live_picker_prefers_the_session_title_over_the_derived_name():
+    # "root-47" says nothing; the transcript title is what /resume shows.
+    from voice_bridge.live import LiveSession
+    from voice_bridge.telegram_io import build_live_markup, format_live_sessions
+
+    session = LiveSession(pid=1, session_id="a", cwd="/root/app",
+                          socket_path="/s1", name="root-47",
+                          entrypoint="claude-vscode")
+    titles = {1: "Replace Rainbow with Privy Wallet Connect"}
+
+    body = format_live_sessions([session], titles=titles, scope="arclaunch")
+    assert "Replace Rainbow with Privy Wallet Connect" in body
+    assert "in arclaunch" in body
+    assert "root-47" in body  # still there, as the small print
+
+    button = build_live_markup([session], titles=titles).inline_keyboard[0][0]
+    assert button.text.startswith("Replace Rainbow")
+
+
+@pytest.mark.asyncio
+async def test_live_in_a_project_topic_shows_only_that_project(monkeypatch):
+    from voice_bridge import telegram_io as mod
+    from voice_bridge.live import LiveSession
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._topics = {"qwing": 55}  # qwing's cwd is /home/home/Projects/WhisperX
+    monkeypatch.setattr(mod.live, "list_sessions", lambda *a, **k: [
+        LiveSession(pid=1, session_id="a", cwd="/home/home/Projects/WhisperX",
+                    socket_path="/s1", name="w-1", entrypoint="claude-vscode"),
+        LiveSession(pid=2, session_id="b", cwd="/root/elsewhere",
+                    socket_path="/s2", name="e-2", entrypoint="claude-vscode"),
+    ])
+    monkeypatch.setattr(mod.live, "title_of", lambda root, sid: "")
+
+    update = MagicMock()
+    update.message = make_message(text="/live")
+    update.message.message_thread_id = 55
+    update.message.reply_text = AsyncMock()
+
+    context = MagicMock()
+    context.args = []
+    await io._cmd_live(update, context)
+
+    body = update.message.reply_text.await_args.args[0]
+    assert "w-1" in body
+    assert "e-2" not in body
+
+    context.args = ["all"]
+    await io._cmd_live(update, context)
+    assert "e-2" in update.message.reply_text.await_args.args[0]
+
+
+def test_markdown_becomes_the_html_telegram_renders():
+    from voice_bridge.telegram_io import markdown_html
+
+    out = markdown_html(
+        "## Radiniai\n"
+        "**§2 sako Done** — nėra. `resolveTrader` neegzistuoja.\n"
+        "Žiūrėk [v3swaps.ts:185](backend/src/indexer/v3swaps.ts#L185) ir "
+        "[docs](https://example.com/x).\n"
+        "```ts\nconst a = 1 < 2;\n```"
+    )
+
+    assert "<b>Radiniai</b>" in out
+    assert "<b>§2 sako Done</b>" in out
+    assert "<code>resolveTrader</code>" in out
+    # A repo-relative reference cannot be a Telegram link, so it stays legible
+    # as code instead of leaking raw Markdown.
+    assert "<code>v3swaps.ts:185</code>" in out
+    assert '<a href="https://example.com/x">docs</a>' in out
+    assert "<pre>const a = 1 &lt; 2;</pre>" in out
+
+
+def test_markdown_never_leaves_unescaped_markup():
+    from voice_bridge.telegram_io import markdown_html
+
+    out = markdown_html("plain <script>alert(1)</script> & `a < b`")
+
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+    assert "<code>a &lt; b</code>" in out
+
+
+def test_markdown_keeps_tables_monospaced():
+    from voice_bridge.telegram_io import markdown_html
+
+    out = markdown_html("prieš\n| # | Failas |\n|---|---|\n| 1 | a.ts |\npo")
+
+    assert out.startswith("prieš\n<pre>")
+    assert "| 1 | a.ts |" in out
+    assert out.endswith("po")
+
+
+@pytest.mark.asyncio
+async def test_live_output_grows_one_message_then_starts_another():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.app = MagicMock()
+    sent = MagicMock()
+    sent.message_id = 500
+    io.app.bot.send_message = AsyncMock(return_value=sent)
+    io.app.bot.edit_message_text = AsyncMock()
+
+    await io._stream_live(77, ["first"])
+    await io._stream_live(77, ["second"])
+
+    # One message, edited in place — not a message per line.
+    assert io.app.bot.send_message.await_count == 1
+    body = io.app.bot.edit_message_text.await_args.kwargs["text"]
+    assert "first" in body and "second" in body
+
+    # Once it no longer fits, a new message takes over.
+    import voice_bridge.telegram_io as mod
+    io._live_msgs[77] = ("x" * (mod._LIVE_CHUNK - 2), 500)
+    await io._stream_live(77, ["overflow"])
+
+    assert io.app.bot.send_message.await_count == 2
+    assert io._live_msgs[77][0] == "overflow"
+
+
+def test_live_picker_says_so_when_nothing_else_runs():
+    from voice_bridge.telegram_io import build_live_markup, format_live_sessions
+
+    assert "No other sessions" in format_live_sessions([])
+    assert build_live_markup([]) is None

@@ -168,6 +168,22 @@ class Store:
             row = await cur.fetchone()
         return row[0] if row is not None else None
 
+    async def set_meta(self, key: str, value: str) -> None:
+        """Persist one small bridge-owned value (see :meth:`get_meta`)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+            await db.commit()
+
+    async def get_meta(self, key: str) -> str | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("SELECT value FROM meta WHERE key = ?", (key,))
+            row = await cur.fetchone()
+        return row[0] if row is not None else None
+
     # ------------------------------------------------------------------
     # enabled flag
     # ------------------------------------------------------------------
