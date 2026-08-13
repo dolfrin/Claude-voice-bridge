@@ -1667,47 +1667,6 @@ async def test_live_in_a_project_topic_shows_only_that_project(monkeypatch):
     assert "e-2" in update.message.reply_text.await_args.args[0]
 
 
-def test_markdown_becomes_the_html_telegram_renders():
-    from voice_bridge.telegram_io import markdown_html
-
-    out = markdown_html(
-        "## Radiniai\n"
-        "**§2 sako Done** — nėra. `resolveTrader` neegzistuoja.\n"
-        "Žiūrėk [v3swaps.ts:185](backend/src/indexer/v3swaps.ts#L185) ir "
-        "[docs](https://example.com/x).\n"
-        "```ts\nconst a = 1 < 2;\n```"
-    )
-
-    assert "<b>Radiniai</b>" in out
-    assert "<b>§2 sako Done</b>" in out
-    assert "<code>resolveTrader</code>" in out
-    # A repo-relative reference cannot be a Telegram link, so it stays legible
-    # as code instead of leaking raw Markdown.
-    assert "<code>v3swaps.ts:185</code>" in out
-    assert '<a href="https://example.com/x">docs</a>' in out
-    assert "<pre>const a = 1 &lt; 2;</pre>" in out
-
-
-def test_markdown_never_leaves_unescaped_markup():
-    from voice_bridge.telegram_io import markdown_html
-
-    out = markdown_html("plain <script>alert(1)</script> & `a < b`")
-
-    assert "<script>" not in out
-    assert "&lt;script&gt;" in out
-    assert "<code>a &lt; b</code>" in out
-
-
-def test_markdown_keeps_tables_monospaced():
-    from voice_bridge.telegram_io import markdown_html
-
-    out = markdown_html("prieš\n| # | Failas |\n|---|---|\n| 1 | a.ts |\npo")
-
-    assert out.startswith("prieš\n<pre>")
-    assert "| 1 | a.ts |" in out
-    assert out.endswith("po")
-
-
 @pytest.mark.asyncio
 async def test_live_output_grows_one_message_then_starts_another():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())

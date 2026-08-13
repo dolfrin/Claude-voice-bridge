@@ -178,72 +178,6 @@ def _live_title(session, titles: dict, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
-_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
-_ITALIC_RE = re.compile(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])")
-_STRIKE_RE = re.compile(r"~~(.+?)~~", re.DOTALL)
-_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
-_HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
-_PLACEHOLDER = "\x00{}\x00"
-
-
-def markdown_html(text: str) -> str:
-    """Agent Markdown as the small HTML subset Telegram actually renders.
-
-    Claude writes Markdown; Telegram shows it literally, which is why a message
-    full of ``**bold**`` and backticks reads worse on the phone than in the
-    editor. Code is lifted out first so its contents are never parsed as markup,
-    and link targets that are not http(s) (``file.ts:12`` style references) are
-    kept as inline code, because Telegram cannot make those clickable.
-    """
-    blocks: list[str] = []
-
-    def stash(inner: str, tag: str) -> str:
-        blocks.append(f"<{tag}>{html.escape(inner)}</{tag}>")
-        return _PLACEHOLDER.format(len(blocks) - 1)
-
-    text = _FENCE_RE.sub(lambda m: stash(m.group(1).rstrip("\n"), "pre"), text)
-    text = _INLINE_CODE_RE.sub(lambda m: stash(m.group(1), "code"), text)
-    text = _table_to_pre(text, stash)
-
-    out = html.escape(text)
-    out = _HEADING_RE.sub(r"<b>\1</b>", out)
-    out = _BOLD_RE.sub(r"<b>\1</b>", out)
-    out = _STRIKE_RE.sub(r"<s>\1</s>", out)
-    out = _ITALIC_RE.sub(r"<i>\1</i>", out)
-    out = _LINK_RE.sub(_link_html, out)
-
-    for index, block in enumerate(blocks):
-        out = out.replace(_PLACEHOLDER.format(index), block)
-    return out
-
-
-def _link_html(match: re.Match) -> str:
-    label, target = match.group(1), match.group(2)
-    if target.startswith(("http://", "https://", "tg://")):
-        return f'<a href="{target}">{label}</a>'
-    return f"<code>{label}</code>"
-
-
-def _table_to_pre(text: str, stash) -> str:
-    """Markdown tables are unreadable when wrapped; keep them monospaced."""
-    lines = text.split("\n")
-    out: list[str] = []
-    run: list[str] = []
-    for line in lines + [""]:
-        if line.startswith("|"):
-            run.append(line)
-            continue
-        if len(run) >= 2:
-            out.append(stash("\n".join(run), "pre"))
-        else:
-            out.extend(run)
-        run = []
-        out.append(line)
-    return "\n".join(out[:-1])
-
-
 def _wants_all(context) -> bool:
     args = getattr(context, "args", None) or []
     return bool(args) and str(args[0]).lower() in {"all", "*"}
@@ -2133,7 +2067,7 @@ class TelegramIO:
             await self.app.bot.edit_message_text(
                 chat_id=self._chat_id,
                 message_id=message_id,
-                text=markdown_html(text),
+                text=to_html(text),
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
@@ -2157,7 +2091,7 @@ class TelegramIO:
         try:
             sent = await self.app.bot.send_message(
                 **dest,
-                text=markdown_html(text[:_LIVE_CHUNK]),
+                text=to_html(text[:_LIVE_CHUNK]),
                 parse_mode="HTML",
                 disable_web_page_preview=True,
                 disable_notification=True,

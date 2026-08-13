@@ -50,6 +50,23 @@ def test_links_become_anchors():
     assert out == 'see <a href="https://example.com/a">docs</a>'
 
 
+def test_a_repo_relative_link_keeps_its_label_as_code():
+    # Telegram cannot make src/x.ts#L12 clickable, and the raw brackets read as
+    # noise, so the label survives and the unusable target goes.
+    out = to_html("see [v3swaps.ts:185](backend/src/indexer/v3swaps.ts#L185) now")
+
+    assert out == "see <code>v3swaps.ts:185</code> now"
+
+
+def test_a_table_stays_monospaced():
+    out = to_html("prieš\n| # | Failas |\n|---|---|\n| 1 | a.ts |\npo")
+
+    assert "<pre>| # | Failas |" in out
+    assert "| 1 | a.ts |</pre>" in out
+    assert out.startswith("prieš")
+    assert out.endswith("po")
+
+
 # --------------------------------------------------------------------------
 # escaping — a stray angle bracket must not break the whole message
 # --------------------------------------------------------------------------

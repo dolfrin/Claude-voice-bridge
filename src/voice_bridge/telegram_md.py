@@ -26,6 +26,11 @@ _FENCE = re.compile(r"```([\w+.#-]*)[ \t]*\r?\n?(.*?)```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+# Claude cites code as [file.ts:12](src/file.ts#L12). Telegram cannot make a
+# repo-relative target clickable, and left alone the raw brackets read as
+# noise, so the label survives as code and the unusable target is dropped.
+_LOCAL_LINK = re.compile(r"\[([^\]\n]+)\]\((?!https?://)[^)\s]+\)")
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _HEADING = re.compile(r"^ {0,3}#{1,6}\s+(.*)$")
 _RULE = re.compile(r"^\s*(?:-{3,}|_{3,}|\*{3,})\s*$")
 _BULLET = re.compile(r"^(\s*)[-*]\s+(.*)$")
@@ -63,10 +68,11 @@ def to_html(text: str) -> str:
     s = _LINK.sub(
         lambda m: f'<a href="{html.escape(m.group(2), quote=True)}">{m.group(1)}</a>', s
     )
+    s = _LOCAL_LINK.sub(lambda m: stash(f"<code>{m.group(1)}</code>"), s)
     s = _BOLD.sub(r"<b>\1</b>", s)
 
     lines: list[str] = []
-    for line in s.split("\n"):
+    for line in _table_blocks(s.split("\n"), stash):
         heading = _HEADING.match(line)
         if heading:
             lines.append(f"<b>{heading.group(1).strip()}</b>")
@@ -81,6 +87,27 @@ def to_html(text: str) -> str:
         lines.append(line)
 
     return _STASH.sub(lambda m: blocks[int(m.group(1))], "\n".join(lines))
+
+
+def _table_blocks(lines: list[str], stash) -> list[str]:
+    """Keep a Markdown table monospaced instead of letting it wrap.
+
+    Telegram wraps proportional text, which turns an aligned table into ragged
+    ``| … |`` noise; a ``pre`` block keeps the columns lined up and scrollable.
+    """
+    out: list[str] = []
+    run: list[str] = []
+    for line in lines + [""]:
+        if _TABLE_ROW.match(line):
+            run.append(line)
+            continue
+        if len(run) >= 2:
+            out.append(stash(f"<pre>{'\n'.join(run)}</pre>"))
+        else:
+            out.extend(run)
+        run = []
+        out.append(line)
+    return out[:-1]
 
 
 def split_markdown(text: str, limit: int = 3000) -> list[str]:
