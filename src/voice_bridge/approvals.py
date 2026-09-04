@@ -165,6 +165,17 @@ class ApprovalManager:
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
         except asyncio.TimeoutError:
+            # Silence here is indistinguishable from "still waiting": the
+            # question keeps sitting there unanswered while the agent has long
+            # since given up on the tool and moved on without it.
+            try:
+                await self._send_question(
+                    project,
+                    f"⏱ No answer in {self._timeout}s — denied: {tool_name}. "
+                    "The agent carried on without it.",
+                )
+            except Exception:  # noqa: BLE001 - the denial stands either way
+                logger.exception("could not report the approval timeout for %s", project)
             return False
         finally:
             self._pending.pop(message_id, None)
@@ -192,26 +203,36 @@ def make_can_use_tool(
     project: ProjectConfig,
     cfg: Config,
     manager: "ApprovalManager",
+    target: str | None = None,
 ) -> Callable:
     """Build an SDK canUseTool callback honoring effective_autonomy.
 
     full -> allow all (no question); ask -> request all; safe -> request only risky.
     Signature follows the claude-agent-sdk C12 API:
         async def can_use_tool(tool_name, tool_input, context) -> Allow | Deny
+
+    The mode is read PER CALL, not captured: switching a project between
+    full/safe/ask then takes effect on the next tool call instead of needing the
+    session torn down and resumed. ``target`` is where the approval question is
+    sent — the conversation key, so it lands in that conversation's own topic.
     """
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny  # noqa: PLC0415
 
-    mode = effective_autonomy(project, cfg)
+    ask_in = target or project.name
 
     async def can_use_tool(tool_name: str, tool_input: dict, context):
+        mode = effective_autonomy(project, cfg)
         if mode == "full":
             return PermissionResultAllow()
 
         if mode == "safe" and not is_risky(tool_name, tool_input, project.cwd):
             return PermissionResultAllow()
 
-        # mode == "ask", or mode == "safe" with a risky tool
-        approved = await manager.request(project.name, tool_name, tool_input)
+        # mode == "auto" leaves the judgement to Claude Code itself, the way the
+        # VS Code extension does: the CLI approves the safe majority before this
+        # callback is reached, so anything arriving here is worth asking about.
+        # mode == "ask", or mode == "safe" with a risky tool, land here too.
+        approved = await manager.request(ask_in, tool_name, tool_input)
         if approved:
             return PermissionResultAllow()
         return PermissionResultDeny(message="User denied or timed out")

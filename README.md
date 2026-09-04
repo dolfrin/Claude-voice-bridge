@@ -47,27 +47,59 @@ Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 | 🔘 | Claude buttons | Claude can call `ask_user` to show tappable Telegram choices |
 | 📤 | File delivery | Claude can call `send_file` to send project-local files back |
 | 🧠 | Session resume | SDK session IDs persist in SQLite and resume after restart |
+| 🗂 | Session sub-topics | Every agent session gets its own `Project #N` forum topic |
+| 🔄 | Attach old sessions | `/resume` lists the Claude sessions on disk and reopens one |
+| 📋 | Session list | `/sessions` shows what is open, what is working, what is idle |
+| 📜 | Session transcript | `/history` reads Claude's own `.jsonl`, VS Code turns included |
+| ⏳ | Live progress | One message per turn, edited in place with the tools being run |
 | 🛡 | Safe mode | Risky tool calls ask for Telegram approval before running |
+| 🧬 | Model per session | `/model` switches one session's model; every answer is footed with the model that wrote it |
+| 🎚 | Effort per session | `/effort high` reconnects that session at a different reasoning depth; every answer is footed `— model · effort` |
 
 ## Telegram UX
 
 ```text
 /menu
-├─ 🟢 Active       active sessions
+├─ 🟢 Active       active projects
 ├─ 📚 All          all discovered projects
 ├─ 🎛 Panel        mode / voice / engine / on-off controls
 ├─ 🧾 Handoff      last-active project transcript
+├─ 📋 Sessions     every open session, across projects
 ├─ ⛔ Stop         interrupt current work
 └─ 🔎 Refresh      refresh local projects
 ```
+
+### Topics: one control desk, one topic per session
+
+In group mode the forum looks like this:
+
+```text
+Paprika ASR          control topic — buttons only, no agent turns
+├─ Paprika ASR #1    a live Claude session
+└─ Paprika ASR #2    another one, independent context
+REKT Bot
+└─ REKT Bot #1
+```
+
+A project's own topic is a **control desk**: `/new`, `/resume`, `/sessions` and
+the panel live there, and anything you type in it is answered with those buttons
+rather than sent to an agent. The work happens in the numbered sub-topics, one
+Claude session each — so two tasks in one repository never share a context.
+
+Closing a session with `/close` deletes its sub-topic. Numbers are never reused,
+so a new `#3` can't turn up under an old topic's title.
 
 Common patterns:
 
 | Action | Use |
 |---|---|
-| Select project | Tap a project in `/projects` or `/projects_all` |
-| Reply to exact project | Telegram quote-reply any bot message from that project |
-| Send to current project | Send plain text or voice |
+| Start a session | `/new` in the project's control topic |
+| Attach an old session | `/resume` in the control topic, then pick from the list |
+| See what is running | `/sessions`, anywhere |
+| Talk to a session | Write in its `#N` topic |
+| Read a session back | `/history [n]` inside that topic |
+| Close a session | `/close` inside that topic |
+| Interrupt | Tap `⛔ Stop` on the live progress message, or `/stop` |
 | Interrupt and replace task | Start a message with `!`, e.g. `! stop, fix tests instead` |
 | Resume at PC | Open that project's `.claude/voice-bridge-chat.md` or send `/handoff` |
 
@@ -277,7 +309,7 @@ PIPER_VOICE_PATH=/opt/piper/en_US-....onnx
 WHISPER_MODEL=large-v3        # downloads on first run
 
 # Autonomy: full, safe, or ask
-AUTONOMY_MODE=safe
+AUTONOMY_MODE=auto
 APPROVAL_TIMEOUT=300          # seconds; auto-deny after this
 
 # State
@@ -299,15 +331,28 @@ All keys and their meaning:
 | `TTS_VOICE` | `alloy` | Voice name; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |
 | `PIPER_VOICE_PATH` | — | Absolute path to `.onnx` model; required for `piper` and English auto TTS |
 | `WHISPER_MODEL` | `large-v3` | faster-whisper model name |
-| `AUTONOMY_MODE` | `safe` | `full` (run everything) / `safe` (ask for risky ops) / `ask` (ask for all) |
+| `AUTONOMY_MODE` | `auto` | `auto` (Claude Code judges, like the VS Code extension) / `full` (run everything) / `safe` (our own risky-op heuristic asks) / `ask` (ask for all) |
 | `APPROVAL_TIMEOUT` | `300` | Seconds before an unanswered approval auto-denies |
 | `DB_PATH` | `voice-bridge.db` | SQLite database path |
 | `AUTO_DISCOVER_PROJECTS` | `false` | Add recent local VS Code/Claude projects to `/panel` at startup, disabled by default |
 | `AUTO_DISCOVER_LIMIT` | `12` | Maximum auto-discovered projects to add |
 | `OPEN_VSCODE_ON_ENABLE` | `false` | Run `code <project cwd>` when a project is enabled from Telegram |
 | `CLOSE_VSCODE_ON_DISABLE` | `false` | Close matching VS Code project windows via `wmctrl` when a project is disabled from Telegram |
+| `TELEGRAM_CHAT_ID` | — | Supergroup with Topics enabled; unset keeps everything in your private chat |
+| `CLAUDE_PROJECTS_DIR` | `~/.claude/projects` | Where Claude Code stores session history; read by `/resume` and `/history` |
+| `CLAUDE_SESSIONS_DIR` | `~/.claude/sessions` | Live-session registry; tells `/resume` which sessions are open elsewhere |
+| `RESUME_LIMIT` | `8` | How many recent sessions `/resume` lists per project |
+| `HISTORY_LIMIT` | `20` | How many sessions the `/menu` history browser lists per project |
+| `CLAUDE_CODE_ENTRYPOINT` | — | Set to e.g. `voice-bridge` so Telegram sessions stay visible in the VS Code session list |
+| `STREAM_PROGRESS` | `true` | Edit a live progress message while the agent works |
+| `STREAM_INTERVAL` | `1.5` | Seconds between progress edits; lower means more Telegram edits per turn |
 
 > `.env` is git-ignored and must be `chmod 600`. Never commit it.
+
+Group mode needs three things done once in Telegram: create a supergroup with
+**Topics** enabled, add the bot as an **admin with Manage Topics**, and put the
+group's id in `TELEGRAM_CHAT_ID`. Without Manage Topics the bridge cannot create
+the per-session sub-topics and everything falls back to the General thread.
 
 ### 4. `projects.yaml`
 
@@ -327,9 +372,10 @@ projects:
   - name: app
     cwd: /home/home/Projects/app
     enabled: true
-    autonomy: safe            # optional; overrides global AUTONOMY_MODE
+    autonomy: auto            # optional; overrides global AUTONOMY_MODE
     voice: alloy               # optional; overrides global TTS_VOICE
     model: claude-opus-4-8    # optional Claude model for this project
+    effort: high              # optional low|medium|high|xhigh|max
     system_prompt_extra: ""   # optional extra instructions appended to system prompt
 
   - name: api
@@ -375,6 +421,22 @@ requires `/var/lib/voice-bridge` to exist and be writable for a `--user` unit. E
   `systemctl daemon-reload && systemctl enable --now voice-bridge.service` — systemd's
   `StateDirectory=voice-bridge` then provisions `/var/lib/voice-bridge` automatically.
 
+### Applying code changes
+
+After `git pull` or any edit under `src/`, restart the service — that is the whole
+step, there is nothing to build:
+
+```bash
+systemctl --user restart voice-bridge
+```
+
+`pip install -e .` is an editable install, so the venv points straight at `src/` and
+the restarted process picks up the new code. Re-run `pip install -e .` only when
+`pyproject.toml` changes (new dependency or entry point).
+
+> A restart kills any turn the agent is running mid-flight, without telling Telegram.
+> Restart while the bot is idle.
+
 Logs and status:
 
 ```bash
@@ -389,6 +451,11 @@ journalctl --user -u voice-bridge -f
 |  | Command | Effect |
 |---|---|---|
 | 🏠 | `/menu` | Main tappable menu |
+| ➕ | `/new [project]` | Open a new session and its `Project #N` sub-topic |
+| 🔄 | `/resume [project]` | List the Claude sessions on disk and attach one |
+| 📋 | `/sessions` | Every open session: working, idle, or stopped |
+| 📜 | `/history [n]` | Last `n` turns of THIS session's real Claude transcript |
+| 🗑 | `/close` | Close this session and delete its sub-topic |
 | 🎛 | `/panel` | Full control board: per-project on/off, mode, voice, engine |
 | 🟢 | `/projects` | Active/last-active projects with select and on/off buttons |
 | 📚 | `/projects_all` or `/projects all` | All known projects, including disabled ones |
@@ -398,12 +465,97 @@ journalctl --user -u voice-bridge -f
 | ⏸ | `/off [project]` | Disable one project, or all projects with no arg |
 | ⛔ | `/stop [project]` | Interrupt and restart active or named project, clearing queued work |
 | 📡 | `/status [project]` | Ask a project for a quick status update |
-| 🛡 | `/mode <full\|safe\|ask> [project]` | Set autonomy globally or per project |
+| 🛡 | `/mode <auto\|full\|safe\|ask> [project]` | Set autonomy globally or per project |
+| 🧬 | `/model [name] [project]` | Show or switch the model; inside a session topic it switches only that session |
+| 🎚 | `/effort <low\|medium\|high\|xhigh\|max\|default> [project]` | Reasoning effort; reconnects the session on its own session id, so context survives |
 | 🔊 | `/voice list` / `/voice <name> [for <project>]` | List or set TTS voices |
 | 🧠 | `/engine <auto\|openai\|piper\|together>` | Switch TTS backend live |
 
+Every answer ends with `— model · effort`, e.g. `— opus-4-8 · max`, and `/model`
+or `/effort` with no arguments prints the same line for the session you are in.
+The model is the one that actually wrote the turn (the SDK reports it per
+message); the effort is whatever `/effort` set. Before a session has answered
+once neither is knowable, so both fall back to `model` and `effortLevel` in your
+Claude Code `settings.json` — read once at startup, like the CLI reads them.
+
 Telegram turns are mirrored into each project's `.claude/voice-bridge-chat.md`
-so the voice/text conversation is visible from the IDE file tree.
+so the voice/text conversation is visible from the IDE file tree. `/history`
+reads a different source — Claude's own session `.jsonl` — so it also shows the
+turns you took in VS Code or the CLI.
+
+### Attaching an existing session
+
+`/resume` lists the sessions Claude Code already has for that project, newest
+first, with the title Claude knows them by and the last thing you said in each:
+
+```text
+📂 Paprika ASR
+
+1. Fix topic routing bug   🟢 open in VSCode
+    08-11 19:42
+    ↳ add a test for thread_id
+2. Rewrite the decoder
+    08-10 22:03
+```
+
+Tapping one reserves a sub-topic and posts the session's card **inside it** —
+title, working directory, when it was last touched, where you left off, and the
+last few turns — with `🔗 Attach` / `🗑 Cancel`. Nothing starts until you confirm
+in that topic, and Cancel deletes it again. The picker message, wherever it was
+opened, collapses to a link.
+
+A session that is open somewhere else is attached as a **fork**: two processes
+writing one `.jsonl` silently lose each other's last messages. That check runs
+at attach time and on every restart, not just when you pick from the list — the
+session may have been opened in VS Code in between.
+
+`/sessions` names each row twice, because neither name is enough on its own:
+
+```text
+⚡ Paprika ASR #2
+    ↳ Fix topic routing bug
+🟢 REKT Bot #1
+    ↳ new session, no name yet
+
+⚡ working now · 🟢 live, waiting · ⚪ stopped
+```
+
+The session name is whatever Claude itself knows it by — your own rename first,
+then Claude's generated title, then the first message. Sessions the bridge
+started usually have no generated title, so they fall back to that first
+message; sessions you started in VS Code carry their real names.
+
+### Browsing history
+
+`/history` inside a session topic shows that session. To read anything else,
+open `/menu` → `📜 History` → pick a project → pick a session. That list comes
+from disk, not from what the bridge has open, so it covers every session the
+project has ever had — including the ones you only ever ran in VS Code. A capped
+list says what it left out (`showing 20 of 75`) rather than looking complete.
+
+The transcript shown in a message is a fragment by construction: turns are
+clipped and the message has a 4096-character ceiling. `📄 Full transcript`
+sends the whole conversation as a Markdown file with nothing cut.
+
+### Live progress
+
+While the agent works, the bridge keeps a single message updated in the session's
+topic:
+
+```text
+⏳ 24s · 5 tools
+🔍 Grep: message_thread_id ✓
+📖 Read: src/voice_bridge/telegram_io.py ✓
+✏️ Edit: src/voice_bridge/telegram_io.py ✓
+🔧 Bash: pytest -q tests/test_topics.py
+[⛔ Stop]
+```
+
+It is one message edited in place, rate-limited to `STREAM_INTERVAL`
+and skipped when nothing changed — an edit per tool call would be refused by
+Telegram and would bury the conversation. When the turn ends the message
+collapses to `✅ done · 1m12s · 9 tools` and the answer arrives normally. Set
+`STREAM_PROGRESS=false` to go back to a plain `Working.` notice.
 
 ### Interrupts and queueing
 
@@ -463,16 +615,26 @@ Every project session gets an in-process MCP server named `bridge` with these to
 
 ### Autonomy modes
 
-| Mode | Behaviour |
-|---|---|
-| `full` | Agent runs all operations without asking |
-| `safe` | Agent asks for confirmation before flagged risky operations (e.g. `git push`) |
-| `ask` | Agent asks before every tool call |
+| Mode | Who decides | Behaviour |
+|---|---|---|
+| `auto` | Claude Code | The CLI judges each call the way the VS Code extension does; only what it escalates reaches you |
+| `full` | nobody | Every operation runs without asking |
+| `safe` | this bridge | Our own heuristic asks before flagged risky operations (e.g. `git push`) |
+| `ask` | you | A question before every single tool call |
 
-In `safe` and `ask` modes you receive a voice+text question and reply "yes" or
-"no". No reply within
-`APPROVAL_TIMEOUT` seconds auto-denies the operation and the agent is told it was
-skipped.
+`auto` is the default and usually the one you want. `safe` is a blunter
+instrument: it is a local pattern match with no idea what the command is for, so
+it stops on things like a read-only `curl … | jq` and makes you answer a question
+to get a log line. Keep `safe` when you want a bridge-side rule that does not
+depend on the model's judgement.
+
+Whenever a question does arrive you get voice+text and reply "yes" or "no". No
+reply within `APPROVAL_TIMEOUT` seconds auto-denies the operation and the agent
+is told it was skipped.
+
+Modes switch live — no restart, no lost turn: the bridge pushes the CLI
+permission mode into the running session and re-reads its own mode on every tool
+call.
 
 ---
 
@@ -541,6 +703,11 @@ See [`LICENSE`](LICENSE) and [`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md).
   failure the bridge falls back to text-only and logs the error.
 - **DB write errors:** ensure the directory in `DB_PATH` exists and is writable by the
   service user (see the systemd `DB_PATH` note above).
+- **`400 ... Claude Code X does not support this model`:** the Agent SDK spawns its
+  own bundled `claude` binary (`.venv/.../claude_agent_sdk/_bundled/claude`) and
+  prefers it over the one on `PATH`, so updating Claude Code itself changes nothing
+  here. Upgrade the SDK instead — `pip install -U claude-agent-sdk` — then restart the
+  service.
 - **Whisper slow / no GPU:** install CUDA-compatible torch before installing
   faster-whisper for GPU acceleration.
 

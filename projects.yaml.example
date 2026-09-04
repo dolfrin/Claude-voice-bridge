@@ -5,6 +5,8 @@ projects:
     enabled: true
     autonomy: safe
     voice: alloy
+    model: opus            # optional; alias or full name (opus, sonnet, fable, ...)
+    effort: high           # optional; low|medium|high|xhigh|max
     system_prompt_extra: ""
 
   - name: api

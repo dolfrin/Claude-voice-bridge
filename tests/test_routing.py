@@ -138,47 +138,120 @@ async def test_last_active_stored_in_meta(tmp_db):
 
 
 # ---------------------------------------------------------------------------
-# Step 5: session_id round-trip
+# Step 5: conversations — one Claude session each
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_session_id_unset_is_none(tmp_db):
-    store = Store(tmp_db)
-    await store.init()
-    await store.seed([_proj("qwing", enabled=True)])
-
-    assert await store.get_session_id("qwing") is None
-
-
-@pytest.mark.asyncio
-async def test_session_id_unknown_project_is_none(tmp_db):
+async def test_ordinals_start_at_one_and_never_repeat(tmp_db):
+    # A reused number would put a new conversation under an old topic title.
     store = Store(tmp_db)
     await store.init()
 
-    assert await store.get_session_id("ghost") is None
+    assert await store.next_ordinal("qwing") == 1
+    await store.add_conversation("qwing#1", "qwing", 1)
+    assert await store.next_ordinal("qwing") == 2
+
+    await store.add_conversation("qwing#2", "qwing", 2)
+    await store.close_conversation("qwing#2")
+
+    assert await store.next_ordinal("qwing") == 3
 
 
 @pytest.mark.asyncio
-async def test_session_id_round_trip_and_overwrite(tmp_db):
+async def test_an_old_database_keeps_its_running_sessions(tmp_db):
+    # Sessions used to live on the project row. Dropping them on upgrade would
+    # silently reset the context of every project that was mid-task.
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.executescript(
+            "CREATE TABLE projects (name TEXT PRIMARY KEY, enabled INTEGER "
+            "NOT NULL DEFAULT 1, session_id TEXT);"
+        )
+        await db.execute(
+            "INSERT INTO projects VALUES ('paprika', 1, 'uuid-live'), "
+            "('idle', 0, NULL)"
+        )
+        await db.commit()
+
     store = Store(tmp_db)
     await store.init()
-    await store.seed([_proj("qwing", enabled=True)])
-    await store.set_session_id("qwing", "sess-abc")
-    assert await store.get_session_id("qwing") == "sess-abc"
 
-    await store.set_session_id("qwing", "sess-def")
-    assert await store.get_session_id("qwing") == "sess-def"
+    assert (await store.conversation("paprika#1")).session_id == "uuid-live"
+    assert (await store.conversation("idle#1")).session_id is None
 
 
 @pytest.mark.asyncio
-async def test_set_session_id_creates_row_preserving_enabled(tmp_db):
-    store = Store(tmp_db)
-    await store.init()  # no seeded projects
-    await store.set_session_id("lazyproj", "sess-1")
+async def test_the_migration_runs_only_once(tmp_db):
+    # A second pass must not resurrect conversations the user has closed.
+    async with aiosqlite.connect(tmp_db) as db:
+        await db.executescript(
+            "CREATE TABLE projects (name TEXT PRIMARY KEY, enabled INTEGER "
+            "NOT NULL DEFAULT 1, session_id TEXT);"
+        )
+        await db.execute("INSERT INTO projects VALUES ('paprika', 1, 'uuid-live')")
+        await db.commit()
 
-    assert await store.get_session_id("lazyproj") == "sess-1"
-    # row created via DEFAULT enabled=1
-    assert await store.is_enabled("lazyproj") is True
+    await Store(tmp_db).init()
+    store = Store(tmp_db)
+    await store.close_conversation("paprika#1")
+    await store.init()
+
+    assert await store.conversations("paprika") == []
+    assert (await store.conversation("paprika#1")).closed is True
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_database_migrates_nothing(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+
+    assert await store.conversations(include_closed=True) == []
+
+
+@pytest.mark.asyncio
+async def test_conversation_round_trip(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_conversation("qwing#1", "qwing", 1)
+    await store.set_conversation_topic("qwing#1", -100123, 77)
+    await store.set_conversation_session("qwing#1", "sess-abc")
+
+    conv = await store.conversation("qwing#1")
+
+    assert conv.project == "qwing"
+    assert conv.ordinal == 1
+    assert (conv.chat_id, conv.thread_id) == (-100123, 77)
+    assert conv.session_id == "sess-abc"
+    assert conv.closed is False
+
+
+@pytest.mark.asyncio
+async def test_closed_conversations_are_hidden_by_default(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_conversation("qwing#1", "qwing", 1)
+    await store.add_conversation("qwing#2", "qwing", 2)
+    await store.add_conversation("other#1", "other", 1)
+    await store.close_conversation("qwing#2")
+
+    assert [c.key for c in await store.conversations("qwing")] == ["qwing#1"]
+    assert [c.key for c in await store.conversations("qwing", include_closed=True)] == [
+        "qwing#1", "qwing#2",
+    ]
+    assert {c.key for c in await store.conversations()} == {"qwing#1", "other#1"}
+
+
+@pytest.mark.asyncio
+async def test_a_claude_session_is_found_by_its_uuid(tmp_db):
+    # Resuming a session that is already open must land in its topic, not spawn
+    # a second writer for the same .jsonl.
+    store = Store(tmp_db)
+    await store.init()
+    await store.add_conversation("qwing#1", "qwing", 1, session_id="uuid-1")
+
+    found = await store.conversation_for_session("uuid-1")
+
+    assert found is not None and found.key == "qwing#1"
+    assert await store.conversation_for_session("uuid-nope") is None
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +264,10 @@ async def test_state_survives_new_store_instance(tmp_db):
     await s1.init()
     await s1.seed([_proj("qwing", enabled=True)])
     await s1.set_enabled("qwing", False)
-    await s1.set_session_id("qwing", "sess-xyz")
-    await s1.map_message(42, "qwing")
-    await s1.set_last_active("qwing")
+    await s1.add_conversation("qwing#1", "qwing", 1, thread_id=9)
+    await s1.set_conversation_session("qwing#1", "sess-xyz")
+    await s1.map_message(42, "qwing#1")
+    await s1.set_last_active("qwing#1")
 
     # simulate restart: fresh object, same file, init() must be non-destructive
     s2 = Store(tmp_db)
@@ -201,6 +275,8 @@ async def test_state_survives_new_store_instance(tmp_db):
     await s2.seed([_proj("qwing", enabled=True)])
 
     assert await s2.is_enabled("qwing") is False
-    assert await s2.get_session_id("qwing") == "sess-xyz"
-    assert await s2.project_for_message(42) == "qwing"
-    assert await s2.get_last_active() == "qwing"
+    conv = await s2.conversation("qwing#1")
+    assert conv.session_id == "sess-xyz"
+    assert conv.thread_id == 9
+    assert await s2.project_for_message(42) == "qwing#1"
+    assert await s2.get_last_active() == "qwing#1"

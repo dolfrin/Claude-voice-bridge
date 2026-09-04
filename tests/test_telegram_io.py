@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telegram import MessageEntity
 from telegram.error import BadRequest
 
 from voice_bridge.config import Config
@@ -20,6 +21,26 @@ from voice_bridge.telegram_io import (
     parse_callback,
 )
 from voice_bridge.transcript import transcript_path
+
+
+class _FakeBuilder:
+    """Chainable stand-in: every builder method returns the builder itself.
+
+    Records the calls so a test can still check the token was passed.
+    """
+
+    def __init__(self, app):
+        self._app = app
+        self.calls: list[tuple] = []
+
+    def __getattr__(self, name):
+        def record(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            return self
+        return record
+
+    def build(self):
+        return self._app
 
 
 def make_cfg(allowed_id=42):
@@ -145,9 +166,11 @@ async def test_text_message_from_allowed_user_routes_to_callback():
     assert received == [{
         "message_id": 11,
         "reply_to": 7,
+        "project": None,
         "text": "kaip sekasi",
         "is_voice": False,
         "audio": None,
+        "live_pid": None,
     }]
 
 
@@ -174,9 +197,11 @@ async def test_voice_message_downloads_bytes_and_marks_is_voice():
     assert received == [{
         "message_id": 12,
         "reply_to": None,
+        "project": None,
         "text": "",
         "is_voice": True,
         "audio": b"OGGDATA",
+        "live_pid": None,
     }]
 
 
@@ -207,9 +232,11 @@ async def test_document_message_downloads_attachment_with_caption():
     assert received == [{
         "message_id": 15,
         "reply_to": 7,
+        "project": None,
         "text": "peržiūrėk",
         "is_voice": False,
         "audio": None,
+        "live_pid": None,
         "attachments": [{
             "kind": "document",
             "file_name": "report.pdf",
@@ -281,6 +308,75 @@ async def test_send_update_sends_text_then_voice_and_returns_ids():
     assert "Pushintas kodas" in sent_text
     bot.send_voice.assert_awaited_once()
     assert bot.send_voice.await_args.kwargs["voice"] == b"OGGVOICE"
+
+
+@pytest.mark.asyncio
+async def test_send_update_renders_markdown_as_telegram_html():
+    # Without parse_mode Telegram printed "**bold**" with the asterisks showing.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=100))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    await io.send_update(
+        project="qwing", voice_label="alloy",
+        text="**Kas įvyko**\n\n`git push` failed",
+        voice_bytes=None,
+    )
+
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["parse_mode"] == "HTML"
+    assert "<b>Kas įvyko</b>" in kwargs["text"]
+    assert "<code>git push</code>" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_update_splits_an_answer_too_long_for_one_message():
+    # Over 4096 characters Telegram refuses the send and the answer is lost.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=[
+        MagicMock(message_id=1), MagicMock(message_id=2), MagicMock(message_id=3),
+    ])
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    ids = await io.send_update(
+        project="qwing", voice_label="alloy",
+        text="\n".join(f"line {i} " + "y" * 60 for i in range(120)),
+        voice_bytes=None,
+    )
+
+    assert len(ids) > 1
+    assert bot.send_message.await_count == len(ids)
+    # Only the first piece carries the project tag.
+    first = bot.send_message.await_args_list[0].kwargs["text"]
+    second = bot.send_message.await_args_list[1].kwargs["text"]
+    assert first.startswith("[qwing]")
+    assert not second.startswith("[qwing]")
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_html_body_is_resent_as_plain_text():
+    # A conversion bug must never cost the user the answer itself.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(side_effect=[
+        BadRequest("can't parse entities"), MagicMock(message_id=55),
+    ])
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    ids = await io.send_update(
+        project="qwing", voice_label="alloy", text="**oops", voice_bytes=None,
+    )
+
+    assert ids == [55]
+    assert bot.send_message.await_count == 2
+    retry = bot.send_message.await_args_list[1].kwargs
+    assert "parse_mode" not in retry
+    assert "**oops" in retry["text"]
 
 
 @pytest.mark.asyncio
@@ -424,6 +520,10 @@ def test_build_menu_markup_has_primary_actions():
     markup = build_menu_markup()
     callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
     assert callbacks == [
+        "menu:new",
+        "menu:resume",
+        "clist:",
+        "menu:history",
         "menu:projects",
         "menu:projects_all",
         "menu:panel",
@@ -911,7 +1011,7 @@ async def test_cmd_menu_replies_with_main_menu():
     sent = upd.message.reply_text.await_args.args[0]
     markup = upd.message.reply_text.await_args.kwargs["reply_markup"]
     assert "Alex for Claude" in sent
-    assert markup.inline_keyboard[0][0].callback_data == "menu:projects"
+    assert markup.inline_keyboard[0][0].callback_data == "menu:new"
 
 
 @pytest.mark.asyncio
@@ -951,7 +1051,7 @@ async def test_menu_stop_callback_interrupts_active_project():
     assert ("interrupt", None) in controls.calls
     kwargs = query.edit_message_text.await_args.kwargs
     assert "active: nutraukta" in kwargs["text"]
-    assert kwargs["reply_markup"].inline_keyboard[2][0].callback_data == "menu:stop"
+    assert kwargs["reply_markup"].inline_keyboard[4][0].callback_data == "menu:stop"
 
 
 # --------------------------------------------------------------------------
@@ -1221,9 +1321,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     fake_app.updater = MagicMock()
     fake_app.updater.start_polling = AsyncMock()
 
-    fake_builder = MagicMock()
-    fake_builder.token.return_value = fake_builder
-    fake_builder.build.return_value = fake_app
+    fake_builder = _FakeBuilder(fake_app)
 
     monkeypatch.setattr(
         mod.Application, "builder",
@@ -1233,7 +1331,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     await io.run()
 
-    fake_builder.token.assert_called_once_with("TESTTOKEN")
+    assert ("token", ("TESTTOKEN",), {}) in fake_builder.calls
     assert io.app is fake_app
     fake_app.initialize.assert_awaited_once()
     fake_app.bot.set_my_commands.assert_awaited_once()
@@ -1243,18 +1341,29 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     # on, off, stop, mode, voice, engine, status, callback, text, voice, attachments.
     assert len(added) >= 17
 
+    # The voice handler must not block the update queue: it can pause to ask
+    # which transcript to accept, and the answering button press is itself an
+    # update that would never be processed while the queue is stalled.
+    # Bound methods are recreated per attribute access, so compare by equality.
+    voice = [h for h in added if getattr(h, "callback", None) == io._handle_voice]
+    assert voice and voice[0].block is False
+
     cmd_names = set()
     for h in added:
         cmds = getattr(h, "commands", None)
         if cmds:
             cmd_names |= set(cmds)
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "on", "off", "stop",
-            "mode", "voice", "engine", "status"} <= cmd_names
+    assert {"menu", "new", "resume", "sessions", "history", "close", "panel",
+            "projects", "projects_all", "projects_refresh", "handoff", "on", "off",
+            "stop", "mode", "model", "effort", "voice", "engine",
+            "status"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "handoff", "status", "on", "off", "stop",
-            "mode", "voice", "engine"} == registered_names
+    assert {"menu", "new", "resume", "sessions", "history", "close", "panel",
+            "live", "projects", "projects_all", "projects_refresh", "handoff",
+            "status", "on", "off", "stop", "mode", "model", "effort", "voice",
+            "engine"} == registered_names
 
 
 @pytest.mark.asyncio
@@ -1271,9 +1380,7 @@ async def test_run_returns_without_blocking(monkeypatch):
     fake_app.updater = MagicMock()
     fake_app.updater.start_polling = AsyncMock()
 
-    fake_builder = MagicMock()
-    fake_builder.token.return_value = fake_builder
-    fake_builder.build.return_value = fake_app
+    fake_builder = _FakeBuilder(fake_app)
     monkeypatch.setattr(
         mod.Application, "builder",
         classmethod(lambda cls: fake_builder),
@@ -1308,3 +1415,288 @@ async def test_stop_is_noop_when_never_run():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     # app is None; stop must not raise.
     await io.stop()
+
+
+@pytest.mark.asyncio
+async def test_ask_per_message_edit_dumps_copyable_text_and_returns_none():
+    from telegram import MessageEntity
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=320))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    task = asyncio.create_task(
+        io.ask_per_message("stt", [("m1", "labas žeme"), ("m2", "kitas tekstas")])
+    )
+    await asyncio.sleep(0)
+
+    # Every transcript message carries [Accept this][Edit] on one row.
+    row = bot.send_message.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0]
+    assert [b.text for b in row] == ["Accept this", "Edit"]
+    assert row[0].callback_data == "ask:1:0"
+    assert row[1].callback_data == "ask:1:e0"
+
+    query = MagicMock()
+    query.from_user = MagicMock(id=42)
+    query.data = "ask:1:e0"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+    await io._handle_callback(update, MagicMock())
+
+    # Edit resolves the ask with the None sentinel...
+    assert await task is None
+    # ...and replaces the tapped message with the bare body as a code entity.
+    args, kwargs = query.edit_message_text.await_args
+    assert args[0] == "labas žeme"
+    entity = kwargs["entities"][0]
+    assert entity.type == MessageEntity.CODE
+    assert entity.offset == 0
+    assert entity.length == 10  # UTF-16 units of "labas žeme"
+
+
+@pytest.mark.asyncio
+async def test_ask_per_message_accept_still_returns_label():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=321))
+    io.app = MagicMock()
+    io.app.bot = bot
+
+    task = asyncio.create_task(io.ask_per_message("stt", [("m1", "a"), ("m2", "b")]))
+    await asyncio.sleep(0)
+
+    query = MagicMock()
+    query.from_user = MagicMock(id=42)
+    query.data = "ask:1:1"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+    await io._handle_callback(update, MagicMock())
+
+    assert await task == "m2"
+    query.edit_message_text.assert_awaited_once_with("Selected: m2")
+
+
+# --------------------------------------------------------------------------
+# /live: topics attached to a Claude Code session running outside the bridge
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_text_in_an_attached_topic_carries_the_live_pid():
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    io._live_threads[77] = 4321
+
+    update = MagicMock()
+    update.message = make_message(message_id=3, text="tęsk")
+    update.message.message_thread_id = 77
+    update.callback_query = None
+
+    await io._handle_text(update, MagicMock())
+
+    assert received[0]["live_pid"] == 4321
+
+
+@pytest.mark.asyncio
+async def test_attached_control_topic_forwards_instead_of_the_hub_hint():
+    # A project's control topic normally answers with its buttons. Once /live
+    # attaches it, the text belongs to that session instead.
+    received = []
+
+    async def on_user_message(d):
+        received.append(d)
+
+    io = TelegramIO(make_cfg(), on_user_message, FakeControls())
+    io._topics = {"qwing": 55}
+    io._live_threads[55] = 4321
+
+    update = MagicMock()
+    update.message = make_message(text="koks oras siandien")
+    update.message.message_thread_id = 55
+    update.message.reply_text = AsyncMock()
+    update.callback_query = None
+
+    await io._handle_text(update, MagicMock())
+
+    assert [d["live_pid"] for d in received] == [4321]
+    update.message.reply_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_attachments_survive_a_restart():
+    from voice_bridge import telegram_io as mod
+    from voice_bridge.live import LiveSession
+
+    class FakeStore:
+        def __init__(self):
+            self.meta = {}
+
+        async def set_meta(self, key, value):
+            self.meta[key] = value
+
+        async def get_meta(self, key):
+            return self.meta.get(key)
+
+    store = FakeStore()
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), store=store)
+    io._live_threads[77] = 4321
+    io._live_threads[88] = 9999
+    await io._save_live()
+
+    fresh = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), store=store)
+    alive = LiveSession(pid=4321, session_id="a", cwd="/root", socket_path="/s")
+    # 9999 has since exited: it must not come back as an attachment.
+    fresh._live_find = lambda pid: alive if pid == 4321 else None
+
+    await fresh.restore_live()
+
+    assert fresh._live_threads == {77: 4321}
+    assert 4321 in fresh._live_tails
+    for task in fresh._live_tails.values():
+        task.cancel()
+    assert "9999" not in store.meta[mod._LIVE_META_KEY]
+
+
+@pytest.mark.asyncio
+async def test_detach_frees_the_topic_and_stops_the_tail():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    task = asyncio.create_task(asyncio.sleep(30))
+    io._live_threads[77] = 4321
+    io._live_tails[4321] = task
+
+    query = MagicMock()
+    query.message = MagicMock()
+    query.message.message_thread_id = 77
+    query.edit_message_text = AsyncMock()
+
+    await io._handle_live_callback(query, "off")
+
+    assert io._live_threads == {}
+    assert io._live_tails == {}
+    assert task.cancelled() or task.cancelling()
+
+
+@pytest.mark.asyncio
+async def test_deliver_live_unbinds_and_says_so_when_the_session_is_gone():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.app = MagicMock()
+    io.app.bot.send_message = AsyncMock()
+    io._live_threads[77] = 4321
+    io._live_find = lambda pid: None
+
+    assert await io.deliver_live(4321, "labas") is False
+    assert io._live_threads == {}
+    text = io.app.bot.send_message.await_args.kwargs["text"]
+    assert "exited" in text
+
+
+def test_live_picker_lists_sessions_and_marks_the_attached_one():
+    from voice_bridge.live import LiveSession
+    from voice_bridge.telegram_io import build_live_markup, format_live_sessions
+
+    sessions = [
+        LiveSession(pid=1, session_id="a", cwd="/root/app", socket_path="/s1",
+                    name="app-1", entrypoint="claude-vscode", status="busy"),
+        LiveSession(pid=2, session_id="b", cwd="/root/api", socket_path="/s2",
+                    name="api-2", entrypoint="cli"),
+    ]
+
+    body = format_live_sessions(sessions, bound=2)
+    assert "app-1" in body and "VSCode" in body and "busy" in body
+    assert "← attached here" in body
+
+    rows = build_live_markup(sessions, bound=2).inline_keyboard
+    assert rows[0][0].callback_data == "live:1"
+    assert rows[-1][0].callback_data == "live:off"
+
+
+def test_live_picker_prefers_the_session_title_over_the_derived_name():
+    # "root-47" says nothing; the transcript title is what /resume shows.
+    from voice_bridge.live import LiveSession
+    from voice_bridge.telegram_io import build_live_markup, format_live_sessions
+
+    session = LiveSession(pid=1, session_id="a", cwd="/root/app",
+                          socket_path="/s1", name="root-47",
+                          entrypoint="claude-vscode")
+    titles = {1: "Replace Rainbow with Privy Wallet Connect"}
+
+    body = format_live_sessions([session], titles=titles, scope="arclaunch")
+    assert "Replace Rainbow with Privy Wallet Connect" in body
+    assert "in arclaunch" in body
+    assert "root-47" in body  # still there, as the small print
+
+    button = build_live_markup([session], titles=titles).inline_keyboard[0][0]
+    assert button.text.startswith("Replace Rainbow")
+
+
+@pytest.mark.asyncio
+async def test_live_in_a_project_topic_shows_only_that_project(monkeypatch):
+    from voice_bridge import telegram_io as mod
+    from voice_bridge.live import LiveSession
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._topics = {"qwing": 55}  # qwing's cwd is /home/home/Projects/WhisperX
+    monkeypatch.setattr(mod.live, "list_sessions", lambda *a, **k: [
+        LiveSession(pid=1, session_id="a", cwd="/home/home/Projects/WhisperX",
+                    socket_path="/s1", name="w-1", entrypoint="claude-vscode"),
+        LiveSession(pid=2, session_id="b", cwd="/root/elsewhere",
+                    socket_path="/s2", name="e-2", entrypoint="claude-vscode"),
+    ])
+    monkeypatch.setattr(mod.live, "title_of", lambda root, sid: "")
+
+    update = MagicMock()
+    update.message = make_message(text="/live")
+    update.message.message_thread_id = 55
+    update.message.reply_text = AsyncMock()
+
+    context = MagicMock()
+    context.args = []
+    await io._cmd_live(update, context)
+
+    body = update.message.reply_text.await_args.args[0]
+    assert "w-1" in body
+    assert "e-2" not in body
+
+    context.args = ["all"]
+    await io._cmd_live(update, context)
+    assert "e-2" in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_live_output_grows_one_message_then_starts_another():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.app = MagicMock()
+    sent = MagicMock()
+    sent.message_id = 500
+    io.app.bot.send_message = AsyncMock(return_value=sent)
+    io.app.bot.edit_message_text = AsyncMock()
+
+    await io._stream_live(77, ["first"])
+    await io._stream_live(77, ["second"])
+
+    # One message, edited in place — not a message per line.
+    assert io.app.bot.send_message.await_count == 1
+    body = io.app.bot.edit_message_text.await_args.kwargs["text"]
+    assert "first" in body and "second" in body
+
+    # Once it no longer fits, a new message takes over.
+    import voice_bridge.telegram_io as mod
+    io._live_msgs[77] = ("x" * (mod._LIVE_CHUNK - 2), 500)
+    await io._stream_live(77, ["overflow"])
+
+    assert io.app.bot.send_message.await_count == 2
+    assert io._live_msgs[77][0] == "overflow"
+
+
+def test_live_picker_says_so_when_nothing_else_runs():
+    from voice_bridge.telegram_io import build_live_markup, format_live_sessions
+
+    assert "No other sessions" in format_live_sessions([])
+    assert build_live_markup([]) is None
