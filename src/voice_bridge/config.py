@@ -58,6 +58,7 @@ class ProjectConfig:
     autonomy: str | None = None
     voice: str | None = None
     model: str | None = None
+    effort: str | None = None
     system_prompt_extra: str = ""
 
 
@@ -218,6 +219,7 @@ def load_projects(path: str = "projects.yaml") -> list[ProjectConfig]:
                 autonomy=raw.get("autonomy"),
                 voice=raw.get("voice"),
                 model=raw.get("model"),
+                effort=raw.get("effort"),
                 system_prompt_extra=raw.get("system_prompt_extra") or "",
             )
         )

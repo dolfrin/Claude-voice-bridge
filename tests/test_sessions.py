@@ -12,7 +12,12 @@ from dataclasses import replace
 
 import pytest
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+)
 
 import voice_bridge.sessions as sessions_mod
 from voice_bridge.sessions import SessionManager
@@ -1052,3 +1057,98 @@ async def test_stop_all_disconnects_every_running_client():
     assert all(c.disconnected for c in FakeClaudeSDKClient.instances)
     assert sm.is_running("qwing#1") is False
     assert sm.is_running("beta#1") is False
+
+
+async def test_answer_carries_the_model_footer_and_switch_is_per_session():
+    """The footer names the model that actually answered, and a switch made in
+    one conversation does not reach its sibling."""
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await start(sm, "qwing")
+    await start(sm, "qwing")
+
+    one, two = FakeClaudeSDKClient.instances[0], FakeClaudeSDKClient.instances[1]
+    one.scripted_turns = [[
+        SystemMessage(subtype="init", data={"model": "claude-opus-5[1m]"}),
+        AssistantMessage(content=[TextBlock(text="Done.")], model="claude-opus-4-5-20251101"),
+        result("sess-1"),
+    ]]
+
+    await sm.deliver("qwing#1", "go")
+    assert await _wait_for(lambda: any(o.spoken == "" for o in outbound))
+    final = [o for o in outbound if o.spoken == ""][-1]
+    assert "— opus-4-5 · " in final.text
+    assert sm.model_of("qwing#1") == "claude-opus-4-5-20251101"
+
+    await sm.set_model("qwing#1", "haiku")
+    assert one.models == ["haiku"]
+    assert two.models == []
+
+    await sm.set_model("qwing", "sonnet")
+    assert one.models == ["haiku", "sonnet"]
+    assert two.models == ["sonnet"]
+
+    await sm.stop_all()
+
+
+async def test_effort_reconnects_on_the_same_session_and_shows_in_the_footer():
+    """Effort is a connect-time flag, so the switch has to re-create the client
+    on the same session id — and the answer says which effort produced it."""
+    project = make_project("qwing")
+    store = FakeStore(enabled={"qwing": True})
+    outbound: list[Outbound] = []
+
+    async def on_outbound(o):
+        outbound.append(o)
+
+    sm = make_sm([project], store, on_outbound)
+    await start(sm, "qwing")
+
+    FakeClaudeSDKClient.instances[0].scripted_turns = [[
+        assistant("Done."),
+        result("sess-9"),
+    ]]
+    await sm.deliver("qwing#1", "go")
+    assert await _wait_for(lambda: any(o.spoken == "" for o in outbound))
+
+    before = len(FakeClaudeSDKClient.instances)
+    assert await sm.set_effort("qwing#1", "xhigh") == "effort xhigh for qwing#1"
+    assert len(FakeClaudeSDKClient.instances) == before + 1
+    fresh = FakeClaudeSDKClient.instances[-1]
+    assert fresh.options.effort == "xhigh"
+    assert fresh.options.resume == "sess-9"
+    assert sm.effort_of("qwing#1") == "xhigh"
+
+    fresh.scripted_turns = [[assistant("Again."), result("sess-9")]]
+    outbound.clear()
+    await sm.deliver("qwing#1", "again")
+    assert await _wait_for(lambda: any(o.spoken == "" for o in outbound))
+    assert [o for o in outbound if o.spoken == ""][-1].text.endswith("— test · xhigh")
+
+    assert "usage:" in await sm.set_effort("qwing#1", "turbo")
+
+    await sm.stop_all()
+
+
+def test_footer_falls_back_to_the_cli_settings(tmp_path, monkeypatch):
+    """Neither model nor effort is announced at connect, so an untouched session
+    is labelled with whatever Claude Code itself is configured to use."""
+    from voice_bridge.sessions import _claude_settings, with_model_footer
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "settings.json").write_text('{"effortLevel": "xhigh", "model": "opus[1m]"}')
+    _claude_settings.cache_clear()
+    assert with_model_footer("hi", "claude-opus-4-8") == "hi\n\n— opus-4-8 · xhigh"
+    assert with_model_footer("hi", "claude-opus-4-8", "low") == "hi\n\n— opus-4-8 · low"
+    assert with_model_footer("hi", None) == "hi\n\n— opus[1m] · xhigh"
+
+    (tmp_path / "settings.json").write_text("not json")
+    _claude_settings.cache_clear()
+    assert with_model_footer("hi", None).endswith("— default · high")
+    _claude_settings.cache_clear()

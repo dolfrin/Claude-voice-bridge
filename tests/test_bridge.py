@@ -199,6 +199,12 @@ class FakeSessions:
     def names(self):
         return list(self._projects)
 
+    def model_of(self, target):
+        return "claude-opus-4-8-20260101"
+
+    def effort_of(self, target):
+        return "low"
+
     def add_projects(self, projects):
         added = 0
         for project in projects:
@@ -980,3 +986,48 @@ async def test_make_inbound_edit_tap_aborts_voice_turn_silently():
     # Nothing delivered to Claude, no "did not understand" either.
     assert sessions.delivered == []
     assert telegram.questions == []
+
+
+def test_model_text_answers_with_both_the_model_and_the_effort():
+    """/model and /effort share one line, so either question is answered fully."""
+    sessions = FakeSessions([FakeProject("qwing")])
+    controls = _Controls(sessions, FakeStore(), FakeCfg(), {"backend": FakeTTS()})
+
+    assert controls.model_text("qwing#1") == "qwing#1: opus-4-8 · low"
+    assert "session topic" in controls.model_text(None)
+
+
+@pytest.mark.asyncio
+async def test_lazy_sessions_forwards_methods_it_was_never_told_about(monkeypatch):
+    """A method added to SessionManager must reach it without a wrapper here.
+
+    Hand-written passthroughs went stale silently: `/model` and `/effort` both
+    died with AttributeError for the user, while every test passed on its own
+    double.
+    """
+    import voice_bridge.bridge as bridge_mod
+
+    cfg = FakeCfg()
+    projects = [FakeProject("qwing", voice="echo")]
+    sessions = FakeSessions(projects)
+    sessions.brand_new_calls = []
+    sessions.brand_new = lambda *a: sessions.brand_new_calls.append(a) or "answered"
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda path="projects.yaml": projects)
+    monkeypatch.setattr(bridge_mod, "Store", lambda db_path: FakeStore(enabled={"qwing": True}))
+    monkeypatch.setattr(bridge_mod, "Transcriber",
+                        lambda model_name, language="lt": FakeTranscriber())
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
+    monkeypatch.setattr(bridge_mod, "ApprovalManager",
+                        lambda send_question, timeout: FakeApprovals())
+    monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
+    monkeypatch.setattr(bridge_mod, "TelegramIO",
+                        lambda cfg, on_user_message, controls, **kw: FakeTelegram())
+
+    wired = await build()
+    lazy = wired.controls._sessions
+
+    assert lazy.brand_new("qwing#1") == "answered"
+    assert sessions.brand_new_calls == [("qwing#1",)]
+    assert lazy.effort_of("qwing#1") == "low"

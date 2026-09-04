@@ -1355,13 +1355,15 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
             cmd_names |= set(cmds)
     assert {"menu", "new", "resume", "sessions", "history", "close", "panel",
             "projects", "projects_all", "projects_refresh", "handoff", "on", "off",
-            "stop", "mode", "voice", "engine", "status"} <= cmd_names
+            "stop", "mode", "model", "effort", "voice", "engine",
+            "status"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "new", "resume", "sessions", "history", "close", "panel",
             "live", "projects", "projects_all", "projects_refresh", "handoff",
-            "status", "on", "off", "stop", "mode", "voice", "engine"} == registered_names
+            "status", "on", "off", "stop", "mode", "model", "effort", "voice",
+            "engine"} == registered_names
 
 
 @pytest.mark.asyncio

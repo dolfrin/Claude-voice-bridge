@@ -32,12 +32,15 @@ Constraints honored:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import shutil
 import time
 import warnings
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -46,6 +49,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
@@ -118,6 +122,59 @@ def permission_mode(autonomy: str) -> str:
 # How many activity lines the live progress message keeps.
 PROGRESS_LINES = 14
 _THINKING = "\U0001F4AD thinking…"
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+@lru_cache(maxsize=1)
+def _claude_settings() -> dict:
+    """Claude Code's own ``settings.json``, or ``{}`` if it cannot be read.
+
+    Neither the model nor the effort is knowable before a session has answered
+    once — nothing announces them at connect — so an untouched session takes
+    its labels from the same file the CLI reads. Cached: a restart picks up an
+    edit, same as for the CLI itself.
+    """
+    path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser()
+    try:
+        settings = json.loads((path / "settings.json").read_text())
+    except (OSError, ValueError):  # missing, unreadable, or not JSON
+        return {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def settings_effort() -> str | None:
+    """The effort level Claude Code is configured with, if it is a valid one."""
+    level = _claude_settings().get("effortLevel")
+    return level if level in EFFORT_LEVELS else None
+
+
+def settings_model() -> str | None:
+    """The model Claude Code is configured with, e.g. ``opus[1m]``."""
+    model = _claude_settings().get("model")
+    return model if isinstance(model, str) and model else None
+
+
+def short_model(model: str | None) -> str:
+    """``claude-opus-4-5-20251101`` -> ``opus-4-5``: the part that identifies it.
+
+    The date suffix and the vendor prefix are the same on every answer, so they
+    only cost width in a footer that is meant to be glanceable.
+    """
+    if not model:
+        return "default"
+    name = re.sub(r"-\d{8}$", "", model.strip())
+    return name.removeprefix("claude-") or model
+
+
+def with_model_footer(text: str, model: str | None, effort: str | None = None) -> str:
+    """Append the answering model to a turn, below the voice split marker.
+
+    It goes last so ``prepare_outbound`` keeps it out of the spoken summary —
+    the voice never reads a model id.
+    """
+    label = short_model(model or settings_model())
+    return f"{text}\n\n— {label} · {effort or settings_effort() or 'high'}"
 
 
 def _entrypoint_env() -> dict[str, str]:
@@ -245,6 +302,8 @@ class _Session:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.task: asyncio.Task | None = None
         self.progress: _Progress | None = None
+        self.model: str | None = None  # what actually answered, per AssistantMessage
+        self.effort: str | None = None  # only settable at connect, so kept per session
 
 
 class SessionManager:
@@ -272,6 +331,9 @@ class SessionManager:
         self._on_close = on_close
         self._on_progress = on_progress
         self._sessions: dict[str, _Session] = {}
+        # Effort is a connect-time CLI flag, so a per-conversation choice has to
+        # outlive the client it was made on and be re-applied on every start.
+        self._effort: dict[str, str] = {}
 
     # ------------------------------------------------------------------ #
     # Lookup
@@ -471,19 +533,98 @@ class SessionManager:
             except Exception:  # noqa: BLE001 - a stale client must not block the switch
                 logger.exception("set_permission_mode failed for %s", key)
 
-    async def set_model(self, project: str, model: str | None) -> None:
-        """Switch the model for every live conversation of a project, live."""
-        cfg = self._projects.get(project)
+    async def set_model(self, target: str, model: str | None) -> None:
+        """Switch the model live.
+
+        ``target`` is either a project name (every conversation of it, and the
+        default for new ones) or a single conversation key like ``app#2`` —
+        sub-topics exist so two tasks do not share a context, so a switch made
+        inside one must not reach its siblings.
+        """
+        if "#" in target:
+            sess = self._sessions.get(target)
+            if sess is None or sess.client is None:
+                return
+            try:
+                await sess.client.set_model(model)
+            except Exception:  # noqa: BLE001 - a stale client must not break the switch
+                logger.exception("set_model failed for %s", target)
+            return
+        cfg = self._projects.get(target)
         if cfg is None:
             return
         cfg.model = model
         for key, sess in self._sessions.items():
-            if project_of(key) != project or sess.client is None:
+            if project_of(key) != target or sess.client is None:
                 continue
             try:
                 await sess.client.set_model(model)
             except Exception:  # noqa: BLE001 - a stale client must not break the switch
                 logger.exception("set_model failed for %s", key)
+
+    async def set_effort(self, target: str, effort: str | None) -> str:
+        """Change the reasoning effort, reconnecting the affected sessions.
+
+        Unlike the model, effort is only a connect-time CLI flag — there is no
+        control request for it — so the client is torn down and resumed on the
+        same session id, which keeps the context. A conversation that is mid-turn
+        is refused rather than reconnected: that would throw away the work in
+        flight, and the user can ask again a minute later.
+        """
+        if effort is not None and effort not in EFFORT_LEVELS:
+            return "usage: /effort <low|medium|high|xhigh|max|default> [project]"
+        keys = (
+            [target]
+            if "#" in target
+            else [k for k in self._sessions if project_of(k) == target]
+        )
+        if "#" not in target:
+            cfg = self._projects.get(target)
+            if cfg is None:
+                return f"unknown project: {target}"
+            cfg.effort = effort
+        busy = [k for k in keys if self.is_busy(k)]
+        for key in keys:
+            if key in busy:
+                continue
+            if effort is None:
+                self._effort.pop(key, None)
+            else:
+                self._effort[key] = effort
+            if key in self._sessions:
+                await self._restart(key)
+        done = f"effort {effort or 'default'} for {target}"
+        if busy:
+            return f"{done} — still working, so {', '.join(busy)} kept the old one; ask again when idle."
+        return done
+
+    async def _restart(self, key: str) -> None:
+        """Reconnect one conversation on its own session id, keeping context."""
+        conv = await self._store.conversation(key)
+        await self._stop(key)
+        await self._start(key, resume=conv.session_id if conv else None)
+
+    def effort_of(self, target: str) -> str | None:
+        """The effort a conversation runs with, or a project's default."""
+        sess = self._sessions.get(target)
+        if sess is not None:
+            return sess.effort
+        project = self._projects.get(project_of(target))
+        return self._effort.get(target) or (project.effort if project else None)
+
+    def model_of(self, target: str) -> str | None:
+        """The model a conversation last answered with.
+
+        Before the first answer there is nothing to report from the wire, so
+        this falls back to the project's override and then to Claude Code's own
+        configured model — otherwise a freshly restarted session says
+        "default", which tells the user nothing.
+        """
+        sess = self._sessions.get(target)
+        if sess is not None and sess.model:
+            return sess.model
+        project = self._projects.get(project_of(target))
+        return (project.model if project else None) or settings_model()
 
     async def stop_all(self) -> None:
         """Stop and disconnect every running conversation."""
@@ -513,6 +654,7 @@ class SessionManager:
         return ClaudeAgentOptions(
             cwd=project.cwd,
             model=project.model,
+            effort=self._effort.get(key, project.effort),
             system_prompt={"type": "preset", "preset": "claude_code", "append": append_text},
             permission_mode=permission_mode(effective_autonomy(project, self._cfg)),
             can_use_tool=make_can_use_tool(project, self._cfg, self._approvals, key),
@@ -582,6 +724,7 @@ class SessionManager:
             self._make_on_send_file(key),
             self._make_on_ask_user(key),
         )
+        sess.effort = self._effort.get(key, project.effort)
         options = self._build_options(project, key, resume, fork, notify_server)
 
         client = ClaudeSDKClient(options)
@@ -725,7 +868,11 @@ class SessionManager:
                 if joined:
                     await append_transcript(sess.project.cwd, "assistant", joined)
                     await self._on_outbound(
-                        Outbound(project=key, text=joined, spoken="")
+                        Outbound(
+                            project=key,
+                            text=with_model_footer(joined, sess.model, sess.effort),
+                            spoken="",
+                        )
                     )
             except asyncio.CancelledError:
                 sess.progress = None
@@ -740,6 +887,7 @@ class SessionManager:
         """Fold one streamed SDK message into the turn's text and progress log."""
         progress = sess.progress
         if isinstance(msg, AssistantMessage):
+            sess.model = getattr(msg, "model", None) or sess.model
             changed = False
             for block in msg.content:
                 if isinstance(block, TextBlock):
@@ -761,6 +909,10 @@ class SessionManager:
                     if isinstance(block, ToolResultBlock):
                         progress.mark_result(block)
                 await self._push_progress(sess)
+        elif isinstance(msg, SystemMessage) and msg.subtype == "init":
+            # The CLI names the model it connected with; that beats guessing
+            # from settings.json, and it lands before the first text block.
+            sess.model = msg.data.get("model") or sess.model
         elif isinstance(msg, ResultMessage):
             session_id = getattr(msg, "session_id", None)
             if session_id:

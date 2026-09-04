@@ -53,6 +53,8 @@ Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 | 📜 | Session transcript | `/history` reads Claude's own `.jsonl`, VS Code turns included |
 | ⏳ | Live progress | One message per turn, edited in place with the tools being run |
 | 🛡 | Safe mode | Risky tool calls ask for Telegram approval before running |
+| 🧬 | Model per session | `/model` switches one session's model; every answer is footed with the model that wrote it |
+| 🎚 | Effort per session | `/effort high` reconnects that session at a different reasoning depth; every answer is footed `— model · effort` |
 
 ## Telegram UX
 
@@ -373,6 +375,7 @@ projects:
     autonomy: auto            # optional; overrides global AUTONOMY_MODE
     voice: alloy               # optional; overrides global TTS_VOICE
     model: claude-opus-4-8    # optional Claude model for this project
+    effort: high              # optional low|medium|high|xhigh|max
     system_prompt_extra: ""   # optional extra instructions appended to system prompt
 
   - name: api
@@ -418,6 +421,22 @@ requires `/var/lib/voice-bridge` to exist and be writable for a `--user` unit. E
   `systemctl daemon-reload && systemctl enable --now voice-bridge.service` — systemd's
   `StateDirectory=voice-bridge` then provisions `/var/lib/voice-bridge` automatically.
 
+### Applying code changes
+
+After `git pull` or any edit under `src/`, restart the service — that is the whole
+step, there is nothing to build:
+
+```bash
+systemctl --user restart voice-bridge
+```
+
+`pip install -e .` is an editable install, so the venv points straight at `src/` and
+the restarted process picks up the new code. Re-run `pip install -e .` only when
+`pyproject.toml` changes (new dependency or entry point).
+
+> A restart kills any turn the agent is running mid-flight, without telling Telegram.
+> Restart while the bot is idle.
+
 Logs and status:
 
 ```bash
@@ -447,8 +466,17 @@ journalctl --user -u voice-bridge -f
 | ⛔ | `/stop [project]` | Interrupt and restart active or named project, clearing queued work |
 | 📡 | `/status [project]` | Ask a project for a quick status update |
 | 🛡 | `/mode <auto\|full\|safe\|ask> [project]` | Set autonomy globally or per project |
+| 🧬 | `/model [name] [project]` | Show or switch the model; inside a session topic it switches only that session |
+| 🎚 | `/effort <low\|medium\|high\|xhigh\|max\|default> [project]` | Reasoning effort; reconnects the session on its own session id, so context survives |
 | 🔊 | `/voice list` / `/voice <name> [for <project>]` | List or set TTS voices |
 | 🧠 | `/engine <auto\|openai\|piper\|together>` | Switch TTS backend live |
+
+Every answer ends with `— model · effort`, e.g. `— opus-4-8 · max`, and `/model`
+or `/effort` with no arguments prints the same line for the session you are in.
+The model is the one that actually wrote the turn (the SDK reports it per
+message); the effort is whatever `/effort` set. Before a session has answered
+once neither is knowable, so both fall back to `model` and `effortLevel` in your
+Claude Code `settings.json` — read once at startup, like the CLI reads them.
 
 Telegram turns are mirrored into each project's `.claude/voice-bridge-chat.md`
 so the voice/text conversation is visible from the IDE file tree. `/history`
@@ -675,6 +703,11 @@ See [`LICENSE`](LICENSE) and [`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md).
   failure the bridge falls back to text-only and logs the error.
 - **DB write errors:** ensure the directory in `DB_PATH` exists and is writable by the
   service user (see the systemd `DB_PATH` note above).
+- **`400 ... Claude Code X does not support this model`:** the Agent SDK spawns its
+  own bundled `claude` binary (`.venv/.../claude_agent_sdk/_bundled/claude`) and
+  prefers it over the one on `PATH`, so updating Claude Code itself changes nothing
+  here. Upgrade the SDK instead — `pip install -U claude-agent-sdk` — then restart the
+  service.
 - **Whisper slow / no GPU:** install CUDA-compatible torch before installing
   faster-whisper for GPU acceleration.
 

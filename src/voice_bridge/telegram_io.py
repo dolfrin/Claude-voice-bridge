@@ -74,6 +74,9 @@ class Controls(Protocol):
     async def refresh_projects(self) -> int: ...
     async def set_mode(self, project: str | None, mode: str) -> None: ...
     async def set_voice(self, project: str | None, voice: str) -> None: ...
+    async def set_model(self, target: str | None, model: str | None) -> None: ...
+    def model_text(self, target: str | None) -> str: ...
+    async def set_effort(self, target: str | None, effort: str | None) -> str: ...
     async def set_engine(self, name: str) -> None: ...
     async def interrupt(self, project: str | None) -> str: ...
 
@@ -116,6 +119,8 @@ _BOT_COMMANDS = [
     BotCommand("off", "⏸ Disable one project or all"),
     BotCommand("stop", "⛔ Interrupt current work"),
     BotCommand("mode", "🛡 Change safe/full/ask mode"),
+    BotCommand("model", "🧬 Show or switch the model"),
+    BotCommand("effort", "🎚 Change reasoning effort"),
     BotCommand("voice", "🔊 List or set TTS voice"),
     BotCommand("engine", "🧠 Change TTS backend"),
 ]
@@ -1624,6 +1629,50 @@ class TelegramIO:
         await self.controls.set_mode(project, mode)
         await msg.reply_text(f"mode {mode} for {project or 'all'}")
 
+    async def _cmd_model(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show or switch the model, for this session or a whole project.
+
+        Inside a session topic the switch stays in that session: the sub-topics
+        exist to keep two tasks apart, so a model picked for one must not follow
+        the other. Named with a project it becomes that project's default.
+        """
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        args = context.args or []
+        target = self._target_conversation(msg) if not args[1:] else args[1]
+        if not args:
+            await msg.reply_text(self.controls.model_text(target))
+            return
+        name = None if args[0] in ("default", "reset") else args[0]
+        await self.controls.set_model(target, name)
+        await msg.reply_text(f"model {name or 'default'} for {target or 'all'}")
+
+    async def _cmd_effort(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Set reasoning effort for this session, or for a named project.
+
+        Effort can only be given to the CLI at connect time, so this reconnects
+        the session on its own session id — the context survives, the wait does
+        not.
+        """
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        args = context.args or []
+        target = args[1] if args[1:] else self._target_conversation(msg)
+        if not args:
+            await msg.reply_text(self.controls.model_text(target))
+            return
+        if target is None:
+            await msg.reply_text("Run /effort inside a session topic, or name a project.")
+            return
+        level = None if args[0] in ("default", "reset") else args[0]
+        await msg.reply_text(await self.controls.set_effort(target, level))
+
     async def _cmd_voice(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -2226,6 +2275,10 @@ class TelegramIO:
             CommandHandler("stop", self._cmd_stop, filters=only_me))
         app.add_handler(
             CommandHandler("mode", self._cmd_mode, filters=only_me))
+        app.add_handler(
+            CommandHandler("model", self._cmd_model, filters=only_me))
+        app.add_handler(
+            CommandHandler("effort", self._cmd_effort, filters=only_me))
         app.add_handler(
             CommandHandler("voice", self._cmd_voice, filters=only_me))
         app.add_handler(

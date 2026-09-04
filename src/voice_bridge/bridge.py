@@ -42,7 +42,7 @@ from .config import (
 from .discovery import discover_projects, merge_projects
 from .routing import Store, project_of
 from .sanitizer import prepare_outbound, to_spoken
-from .sessions import SessionManager
+from .sessions import SessionManager, settings_effort, short_model
 from .stt import Transcriber
 from .telegram_io import TelegramIO, tail_for_telegram
 from .tts import get_tts
@@ -625,6 +625,23 @@ class _Controls:
         # No notice needed any more: the mode is read per tool call, so a live
         # switch cannot drop an in-flight turn.
 
+    async def set_model(self, target: str | None, model: str | None) -> None:
+        targets = [target] if target is not None else list(self._mirror)
+        for name in targets:
+            await self._sessions.set_model(name, model)
+
+    def model_text(self, target: str | None) -> str:
+        """One line answering both /model and /effort: what is running right now."""
+        if target is None:
+            return "Run this inside a session topic, or name a project."
+        effort = self._sessions.effort_of(target) or settings_effort() or "high"
+        return f"{target}: {short_model(self._sessions.model_of(target))} · {effort}"
+
+    async def set_effort(self, target: str | None, effort: str | None) -> str:
+        if target is None:
+            return "Run /effort inside a session topic, or name a project."
+        return await self._sessions.set_effort(target, effort)
+
     async def set_voice(self, project: str | None, voice: str) -> None:
         targets = [project] if project is not None else list(self._mirror)
         for name in targets:
@@ -743,6 +760,18 @@ async def build() -> Wiring:
     sessions_ref: dict = {}
 
     class _LazySessions:
+        """Forward to the SessionManager that build() creates later.
+
+        Same lesson as ``_LazyTelegram`` above: a method added to
+        SessionManager without a wrapper here failed at runtime for the first
+        user who hit that path, never in tests. The wrappers below stay only
+        because they answer sanely BEFORE the manager exists; everything else
+        is forwarded by name.
+        """
+
+        def __getattr__(self, name):
+            return getattr(sessions_ref["sm"], name)
+
         def project(self, name):
             sm = sessions_ref.get("sm")
             return sm.project(name) if sm is not None else None
@@ -750,33 +779,6 @@ async def build() -> Wiring:
         def names(self):
             sm = sessions_ref.get("sm")
             return sm.names() if sm is not None and hasattr(sm, "names") else []
-
-        async def deliver(self, project, text):
-            await sessions_ref["sm"].deliver(project, text)
-
-        async def set_enabled(self, project, enabled):
-            await sessions_ref["sm"].set_enabled(project, enabled)
-
-        async def set_mode(self, project, mode):
-            await sessions_ref["sm"].set_mode(project, mode)
-
-        async def interrupt(self, project):
-            return await sessions_ref["sm"].interrupt(project)
-
-        def add_projects(self, projects):
-            return sessions_ref["sm"].add_projects(projects)
-
-        async def open(self, project, resume=None, fork=False):
-            return await sessions_ref["sm"].open(project, resume=resume, fork=fork)
-
-        async def stage(self, project, resume=None):
-            return await sessions_ref["sm"].stage(project, resume=resume)
-
-        async def attach(self, key, fork=False):
-            return await sessions_ref["sm"].attach(key, fork=fork)
-
-        async def close(self, key):
-            return await sessions_ref["sm"].close(key)
 
         def is_running(self, key):
             sm = sessions_ref.get("sm")
