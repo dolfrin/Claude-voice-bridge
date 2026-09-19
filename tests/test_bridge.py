@@ -2074,7 +2074,7 @@ async def test_build_wires_and_run_loop(monkeypatch):
     monkeypatch.setattr(bridge_mod, "SessionManager",
                         lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None: telegram)
+                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None: telegram)
 
     wired = await build()
     assert store.inited == 1
@@ -2118,7 +2118,7 @@ async def test_build_inbound_forwards_disabled_project_prompt(monkeypatch):
     monkeypatch.setattr(
         bridge_mod,
         "TelegramIO",
-        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None: telegram,
+        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None: telegram,
     )
 
     wired = await build()
@@ -2154,7 +2154,7 @@ async def test_build_approval_send_uses_alert_voice_and_token(monkeypatch):
         return approvals
 
     def capture_tg(cfg_, on_user_message, controls, on_approval=None,
-                   on_always_allow=None):
+                   on_always_allow=None, on_sent=None):
         captured["on_approval"] = on_approval
         captured["on_always_allow"] = on_always_allow
         return telegram
@@ -2228,7 +2228,7 @@ async def test_build_reloads_created_projects_and_applies_overrides(tmp_path, mo
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None: FakeTelegram())
 
     await build()
 
@@ -2266,7 +2266,7 @@ async def test_build_skips_created_project_missing_on_disk(tmp_path, monkeypatch
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None: FakeTelegram())
 
     await build()
 
@@ -2310,7 +2310,7 @@ async def test_persisted_mode_override_survives_rebuild(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None: FakeTelegram())
 
     # First boot: qwing runs at the yaml autonomy "full".
     w1 = await build()
@@ -2633,7 +2633,7 @@ async def test_run_until_stopped_starts_and_cancels_scheduler(monkeypatch):
                         lambda send_question, timeout, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None: telegram)
+                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None: telegram)
 
     state = {"called": False, "cancelled": False}
 

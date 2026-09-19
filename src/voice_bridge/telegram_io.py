@@ -364,6 +364,7 @@ class TelegramIO:
         controls: Controls,
         on_approval: Callable[[int, bool], bool] | None = None,
         on_always_allow: Callable[[int], Awaitable[bool]] | None = None,
+        on_sent: Callable[[int, str], Awaitable] | None = None,
     ) -> None:
         self.cfg = cfg
         self.on_user_message = on_user_message
@@ -377,6 +378,11 @@ class TelegramIO:
         # auto-approve. Wired in bridge; a failure here must never break the
         # (already-resolved-as-allow) approval — it degrades to allow-once.
         self._on_always_allow = on_always_allow
+        # Records (message_id, project) so a quote-reply to something WE sent
+        # outside the normal outbound path (the /live stream, a permission
+        # prompt) routes back to the right project instead of silently falling
+        # back to whatever was last active.
+        self._on_sent = on_sent
         self.app: Application | None = None
         self._pending_off_sends: dict[str, tuple[str, str]] = {}
         self._pending_off_seq = 0
@@ -1712,6 +1718,41 @@ class TelegramIO:
             await self._attach_live(str(best.pid))
         return await self.live_send(text)
 
+    def _project_for_cwd(self, cwd: str) -> str | None:
+        """The bridge project whose directory contains *cwd*, if any."""
+        if not cwd:
+            return None
+        try:
+            target = Path(cwd).resolve()
+        except (OSError, ValueError):
+            return None
+        best = None
+        for row in self.controls.snapshot():
+            raw = row.get("cwd") or ""
+            if not raw:
+                continue
+            try:
+                path = Path(raw).resolve()
+            except (OSError, ValueError):
+                continue
+            if path == target or path in target.parents:
+                if best is None or len(str(path)) > len(str(best[1])):
+                    best = (row["project"], path)
+        return best[0] if best else None
+
+    async def _remember_sent(self, message, cwd: str) -> None:
+        """Map a message we sent to the project it belongs to; never raises."""
+        mid = getattr(message, "message_id", None)
+        if message is None or mid is None or self._on_sent is None:
+            return
+        project = self._project_for_cwd(cwd)
+        if project is None:
+            return
+        try:
+            await self._on_sent(mid, project)
+        except Exception:  # noqa: BLE001 - routing memory is best-effort
+            logger.exception("could not map message %s to %s", mid, project)
+
     async def _send_plain(self, text: str, reply_markup=None):
         """Plain message to the owner (optionally with buttons); never raises.
 
@@ -1855,9 +1896,10 @@ class TelegramIO:
                 chunks = _chunk_text(body)
                 for i, chunk in enumerate(chunks):
                     # Buttons ride the LAST chunk, right under the options.
-                    await self._send_plain(
+                    message = await self._send_plain(
                         chunk, markup if i == len(chunks) - 1 else None
                     )
+                    await self._remember_sent(message, session.cwd)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - the tail must never take the bot down
@@ -1917,6 +1959,7 @@ class TelegramIO:
         message = await self._send_plain(body, markup)
         if message is not None:
             self._perm_pending[ident] = message
+            await self._remember_sent(message, str(data.get("cwd") or ""))
 
     async def _expire_permissions(self, directory: Path) -> None:
         """Mark buttons dead once the editor session stops waiting.

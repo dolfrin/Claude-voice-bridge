@@ -1367,6 +1367,9 @@ async def build() -> Wiring:
         controls,
         on_approval=approvals.resolve_token,
         on_always_allow=make_on_always_allow(approvals, store),
+        # So a quote-reply to a /live stream line or a permission prompt routes
+        # back to that project instead of falling through to the last-active one.
+        on_sent=store.map_message,
     )
     telegram_ref["io"] = telegram
     controls.attach_telegram(telegram)

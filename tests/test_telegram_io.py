@@ -3618,3 +3618,37 @@ def test_answering_clears_the_pending_prompt(tmp_path, monkeypatch):
 
     assert io.answer_permission("abc", True) is True
     assert io._perm_pending == {}                    # answered, never expired
+
+
+@pytest.mark.asyncio
+async def test_sent_live_message_is_mapped_to_its_project():
+    # A quote-reply only routes if the bridge knows which project the message
+    # belongs to. The /live stream and permission prompts bypass the normal
+    # outbound path, so they must register themselves.
+    mapped: list[tuple[int, str]] = []
+
+    async def on_sent(mid, project):
+        mapped.append((mid, project))
+
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls, on_sent=on_sent)
+    message = MagicMock(message_id=777)
+
+    # cwd of the qwing row in FakeControls' snapshot, plus a subdirectory
+    cwd = controls.snapshot()[0]["cwd"]
+    await io._remember_sent(message, cwd + "/src")
+
+    assert mapped == [(777, "qwing")]
+
+
+@pytest.mark.asyncio
+async def test_sent_message_outside_any_project_is_not_mapped():
+    mapped: list[tuple[int, str]] = []
+
+    async def on_sent(mid, project):
+        mapped.append((mid, project))
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), on_sent=on_sent)
+    await io._remember_sent(MagicMock(message_id=1), "/tmp/somewhere-else")
+
+    assert mapped == []
