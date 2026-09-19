@@ -3565,3 +3565,17 @@ def test_answer_permission_refuses_unsafe_ids(ident, tmp_path, monkeypatch):
 
     assert io.answer_permission(ident, True) is False
     assert list(tmp_path.glob("*")) == []
+
+
+def test_live_marker_written_on_attach_and_cleared_on_detach(tmp_path, monkeypatch):
+    # The Stop hook reads this file to stay quiet for the session we already
+    # stream, so a stale marker would silence a session nobody is watching.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    marker = tmp_path / ".voice-bridge-live"
+    monkeypatch.setattr(type(io), "live_marker", staticmethod(lambda: marker))
+
+    io._write_live_marker("sess-1")
+    assert marker.read_text() == "sess-1"
+
+    io._detach_live()
+    assert not marker.exists()

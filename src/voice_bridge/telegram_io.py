@@ -1673,6 +1673,41 @@ class TelegramIO:
             await self._send_plain(f"⚠️ Nepavyko pasiekti sesijos {session.pid}.")
             return False
 
+    async def live_route(self, cwd: str, text: str) -> bool:
+        """Send *text* to the editor session already open on *cwd*, if any.
+
+        This is what keeps a project's work in ONE place: when a session for
+        that directory is already running in the editor, a Telegram message
+        joins it instead of the bridge spawning a second, invisible session
+        nobody is watching. Attaches on first use so replies stream back too.
+        Returns False when no such session is running, and the caller falls
+        back to the bridge's own session exactly as before.
+        """
+        if not cwd or not text.strip():
+            return False
+        try:
+            sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
+        except Exception:  # noqa: BLE001 - never break routing over this
+            logger.exception("live: could not list sessions")
+            return False
+        target = Path(cwd).resolve()
+        best = None
+        for session in sessions:
+            try:
+                path = Path(session.cwd).resolve()
+            except (OSError, ValueError):
+                continue
+            # The session may sit in a subdirectory of the project.
+            if path == target or target in path.parents:
+                # Prefer the closest match to the project root.
+                if best is None or len(str(path)) < len(str(Path(best.cwd))):
+                    best = session
+        if best is None:
+            return False
+        if self._live_session is None or self._live_session.pid != best.pid:
+            await self._attach_live(str(best.pid))
+        return await self.live_send(text)
+
     async def _send_plain(self, text: str, reply_markup=None) -> None:
         """Plain message to the owner (optionally with buttons); never raises."""
         try:
@@ -1727,6 +1762,7 @@ class TelegramIO:
             return f"Sesija {pid_str} nebegyva — paleisk /live iš naujo."
         self._detach_live()
         self._live_session = session
+        self._write_live_marker(session.session_id)
         self._live_task = asyncio.create_task(self._tail_live(session))
         title = live.title_of(Path.home() / ".claude" / "projects", session.session_id)
         return (
@@ -1734,10 +1770,32 @@ class TelegramIO:
             "Rašyk čia — nukeliaus į tą sesiją. /live off atjungti."
         )
 
+    @staticmethod
+    def live_marker() -> Path:
+        """File naming the session we are streaming, read by the Stop hook.
+
+        While we tail a session, its output already reaches Telegram, so the
+        editor's "finished" notification would be the same text twice. The hook
+        reads this and stays quiet for exactly that session."""
+        return Path.home() / ".claude" / ".voice-bridge-live"
+
+    def _write_live_marker(self, session_id: str | None) -> None:
+        """Publish (or clear) the attached session id; never raises."""
+        try:
+            marker = self.live_marker()
+            if session_id:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(session_id)
+            elif marker.exists():
+                marker.unlink()
+        except OSError:
+            logger.exception("live: could not update the marker file")
+
     def _detach_live(self) -> None:
         """Stop tailing and forget the attachment (idempotent)."""
         task, self._live_task = self._live_task, None
         self._live_session = None
+        self._write_live_marker(None)
         if task is not None:
             task.cancel()
 

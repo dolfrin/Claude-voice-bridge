@@ -469,6 +469,13 @@ def make_inbound(
             return
         if urgent and hasattr(sessions, "interrupt"):
             await sessions.interrupt(project)
+        # Prefer the editor session already open on this project: work stays in
+        # the ONE place the user is actually looking at, instead of the bridge
+        # spawning a second, invisible session for the same directory. Falls
+        # back to our own session when the editor has none open.
+        proj = sessions.project(project) if hasattr(sessions, "project") else None
+        if proj is not None and await telegram.live_route(proj.cwd, text):
+            return
         await sessions.deliver(project, text)
 
     return inbound

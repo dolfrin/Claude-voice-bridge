@@ -194,6 +194,8 @@ class FakeTelegram:
         self.live_session = None
         self.live_sent: list[str] = []
         self.live_send_result = True
+        self.live_routed: list[tuple[str, str]] = []
+        self.live_route_result = False
 
     def live_target(self):
         return self.live_session
@@ -201,6 +203,12 @@ class FakeTelegram:
     async def live_send(self, text):
         self.live_sent.append(text)
         return self.live_send_result
+
+    async def live_route(self, cwd, text):
+        # Default False = no editor session open for that project, so inbound
+        # falls back to the bridge's own session (the pre-existing behaviour).
+        self.live_routed.append((cwd, text))
+        return self.live_route_result
 
     def pending_ask_token_for_message(self, message_id):
         return self._ask_by_message.get(message_id)
@@ -2654,3 +2662,34 @@ async def test_run_until_stopped_starts_and_cancels_scheduler(monkeypatch):
     assert telegram.stopped == 1
     assert sessions.stopped == 1
 
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_prefers_the_open_editor_session():
+    # The whole point: when the editor already has a session on that project,
+    # the message joins it instead of the bridge spawning a second, invisible
+    # session for the same directory.
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()
+    telegram.live_route_result = True  # an editor session is open
+
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+    await inbound(_msg(reply_to=None, text="pataisyk testus"))
+
+    assert telegram.live_routed and telegram.live_routed[0][1] == "pataisyk testus"
+    assert sessions.delivered == []  # no second session spawned
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_falls_back_when_no_editor_session_open():
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()
+    telegram.live_route_result = False  # nothing open in the editor
+
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+    await inbound(_msg(reply_to=None, text="pataisyk testus"))
+
+    assert telegram.live_routed  # it looked
+    assert sessions.delivered == [("qwing", "pataisyk testus")]  # bridge session
