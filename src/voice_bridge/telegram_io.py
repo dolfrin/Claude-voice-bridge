@@ -25,6 +25,7 @@ import html
 import json
 import logging
 import re
+import time
 import random
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol, TypeVar
@@ -1910,6 +1911,17 @@ class TelegramIO:
     # --- editor permission prompts, answerable from here ------------------
 
     @staticmethod
+    def alive_marker() -> Path:
+        """Heartbeat the editor-side gate checks before it blocks anything.
+
+        Without it a gate would stall a tool call for its full timeout whenever
+        the bridge happens to be down — the worst possible failure for someone
+        sitting at the keyboard. Refreshed every watcher tick; the gate treats
+        a stale or missing file as "bridge not running, do not interfere".
+        """
+        return Path.home() / ".claude" / ".voice-bridge-alive"
+
+    @staticmethod
     def perm_dir() -> Path:
         """Where the IDE hook drops permission requests and reads answers."""
         return Path.home() / ".claude" / ".voice-bridge-perm"
@@ -1926,6 +1938,12 @@ class TelegramIO:
         while True:
             try:
                 await asyncio.sleep(1.0)
+                try:
+                    marker = self.alive_marker()
+                    marker.parent.mkdir(parents=True, exist_ok=True)
+                    marker.write_text(str(int(time.time())))
+                except OSError:
+                    logger.exception("perm: could not refresh the heartbeat")
                 try:
                     requests = sorted(directory.glob("*.req.json"))
                 except OSError:
