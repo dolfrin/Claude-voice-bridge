@@ -3546,6 +3546,7 @@ async def test_liveans_callback_when_detached_says_so():
 def test_answer_permission_writes_the_decision(tmp_path, monkeypatch):
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     monkeypatch.setattr(type(io), "perm_dir", staticmethod(lambda: tmp_path))
+    (tmp_path / "abc123.req.json").write_text("{}")   # the hook is still waiting
 
     assert io.answer_permission("abc123", True) is True
     assert (tmp_path / "abc123.ans").read_text() == "allow"
@@ -3615,6 +3616,7 @@ def test_answering_clears_the_pending_prompt(tmp_path, monkeypatch):
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
     monkeypatch.setattr(type(io), "perm_dir", staticmethod(lambda: tmp_path))
     io._perm_pending["abc"] = AsyncMock()
+    (tmp_path / "abc.req.json").write_text("{}")      # the hook is still waiting
 
     assert io.answer_permission("abc", True) is True
     assert io._perm_pending == {}                    # answered, never expired
@@ -3652,3 +3654,16 @@ async def test_sent_message_outside_any_project_is_not_mapped():
     await io._remember_sent(MagicMock(message_id=1), "/tmp/somewhere-else")
 
     assert mapped == []
+
+
+def test_answer_permission_refuses_when_the_session_stopped_waiting(tmp_path, monkeypatch):
+    # No request file means the editor gave up and is asking there instead.
+    # Writing an answer nobody reads would report success while the dialog
+    # stays open — the exact confusing case this guards.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    monkeypatch.setattr(type(io), "perm_dir", staticmethod(lambda: tmp_path))
+    io._perm_pending["gone"] = AsyncMock()
+
+    assert io.answer_permission("gone", True) is False
+    assert list(tmp_path.glob("*.ans")) == []
+    assert io._perm_pending == {}

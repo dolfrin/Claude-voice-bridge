@@ -988,7 +988,9 @@ class TelegramIO:
                 await query.edit_message_text(
                     "✅ Leista." if allow else "❌ Neleista.")
             else:
-                await query.edit_message_text("⚠️ Nepavyko atsakyti.")
+                # Almost always: the editor session stopped waiting before the
+                # tap landed, so it is already asking there instead.
+                await query.edit_message_text("⌛ Per vėlu — atsakyk editoriuje.")
             return
         if action == "liveans":
             # Answer a live session's plain-text question by sending the chosen
@@ -1986,6 +1988,12 @@ class TelegramIO:
             return False
         try:
             directory = self.perm_dir()
+            # The hook deletes its request the moment it gives up. Writing an
+            # answer nobody is waiting for would report success while the editor
+            # dialog stays open — exactly the confusing case. Check first.
+            if not (directory / f"{ident}.req.json").exists():
+                self._perm_pending.pop(ident, None)
+                return False
             directory.mkdir(parents=True, exist_ok=True)
             (directory / f"{ident}.ans").write_text("allow" if allow else "deny")
             self._perm_pending.pop(ident, None)   # answered, never expire it
