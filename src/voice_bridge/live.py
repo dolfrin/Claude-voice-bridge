@@ -359,3 +359,47 @@ def _tool_line(block: dict) -> str:
             detail = detail[: _DETAIL_LEN - 1] + "…"
         return f"{name} {detail}"
     return name
+
+
+# A numbered option in a PLAIN-TEXT question: "1) Ship it", "2. Wait", "3 - Stop".
+# Two digits max, so a list item can never be confused with a year or a count.
+_OPTION_RE = re.compile(r"^\s*(\d{1,2})\s*[).\]:-]\s+(\S.*?)\s*$")
+# A question answerable this way needs at least this many options; one "1)" is
+# far more likely to be a list item in ordinary prose than a choice.
+_MIN_OPTIONS = 2
+# Longer than this and it is prose that happens to start with a digit.
+_OPTION_MAX = 120
+
+
+def parse_options(text: str) -> list[str]:
+    """The numbered options offered in a plain-text question, in order, or [].
+
+    ``AskUserQuestion``'s own picker can only be answered in the editor that
+    raised it, so the bridge asks live sessions to put their questions in plain
+    text instead (see :data:`PEER_NOTE`). Models write those as a numbered list,
+    which is enough to offer real buttons: this pulls the labels out so the
+    caller can send the chosen NUMBER back down the socket, exactly as the user
+    would have typed it.
+
+    Deliberately strict — a miss just means no buttons and the user answers by
+    typing, while a false positive puts buttons on something that is not a
+    question. Requires at least :data:`_MIN_OPTIONS` options numbered 1..n with
+    no gaps, each short enough to be a label. Never raises.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return []
+    found: list[tuple[int, str]] = []
+    for line in text.splitlines():
+        match = _OPTION_RE.match(line)
+        if match is None:
+            continue
+        label = match.group(2)
+        if len(label) > _OPTION_MAX:
+            return []  # prose, not a choice list
+        found.append((int(match.group(1)), label))
+    if len(found) < _MIN_OPTIONS:
+        return []
+    # Must be 1..n in order: a stray "2)" mid-paragraph is not a menu.
+    if [n for n, _ in found] != list(range(1, len(found) + 1)):
+        return []
+    return [label for _, label in found]

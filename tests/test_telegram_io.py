@@ -4,6 +4,7 @@ and run()/stop() lifecycle. All telegram network I/O is mocked."""
 
 import asyncio
 import datetime
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -3490,3 +3491,50 @@ async def test_cmd_schedule_non_owner_ignored():
 
     assert controls.calls == []
     msg.reply_text.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
+# /live answer buttons: tapping sends the chosen number down the socket
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_liveans_callback_sends_the_number_to_the_session(monkeypatch):
+    from voice_bridge import live as live_mod
+
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send(socket_path, text, from_name="telegram"):
+        sent.append((socket_path, text))
+
+    monkeypatch.setattr(live_mod, "send", fake_send)
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.app = MagicMock()
+    io.app.bot = AsyncMock()
+    io._live_session = SimpleNamespace(pid=42, socket_path="/tmp/x.sock")
+
+    query = AsyncMock()
+    query.data = "liveans:2"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    assert sent == [("/tmp/x.sock", "2")]
+    assert "2" in query.edit_message_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_liveans_callback_when_detached_says_so():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.app = MagicMock()
+    io.app.bot = AsyncMock()
+    io._live_session = None  # detached
+
+    query = AsyncMock()
+    query.data = "liveans:1"
+    query.from_user = MagicMock(id=42)
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    assert "Nebeprisijungta" in query.edit_message_text.await_args.args[0]

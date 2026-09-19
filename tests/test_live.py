@@ -277,3 +277,46 @@ def test_end_of_reports_the_current_size(tmp_path):
     assert live.end_of(path) == 4
     assert live.end_of(None) == 0
     assert live.end_of(tmp_path / "missing.jsonl") == 0
+
+
+# ---------------------------------------------------------------------------
+# parse_options — plain-text questions become real buttons
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Ar mergint?\n1) Taip\n2) Ne\n3) Palauk", ["Taip", "Ne", "Palauk"]),
+        ("What now?\n1. Ship it\n2. Wait", ["Ship it", "Wait"]),
+        ("pick\n1 - a\n2 - b", ["a", "b"]),
+    ],
+)
+def test_parse_options_finds_numbered_choices(text, expected):
+    assert live.parse_options(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "only one\n1) Taip",                      # a single item is a list, not a menu
+        "gap\n1) a\n3) b",                        # 1..n with no gaps, or nothing
+        "prose\nIn 2024 we shipped x\n1) a",      # stray number in a paragraph
+        "bullets\n- a\n- b",                      # not numbered
+        "",
+    ],
+)
+def test_parse_options_stays_silent_when_unsure(text):
+    # A miss just means no buttons (the user types instead); a false positive
+    # would put buttons on something that is not a question.
+    assert live.parse_options(text) == []
+
+
+def test_parse_options_rejects_long_lines_as_prose():
+    long_line = "1) " + "x" * 200
+    assert live.parse_options(f"q\n{long_line}\n2) short") == []
+
+
+def test_parse_options_never_raises_on_odd_input():
+    assert live.parse_options(None) == []
+    assert live.parse_options(12345) == []

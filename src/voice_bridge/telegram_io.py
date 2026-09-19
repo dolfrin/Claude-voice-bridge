@@ -960,6 +960,17 @@ class TelegramIO:
         if action == "live":
             await query.edit_message_text(await self._attach_live(index_str))
             return
+        if action == "liveans":
+            # Answer a live session's plain-text question by sending the chosen
+            # number, exactly as typing it would.
+            if self._live_session is None:
+                await query.edit_message_text("Nebeprisijungta prie sesijos.")
+                return
+            if await self.live_send(index_str):
+                await query.edit_message_text(f"➡️ Atsakyta: {index_str}")
+            else:
+                await query.edit_message_text("⚠️ Nepavyko nusiųsti atsakymo.")
+            return
         if action == "cost":
             # Info action: reply with a fresh message, do not touch the panel.
             await query.message.reply_text(await self.controls.cost_summary())
@@ -1642,11 +1653,13 @@ class TelegramIO:
             await self._send_plain(f"⚠️ Nepavyko pasiekti sesijos {session.pid}.")
             return False
 
-    async def _send_plain(self, text: str) -> None:
-        """Button-less message to the owner; never raises."""
+    async def _send_plain(self, text: str, reply_markup=None) -> None:
+        """Plain message to the owner (optionally with buttons); never raises."""
         try:
             await _send_with_retry(
-                lambda: self.app.bot.send_message(chat_id=self._chat_id, text=text)
+                lambda: self.app.bot.send_message(
+                    chat_id=self._chat_id, text=text, reply_markup=reply_markup
+                )
             )
         except TelegramError:
             logger.exception("live: could not send notice")
@@ -1737,8 +1750,28 @@ class TelegramIO:
                 # One message per poll, not per line: a busy session emits a
                 # tool line every second or two, and separate messages are a
                 # wall of notifications with the real answer buried in it.
-                for chunk in _chunk_text("\n".join(lines)):
-                    await self._send_plain(chunk)
+                body = "\n".join(lines)
+                # A plain-text question with numbered options becomes real
+                # buttons: tapping sends the NUMBER back down the socket, the
+                # same thing the user would have typed. (An AskUserQuestion
+                # picker is NOT answerable this way — it is answered in the
+                # editor that raised it — so live.render says exactly that
+                # instead, and parse_options finds nothing there to tap.)
+                options = live.parse_options(body)
+                markup = None
+                if options:
+                    markup = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            f"{i}. {label[:40]}", callback_data=f"liveans:{i}"
+                        )]
+                        for i, label in enumerate(options, 1)
+                    ])
+                chunks = _chunk_text(body)
+                for i, chunk in enumerate(chunks):
+                    # Buttons ride the LAST chunk, right under the options.
+                    await self._send_plain(
+                        chunk, markup if i == len(chunks) - 1 else None
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - the tail must never take the bot down
