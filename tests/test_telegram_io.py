@@ -3538,3 +3538,30 @@ async def test_liveans_callback_when_detached_says_so():
     await io._handle_callback(MagicMock(callback_query=query), MagicMock())
 
     assert "Nebeprisijungta" in query.edit_message_text.await_args.args[0]
+
+
+# --------------------------------------------------------------------------
+# Editor permission prompts answered from Telegram
+# --------------------------------------------------------------------------
+def test_answer_permission_writes_the_decision(tmp_path, monkeypatch):
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    monkeypatch.setattr(type(io), "perm_dir", staticmethod(lambda: tmp_path))
+
+    assert io.answer_permission("abc123", True) is True
+    assert (tmp_path / "abc123.ans").read_text() == "allow"
+    assert io.answer_permission("abc123", False) is True
+    assert (tmp_path / "abc123.ans").read_text() == "deny"
+
+
+@pytest.mark.parametrize(
+    "ident", ["", "../../etc/passwd", "a/b", "x" * 200, "has space", "semi;colon"]
+)
+def test_answer_permission_refuses_unsafe_ids(ident, tmp_path, monkeypatch):
+    # The id comes back in a callback payload and is interpolated into a
+    # filename: anything that could walk out of the spool directory is refused
+    # rather than written.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    monkeypatch.setattr(type(io), "perm_dir", staticmethod(lambda: tmp_path))
+
+    assert io.answer_permission(ident, True) is False
+    assert list(tmp_path.glob("*")) == []

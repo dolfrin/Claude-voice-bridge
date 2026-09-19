@@ -22,7 +22,9 @@ from __future__ import annotations
 import asyncio
 import datetime
 import html
+import json
 import logging
+import re
 import random
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol, TypeVar
@@ -154,6 +156,10 @@ _APPROVAL_TRUNCATED_MARKER = "…[truncated]"
 # Bug fix: Telegram's bot API refuses to hand back a file over ~20 MB via
 # getFile (raises BadRequest), which used to have no handler -- the
 # attachment just vanished with no feedback to the user.
+# Permission-request ids we generate: hex + dashes only, so a callback
+# payload can never walk out of the spool directory.
+_SAFE_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,80}")
+
 _FILE_TOO_LARGE_MSG = (
     "Failas per didelis (Telegram botų riba ~20 MB) — atsiųsk mažesnį arba per git."
 )
@@ -391,6 +397,11 @@ class TelegramIO:
         # usual), plus the task tailing its transcript back to Telegram.
         self._live_session = None
         self._live_task: asyncio.Task | None = None
+        # Editor permission prompts relayed here for an ✅/❌ tap. The IDE hook
+        # drops a request file and BLOCKS on the answer file we write back, so
+        # an unanswered request simply falls back to the editor's own prompt.
+        self._perm_task: asyncio.Task | None = None
+        self._perm_seen: set[str] = set()
 
     # --- whitelist -------------------------------------------------------
     def _allowed(self, user_id: int | None) -> bool:
@@ -959,6 +970,15 @@ class TelegramIO:
             return
         if action == "live":
             await query.edit_message_text(await self._attach_live(index_str))
+            return
+        if action == "perm":
+            ident, _, code = index_str.rpartition(":")
+            allow = code == "1"
+            if self.answer_permission(ident, allow):
+                await query.edit_message_text(
+                    "✅ Leista." if allow else "❌ Neleista.")
+            else:
+                await query.edit_message_text("⚠️ Nepavyko atsakyti.")
             return
         if action == "liveans":
             # Answer a live session's plain-text question by sending the chosen
@@ -1777,6 +1797,73 @@ class TelegramIO:
         except Exception:  # noqa: BLE001 - the tail must never take the bot down
             logger.exception("live: tail loop stopped for pid %s", session.pid)
 
+    # --- editor permission prompts, answerable from here ------------------
+
+    @staticmethod
+    def perm_dir() -> Path:
+        """Where the IDE hook drops permission requests and reads answers."""
+        return Path.home() / ".claude" / ".voice-bridge-perm"
+
+    async def _watch_permissions(self) -> None:
+        """Relay editor permission prompts here with ✅/❌ buttons.
+
+        A `PermissionRequest` hook in the editor session writes `<id>.req.json`
+        and then BLOCKS, polling for `<id>.ans`. Whatever we write there becomes
+        its decision. Never answering is safe: the hook times out and the editor
+        asks the user itself, exactly as before this existed.
+        """
+        directory = self.perm_dir()
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                try:
+                    requests = sorted(directory.glob("*.req.json"))
+                except OSError:
+                    continue
+                for path in requests:
+                    ident = path.name[: -len(".req.json")]
+                    if ident in self._perm_seen:
+                        continue
+                    try:
+                        data = json.loads(path.read_text())
+                    except (OSError, ValueError):
+                        self._perm_seen.add(ident)
+                        continue
+                    self._perm_seen.add(ident)
+                    await self._ask_permission(ident, data)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the watcher must never die
+                logger.exception("perm: watcher iteration failed")
+
+    async def _ask_permission(self, ident: str, data: dict) -> None:
+        project = str(data.get("project") or "IDE")
+        tool = str(data.get("tool") or "?")
+        detail = str(data.get("detail") or "").strip()
+        body = f"🔐 [{project}] leidimas: {tool}"
+        if detail:
+            body += f"\n{_truncate_approval_preview(detail)}"
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Leisti", callback_data=f"perm:{ident}:1"),
+            InlineKeyboardButton("❌ Neleisti", callback_data=f"perm:{ident}:0"),
+        ]])
+        await self._send_plain(body, markup)
+
+    def answer_permission(self, ident: str, allow: bool) -> bool:
+        """Write the decision the blocked editor hook is waiting for."""
+        # Only ever name a file we generated an id for; never interpolate a
+        # callback payload into a path without this guard.
+        if not ident or not _SAFE_ID_RE.fullmatch(ident):
+            return False
+        try:
+            directory = self.perm_dir()
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / f"{ident}.ans").write_text("allow" if allow else "deny")
+            return True
+        except OSError:
+            logger.exception("perm: could not write the answer for %s", ident)
+            return False
+
     async def _cmd_handoff(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1889,9 +1976,13 @@ class TelegramIO:
         await app.bot.set_my_commands(_BOT_COMMANDS)
         await app.start()
         await app.updater.start_polling()
+        self._perm_task = asyncio.create_task(self._watch_permissions())
 
     async def stop(self) -> None:
         """Stop polling and shut the Application down (idempotent)."""
+        task, self._perm_task = self._perm_task, None
+        if task is not None:
+            task.cancel()
         app = self.app
         if app is None:
             return
