@@ -47,6 +47,7 @@ _BOT_COMMANDS = [
     BotCommand("policies", "♾ Always-allow grants"),
     BotCommand("schedule", "⏰ Daily scheduled prompts"),
     BotCommand("help", "❓ Routing rules & commands"),
+    BotCommand("live", "🔗 Drive a running editor session"),
 ]
 
 # A scheduled prompt can be arbitrarily long; the plain-text listing truncates

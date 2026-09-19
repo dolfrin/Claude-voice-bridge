@@ -190,6 +190,17 @@ class FakeTelegram:
         self._single_ask = single_ask
         self._resolve_ask_result = resolve_ask_result
         self.resolved_asks: list[tuple[str, str]] = []
+        # /live: None = not attached, so inbound routes to projects as before.
+        self.live_session = None
+        self.live_sent: list[str] = []
+        self.live_send_result = True
+
+    def live_target(self):
+        return self.live_session
+
+    async def live_send(self, text):
+        self.live_sent.append(text)
+        return self.live_send_result
 
     def pending_ask_token_for_message(self, message_id):
         return self._ask_by_message.get(message_id)
@@ -2412,6 +2423,52 @@ async def test_make_inbound_urgent_name_prefix_not_hijacked_by_single_ask():
 
     assert telegram.resolved_asks == []
     assert sessions.delivered == [("qwing", "build")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_attached_live_session_gets_the_message():
+    # While attached via /live, a plain message drives that editor session
+    # instead of being delivered to a bridge project.
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()
+    telegram.live_session = object()  # attached
+
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+    await inbound(_msg(reply_to=None, text="paleisk testus"))
+
+    assert telegram.live_sent == ["paleisk testus"]
+    assert sessions.delivered == []  # NOT delivered to the project
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_live_send_failure_falls_back_to_routing():
+    # A dead socket must not swallow the message: it falls through to the
+    # normal project routing instead.
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()
+    telegram.live_session = object()
+    telegram.live_send_result = False  # socket refused
+
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+    await inbound(_msg(reply_to=None, text="tęsk"))
+
+    assert telegram.live_sent == ["tęsk"]
+    assert sessions.delivered == [("qwing", "tęsk")]
+
+
+@pytest.mark.asyncio
+async def test_make_inbound_not_attached_routes_to_project_as_before():
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()  # live_session stays None
+
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+    await inbound(_msg(reply_to=None, text="statyk"))
+
+    assert telegram.live_sent == []
+    assert sessions.delivered == [("qwing", "statyk")]
 
 
 @pytest.mark.asyncio

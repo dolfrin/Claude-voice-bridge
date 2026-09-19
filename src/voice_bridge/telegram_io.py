@@ -48,6 +48,7 @@ from telegram.ext import (
     filters,
 )
 
+from . import live
 from .approvals import _TOKEN_RE, _fold
 from .config import Config
 from .scheduler import parse_hhmm
@@ -385,6 +386,11 @@ class TelegramIO:
         # spawned by resolve_ask (which is sync). Held so the tasks are not
         # garbage-collected mid-flight; each drops itself on completion.
         self._ask_edit_tasks: set[asyncio.Task] = set()
+        # /live: the already-running Claude Code session this chat is currently
+        # driving (None = not attached, everything routes to bridge projects as
+        # usual), plus the task tailing its transcript back to Telegram.
+        self._live_session = None
+        self._live_task: asyncio.Task | None = None
 
     # --- whitelist -------------------------------------------------------
     def _allowed(self, user_id: int | None) -> bool:
@@ -950,6 +956,9 @@ class TelegramIO:
             if not future.done():
                 future.set_result(choice)
             await query.edit_message_text(f"Selected: {choice}")
+            return
+        if action == "live":
+            await query.edit_message_text(await self._attach_live(index_str))
             return
         if action == "cost":
             # Info action: reply with a fresh message, do not touch the panel.
@@ -1604,6 +1613,137 @@ class TelegramIO:
             return
         await msg.reply_text(_format_help())
 
+    # --- /live: drive an already-running Claude Code session ---------------
+    #
+    # These sessions are NOT ours: they belong to the editor or a CLI the user
+    # started, and Claude Code cannot open a second copy of one (both processes
+    # would load the .jsonl at their own start and overwrite each other's tail).
+    # So instead of resuming, we join: a line written to the session's unix
+    # socket arrives in it as a user turn, and its own transcript is tailed for
+    # the reply. While attached, plain messages go THERE instead of to a bridge
+    # project (see bridge.make_inbound).
+
+    def live_target(self):
+        """The live session this chat is driving, or None."""
+        return self._live_session
+
+    async def live_send(self, text: str) -> bool:
+        """Deliver *text* into the attached live session. False if not attached
+        or the socket refused (the envelope is Claude Code's internal wire
+        format, so a future release can break it without warning)."""
+        session = self._live_session
+        if session is None or not text.strip():
+            return False
+        try:
+            await live.send(session.socket_path, text)
+            return True
+        except Exception:  # noqa: BLE001 - never crash the inbound path
+            logger.exception("live: send failed for pid %s", session.pid)
+            await self._send_plain(f"⚠️ Nepavyko pasiekti sesijos {session.pid}.")
+            return False
+
+    async def _send_plain(self, text: str) -> None:
+        """Button-less message to the owner; never raises."""
+        try:
+            await _send_with_retry(
+                lambda: self.app.bot.send_message(chat_id=self._chat_id, text=text)
+            )
+        except TelegramError:
+            logger.exception("live: could not send notice")
+
+    async def _cmd_live(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Attach to a running Claude Code session, or `/live off` to detach."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        args = list(context.args or [])
+        if args and args[0] in {"off", "stop", "detach"}:
+            self._detach_live()
+            await msg.reply_text("🔌 Atsijungta nuo gyvos sesijos.")
+            return
+
+        sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
+        if not sessions:
+            await msg.reply_text(
+                "Gyvų Claude Code sesijų nerasta. (Senesnės sesijos be socket'o "
+                "prisijungimo nepalaiko — jas reikia paleisti iš naujo.)"
+            )
+            return
+        root = Path.home() / ".claude" / "projects"
+        rows = []
+        for s in sessions:
+            title = live.title_of(root, s.session_id) or "(be pavadinimo)"
+            rows.append([InlineKeyboardButton(
+                f"{title[:40]} · {Path(s.cwd).name}", callback_data=f"live:{s.pid}"
+            )])
+        await msg.reply_text(
+            "Prisijungti prie gyvos sesijos:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def _attach_live(self, pid_str: str) -> str:
+        """Attach to the session with this pid; returns the reply text."""
+        try:
+            pid = int(pid_str)
+        except (TypeError, ValueError):
+            return "Netinkamas sesijos id."
+        session = live.find(pid, Path.home() / ".claude" / "sessions")
+        if session is None:
+            return f"Sesija {pid_str} nebegyva — paleisk /live iš naujo."
+        self._detach_live()
+        self._live_session = session
+        self._live_task = asyncio.create_task(self._tail_live(session))
+        title = live.title_of(Path.home() / ".claude" / "projects", session.session_id)
+        return (
+            f"🔗 Prisijungta: {title or session.cwd}\n"
+            "Rašyk čia — nukeliaus į tą sesiją. /live off atjungti."
+        )
+
+    def _detach_live(self) -> None:
+        """Stop tailing and forget the attachment (idempotent)."""
+        task, self._live_task = self._live_task, None
+        self._live_session = None
+        if task is not None:
+            task.cancel()
+
+    async def _tail_live(self, session) -> None:
+        """Tail the attached session's transcript back into Telegram.
+
+        Nothing returns over the socket, so the session's own .jsonl is the
+        reply channel. Starts at the CURRENT end so attaching does not replay
+        the whole history."""
+        root = Path.home() / ".claude" / "projects"
+        path = live.transcript_of(root, session.session_id)
+        offset = live.end_of(path)
+        try:
+            while True:
+                await asyncio.sleep(1.5)
+                if self._live_session is not session:
+                    return
+                if path is None:
+                    path = live.transcript_of(root, session.session_id)
+                    offset = live.end_of(path)
+                    continue
+                try:
+                    # Already rendered to Telegram lines by read_new.
+                    lines, offset = live.read_new(path, offset)
+                except Exception:  # noqa: BLE001 - a bad read must not kill the tail
+                    logger.exception("live: transcript read failed")
+                    continue
+                if not lines:
+                    continue
+                # One message per poll, not per line: a busy session emits a
+                # tool line every second or two, and separate messages are a
+                # wall of notifications with the real answer buried in it.
+                for chunk in _chunk_text("\n".join(lines)):
+                    await self._send_plain(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the tail must never take the bot down
+            logger.exception("live: tail loop stopped for pid %s", session.pid)
+
     async def _cmd_handoff(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1693,6 +1833,8 @@ class TelegramIO:
             CommandHandler("schedule", self._cmd_schedule, filters=only_me))
         app.add_handler(
             CommandHandler("help", self._cmd_help, filters=only_me))
+        app.add_handler(
+            CommandHandler("live", self._cmd_live, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
         app.add_handler(MessageHandler(
             only_me & filters.VOICE, self._handle_voice))

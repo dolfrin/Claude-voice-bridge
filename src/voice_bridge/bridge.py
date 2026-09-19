@@ -424,6 +424,16 @@ def make_inbound(
         # resolve_ask False (blank/stale/already-answered) falls through to
         # normal routing below.
 
+        # /live: while attached to an already-running Claude Code session, plain
+        # messages drive THAT session instead of a bridge project. Placed after
+        # the approval and ask_user interceptions above (a quote-reply answering
+        # one of those still belongs to the bridge) and before project routing.
+        # A failed send falls through to normal routing rather than swallowing
+        # the message.
+        if telegram.live_target() is not None:
+            if await telegram.live_send(text):
+                return
+
         # Urgent '!' is consumed BEFORE name-prefix routing: otherwise
         # "!qwing: fix it" fails parse_name_prefix (text starts with '!', not
         # a known name) and falls back to last-active, interrupting the
@@ -1282,6 +1292,14 @@ async def build() -> Wiring:
         def resolve_ask(self, token, answer_text):
             io = telegram_ref.get("io")
             return io.resolve_ask(token, answer_text) if io is not None else False
+
+        def live_target(self):
+            io = telegram_ref.get("io")
+            return io.live_target() if io is not None else None
+
+        async def live_send(self, text):
+            io = telegram_ref.get("io")
+            return await io.live_send(text) if io is not None else False
 
     lazy_telegram = _LazyTelegram()
 
