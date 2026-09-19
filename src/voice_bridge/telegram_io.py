@@ -402,6 +402,10 @@ class TelegramIO:
         # an unanswered request simply falls back to the editor's own prompt.
         self._perm_task: asyncio.Task | None = None
         self._perm_seen: set[str] = set()
+        # ident -> the buttons message, so it can be marked expired once the
+        # editor session stops waiting (otherwise a late tap looks accepted
+        # while nothing is listening any more).
+        self._perm_pending: dict[str, object] = {}
 
     # --- whitelist -------------------------------------------------------
     def _allowed(self, user_id: int | None) -> bool:
@@ -1708,16 +1712,20 @@ class TelegramIO:
             await self._attach_live(str(best.pid))
         return await self.live_send(text)
 
-    async def _send_plain(self, text: str, reply_markup=None) -> None:
-        """Plain message to the owner (optionally with buttons); never raises."""
+    async def _send_plain(self, text: str, reply_markup=None):
+        """Plain message to the owner (optionally with buttons); never raises.
+
+        Returns the sent Message so the caller can edit it later, or None when
+        the send failed."""
         try:
-            await _send_with_retry(
+            return await _send_with_retry(
                 lambda: self.app.bot.send_message(
                     chat_id=self._chat_id, text=text, reply_markup=reply_markup
                 )
             )
         except TelegramError:
             logger.exception("live: could not send notice")
+            return None
 
     async def _cmd_live(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1889,6 +1897,7 @@ class TelegramIO:
                         continue
                     self._perm_seen.add(ident)
                     await self._ask_permission(ident, data)
+                await self._expire_permissions(directory)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - the watcher must never die
@@ -1905,7 +1914,26 @@ class TelegramIO:
             InlineKeyboardButton("✅ Leisti", callback_data=f"perm:{ident}:1"),
             InlineKeyboardButton("❌ Neleisti", callback_data=f"perm:{ident}:0"),
         ]])
-        await self._send_plain(body, markup)
+        message = await self._send_plain(body, markup)
+        if message is not None:
+            self._perm_pending[ident] = message
+
+    async def _expire_permissions(self, directory: Path) -> None:
+        """Mark buttons dead once the editor session stops waiting.
+
+        The hook deletes its request file when it gives up (its timeout is
+        shorter than a phone is patient). Leaving the buttons live after that
+        is the worst outcome: the tap looks accepted while nothing is listening
+        and the editor has already raised its own dialog. Say so instead.
+        """
+        for ident, message in list(self._perm_pending.items()):
+            if (directory / f"{ident}.req.json").exists():
+                continue
+            self._perm_pending.pop(ident, None)
+            try:
+                await message.edit_text("⌛ Per vėlu — atsakyk editoriuje.")
+            except Exception:  # noqa: BLE001 - a failed edit must not stop the watcher
+                logger.exception("perm: could not mark %s expired", ident)
 
     def answer_permission(self, ident: str, allow: bool) -> bool:
         """Write the decision the blocked editor hook is waiting for."""
@@ -1917,6 +1945,7 @@ class TelegramIO:
             directory = self.perm_dir()
             directory.mkdir(parents=True, exist_ok=True)
             (directory / f"{ident}.ans").write_text("allow" if allow else "deny")
+            self._perm_pending.pop(ident, None)   # answered, never expire it
             return True
         except OSError:
             logger.exception("perm: could not write the answer for %s", ident)

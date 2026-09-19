@@ -3579,3 +3579,42 @@ def test_live_marker_written_on_attach_and_cleared_on_detach(tmp_path, monkeypat
 
     io._detach_live()
     assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_permission_buttons_expire_when_the_editor_stops_waiting(tmp_path, monkeypatch):
+    # The hook deletes its request file when it gives up. Leaving the buttons
+    # live after that is the worst outcome: the tap looks accepted while
+    # nothing is listening and the editor has already asked instead.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    monkeypatch.setattr(type(io), "perm_dir", staticmethod(lambda: tmp_path))
+    message = AsyncMock()
+    io._perm_pending["abc"] = message
+
+    await io._expire_permissions(tmp_path)          # no request file present
+
+    assert "Per vėlu" in message.edit_text.await_args.args[0]
+    assert io._perm_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_permission_buttons_stay_live_while_the_hook_waits(tmp_path, monkeypatch):
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    monkeypatch.setattr(type(io), "perm_dir", staticmethod(lambda: tmp_path))
+    (tmp_path / "abc.req.json").write_text("{}")     # hook still blocked on it
+    message = AsyncMock()
+    io._perm_pending["abc"] = message
+
+    await io._expire_permissions(tmp_path)
+
+    message.edit_text.assert_not_awaited()
+    assert "abc" in io._perm_pending
+
+
+def test_answering_clears_the_pending_prompt(tmp_path, monkeypatch):
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    monkeypatch.setattr(type(io), "perm_dir", staticmethod(lambda: tmp_path))
+    io._perm_pending["abc"] = AsyncMock()
+
+    assert io.answer_permission("abc", True) is True
+    assert io._perm_pending == {}                    # answered, never expired
