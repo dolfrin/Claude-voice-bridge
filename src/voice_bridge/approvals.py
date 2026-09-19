@@ -660,9 +660,16 @@ class ApprovalManager:
         self,
         send_question: Callable[[str, str, str, int], Awaitable[int]],
         timeout: int,
+        notify: Callable[[str, str], Awaitable] | None = None,
     ) -> None:
         self._send_question = send_question
         self._timeout = timeout
+        # Plain (button-less) sender used to report a timed-out approval. It is
+        # separate from send_question because that one carries the Allow/Deny
+        # buttons and a token — a "this expired" notice must not render buttons
+        # that resolve nothing. Optional: without it the timeout stays silent,
+        # which is the old behaviour.
+        self._notify = notify
         # Same future object stored in both maps for dual-key resolution. The
         # numeric spaces are disjoint by construction only in intent (a token
         # and a message_id could coincide), so they are kept in SEPARATE dicts.
@@ -714,6 +721,20 @@ class ApprovalManager:
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
         except asyncio.TimeoutError:
+            # Silence here is indistinguishable from "still waiting": the
+            # question keeps sitting there unanswered while the agent has long
+            # since given up on the tool and moved on without it. Say so.
+            if self._notify is not None:
+                try:
+                    await self._notify(
+                        project,
+                        f"⏱ Neatsakyta per {self._timeout}s — atmesta: {tool_name}. "
+                        "Agentas tęsė be jo.",
+                    )
+                except Exception:  # noqa: BLE001 - the denial stands either way
+                    logger.exception(
+                        "could not report the approval timeout for %s", project
+                    )
             return False
         finally:
             self._pending.pop(message_id, None)
@@ -785,12 +806,15 @@ def make_can_use_tool(
     with no prompt. ``full`` mode is untouched and never consults policies. A
     store error while checking FAILS SAFE — it falls through to prompting,
     never auto-allowing.
+
+    The mode is read PER CALL, not captured when this factory runs: switching a
+    project between full/safe/ask then takes effect on the very next tool call
+    instead of needing the session torn down and resumed.
     """
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny  # noqa: PLC0415
 
-    mode = effective_autonomy(project, cfg)
-
     async def can_use_tool(tool_name: str, tool_input: dict, context):
+        mode = effective_autonomy(project, cfg)
         if mode == "full":
             return PermissionResultAllow()
 

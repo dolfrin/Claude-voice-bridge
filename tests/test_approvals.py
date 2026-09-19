@@ -203,6 +203,51 @@ async def test_approval_manager_timeout_denies():
 
 
 @pytest.mark.asyncio
+async def test_timeout_reports_to_the_user_when_notify_is_wired():
+    # A silent timeout is indistinguishable from "still waiting": the question
+    # sits there while the agent has already moved on without the tool.
+    told: list[tuple[str, str]] = []
+
+    async def send_question(project, text, spoken, token) -> int:
+        return 5
+
+    async def notify(project, text):
+        told.append((project, text))
+
+    mgr = ApprovalManager(send_question, timeout=0.05, notify=notify)
+    assert await mgr.request("qwing", "Bash", {"command": "git push"}) is False
+    assert told and told[0][0] == "qwing"
+    assert "Bash" in told[0][1]  # names the tool that was denied
+
+
+@pytest.mark.asyncio
+async def test_timeout_without_notify_stays_silent_and_still_denies():
+    async def send_question(project, text, spoken, token) -> int:
+        return 6
+
+    mgr = ApprovalManager(send_question, timeout=0.05)  # no notify -> old behaviour
+    assert await mgr.request("qwing", "Bash", {"command": "rm -rf x"}) is False
+
+
+@pytest.mark.asyncio
+async def test_mode_is_read_per_call_not_captured():
+    # Switching a project's mode must take effect on the NEXT tool call, without
+    # tearing the session down and resuming it.
+    proj = _proj(autonomy="ask")
+    mgr = _FakeManager(decision=False)
+    fn = make_can_use_tool(proj, _cfg(), mgr)
+
+    # ask -> the risky-free call is still prompted (and denied)
+    assert _decision_kind(await fn("Read", {"file_path": f"{CWD}/a.py"}, None)) == (
+        "PermissionResultDeny"
+    )
+    proj.autonomy = "full"  # flip it live
+    assert _decision_kind(await fn("Read", {"file_path": f"{CWD}/a.py"}, None)) == (
+        "PermissionResultAllow"
+    )
+
+
+@pytest.mark.asyncio
 async def test_resolve_unknown_returns_false():
     async def send_question(project: str, text: str, spoken: str, token: int) -> int:
         return 1

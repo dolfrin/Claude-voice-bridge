@@ -1231,7 +1231,17 @@ async def build() -> Wiring:
             approval_token=token,
         )
 
-    approvals = ApprovalManager(send_question, cfg.approval_timeout)
+    async def notify_plain(project: str, text: str) -> None:
+        """Button-less notice (used to report a timed-out approval).
+
+        Deliberately NOT send_question above: that one attaches the Allow/Deny
+        buttons and an approval token, and a "this expired" line must not render
+        buttons that would resolve nothing."""
+        await telegram_ref["io"].send_question(project, text)
+
+    approvals = ApprovalManager(
+        send_question, cfg.approval_timeout, notify=notify_plain
+    )
 
     class _LazyTelegram:
         async def send_update(self, project, voice_label, text, voice_bytes):

@@ -2051,7 +2051,7 @@ async def test_build_wires_and_run_loop(monkeypatch):
                         lambda model_name, language="lt": FakeTranscriber())
     monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
     monkeypatch.setattr(bridge_mod, "ApprovalManager",
-                        lambda send_question, timeout: FakeApprovals())
+                        lambda send_question, timeout, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager",
                         lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
@@ -2093,7 +2093,7 @@ async def test_build_inbound_forwards_disabled_project_prompt(monkeypatch):
     )
     monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
     monkeypatch.setattr(
-        bridge_mod, "ApprovalManager", lambda send_question, timeout: FakeApprovals()
+        bridge_mod, "ApprovalManager", lambda send_question, timeout, notify=None: FakeApprovals()
     )
     monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
     monkeypatch.setattr(
@@ -2130,7 +2130,7 @@ async def test_build_approval_send_uses_alert_voice_and_token(monkeypatch):
 
     captured: dict = {}
 
-    def capture_am(send_question, timeout):
+    def capture_am(send_question, timeout, notify=None):
         captured["send_question"] = send_question
         return approvals
 
@@ -2206,7 +2206,7 @@ async def test_build_reloads_created_projects_and_applies_overrides(tmp_path, mo
     monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
     monkeypatch.setattr(bridge_mod, "Transcriber", lambda m, language="lt": FakeTranscriber())
     monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
-    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
+    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
                         lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
@@ -2244,7 +2244,7 @@ async def test_build_skips_created_project_missing_on_disk(tmp_path, monkeypatch
     monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
     monkeypatch.setattr(bridge_mod, "Transcriber", lambda m, language="lt": FakeTranscriber())
     monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
-    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
+    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
                         lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
@@ -2288,7 +2288,7 @@ async def test_persisted_mode_override_survives_rebuild(tmp_path, monkeypatch):
     # NOTE: bridge_mod.Store is left as the REAL Store (tmp db) on purpose.
     monkeypatch.setattr(bridge_mod, "Transcriber", lambda m, language="lt": FakeTranscriber())
     monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
-    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t: FakeApprovals())
+    monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
                         lambda c, oi, controls, on_approval=None, on_always_allow=None: FakeTelegram())
@@ -2565,7 +2565,7 @@ async def test_run_until_stopped_starts_and_cancels_scheduler(monkeypatch):
                         lambda model_name, language="lt": FakeTranscriber())
     monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
     monkeypatch.setattr(bridge_mod, "ApprovalManager",
-                        lambda send_question, timeout: FakeApprovals())
+                        lambda send_question, timeout, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
                         lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None: telegram)
