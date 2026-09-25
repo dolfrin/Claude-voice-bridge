@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -189,6 +191,35 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         agent_backend=agent_backend,
         codex_app_server_url=(env.get("CODEX_APP_SERVER_URL") or "").strip(),
     )
+
+
+def set_env_value(path: str, key: str, value: str) -> None:
+    """Set ``key=value`` in a dotenv file, leaving every other line untouched.
+
+    The file holds live tokens, so it is replaced atomically (a crash leaves the
+    old file, never a half-written one) and keeps its original permissions.
+    """
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    out: list[str] = []
+    found = False
+    for line in lines:
+        if line.split("=", 1)[0].strip() == key:
+            if not found:
+                out.append(f"{key}={value}")
+                found = True
+            continue
+        out.append(line)
+    if not found:
+        out.append(f"{key}={value}")
+    tmp = path + ".tmp"
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+    os.replace(tmp, path)
 
 
 def load_projects(path: str = "projects.yaml") -> list[ProjectConfig]:

@@ -382,3 +382,14 @@ def test_autonomy_modes_and_tts_backends_are_canonical_ordered_tuples():
 def test_validation_sets_derive_from_canonical_tuples():
     assert _VALID_AUTONOMY_MODES == set(AUTONOMY_MODES)
     assert _VALID_TTS_BACKENDS == set(TTS_BACKENDS)
+
+
+def test_set_env_value_appends_missing_key_and_drops_duplicates(tmp_path):
+    from voice_bridge.config import set_env_value
+
+    env = tmp_path / ".env"
+    env.write_text("# AGENT_BACKEND=codex\nA=1\nA=2\n")
+    set_env_value(str(env), "A", "3")
+    set_env_value(str(env), "AGENT_BACKEND", "claude")
+
+    assert env.read_text() == "# AGENT_BACKEND=codex\nA=3\nAGENT_BACKEND=claude\n"

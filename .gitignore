@@ -15,5 +15,6 @@ docs/superpowers/
 
 # Backups of secret-bearing config: never commit (they hold live tokens).
 .env.bak*
+.env.tmp
 *.bak-*
 projects.yaml.bak*

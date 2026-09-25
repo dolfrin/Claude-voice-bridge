@@ -24,7 +24,9 @@ import datetime
 import html
 import json
 import logging
+import os
 import re
+import signal
 import time
 import random
 from pathlib import Path
@@ -53,7 +55,7 @@ from telegram.ext import (
 
 from . import live
 from .approvals import _TOKEN_RE, _fold
-from .config import Config
+from .config import AGENT_BACKENDS, Config, set_env_value
 from .scheduler import parse_hhmm
 from .transcript import transcript_path
 from .tts import available_voices
@@ -399,6 +401,12 @@ class TelegramIO:
         # prompt) routes back to the right project instead of silently falling
         # back to whatever was last active.
         self._on_sent = on_sent
+        # /agent rewrites AGENT_BACKEND here, then asks the process to stop so
+        # systemd (Restart=always) starts it again on the new backend. The
+        # service's WorkingDirectory is the repo root, where .env lives.
+        self._env_path = ".env"
+        self._restart = lambda: os.kill(os.getpid(), signal.SIGTERM)
+        self._agent_switched: str | None = None
         self.app: Application | None = None
         self._pending_off_sends: dict[str, tuple[str, str]] = {}
         self._pending_off_seq = 0
@@ -997,6 +1005,10 @@ class TelegramIO:
         if action == "live":
             await query.edit_message_text(await self._attach_live(index_str))
             return
+        if action == "agent":
+            await query.edit_message_text(self._switch_agent(index_str))
+            self._restart_if_switched(index_str)
+            return
         if action == "perm":
             if not self._claude_live_enabled:
                 await query.edit_message_text(
@@ -1516,6 +1528,53 @@ class TelegramIO:
         name = context.args[0]
         await self.controls.set_engine(name)
         await msg.reply_text(f"engine {name}")
+
+    async def _cmd_agent(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show which agent answers here, or switch it: `/agent claude|codex`."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        if context.args:
+            name = context.args[0].strip().lower()
+            await msg.reply_text(self._switch_agent(name))
+            self._restart_if_switched(name)
+            return
+        current = self.cfg.agent_backend
+        buttons = [
+            InlineKeyboardButton(
+                ("✅ " if name == current else "") + name.capitalize(),
+                callback_data=f"agent:{name}",
+            )
+            for name in AGENT_BACKENDS
+        ]
+        await msg.reply_text(
+            f"Dabar atsako: {current.capitalize()}.\n"
+            "Perjungus tiltas persikrauna (~10 s). Pokalbių istorijos atskiros — "
+            "kitas agentas nematys, ką kalbėjai su šituo.",
+            reply_markup=InlineKeyboardMarkup([buttons]),
+        )
+
+    def _switch_agent(self, name: str) -> str:
+        """Persist AGENT_BACKEND=*name*; return the text to show the user."""
+        if name not in AGENT_BACKENDS:
+            return "naudojimas: /agent " + "|".join(AGENT_BACKENDS)
+        if name == self.cfg.agent_backend:
+            return f"Jau veikia {name.capitalize()}."
+        try:
+            set_env_value(self._env_path, "AGENT_BACKEND", name)
+        except OSError:
+            logger.exception("agent: could not rewrite %s", self._env_path)
+            return "⚠️ Nepavyko pakeisti .env — agentas nepakeistas."
+        self._agent_switched = name
+        return f"🔄 Perjungiu į {name.capitalize()} — tiltas persikrauna, po ~10 s rašyk."
+
+    def _restart_if_switched(self, name: str) -> None:
+        # Only after the reply is out, and only if .env really changed: a failed
+        # write must not restart into the same backend and pretend it switched.
+        if self._agent_switched == name:
+            self._restart()
 
     async def _cmd_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2179,6 +2238,8 @@ class TelegramIO:
             CommandHandler("verbose", self._cmd_verbose, filters=only_me))
         app.add_handler(
             CommandHandler("engine", self._cmd_engine, filters=only_me))
+        app.add_handler(
+            CommandHandler("agent", self._cmd_agent, filters=only_me))
         app.add_handler(
             CommandHandler("status", self._cmd_status, filters=only_me))
         app.add_handler(

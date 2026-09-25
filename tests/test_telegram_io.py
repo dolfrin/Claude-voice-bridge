@@ -2968,13 +2968,13 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
         if cmds:
             cmd_names |= set(cmds)
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "on", "off", "stop",
-            "mode", "effort", "voice", "engine", "status", "recap", "cost", "info"} <= cmd_names
+            "mode", "effort", "voice", "engine", "status", "recap", "cost", "info", "agent"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
             "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info", "policies", "schedule", "help",
-            "live"} == registered_names
+            "live", "agent"} == registered_names
 
 
 @pytest.mark.asyncio
@@ -3809,3 +3809,79 @@ async def test_live_stream_speaks_only_after_a_voice_note():
     io._live_spoken = True
     await io._speak_live("Padaryta.", "/tmp/p")
     assert io._send_plain_voice.await_count == 1
+
+
+# --------------------------------------------------------------------------
+# /agent: switch Claude <-> Codex from the phone
+# --------------------------------------------------------------------------
+def _agent_io(tmp_path, backend="claude"):
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_BOT_TOKEN=secret\nAGENT_BACKEND=%s\nX=1\n" % backend)
+    env.chmod(0o600)
+    io = TelegramIO(make_cfg(agent_backend=backend), AsyncMock(), FakeControls())
+    io._env_path = str(env)
+    io._restart = MagicMock()
+    return io, env
+
+
+@pytest.mark.asyncio
+async def test_cmd_agent_switches_env_and_restarts(tmp_path):
+    io, env = _agent_io(tmp_path)
+    upd = make_cmd_update("/agent codex")
+
+    await io._cmd_agent(upd, make_ctx(["codex"]))
+
+    assert env.read_text() == "TELEGRAM_BOT_TOKEN=secret\nAGENT_BACKEND=codex\nX=1\n"
+    assert env.stat().st_mode & 0o777 == 0o600
+    upd.message.reply_text.assert_awaited()
+    io._restart.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_agent_same_or_bogus_does_not_restart(tmp_path):
+    io, env = _agent_io(tmp_path)
+    before = env.read_text()
+    for arg in ("claude", "gpt"):
+        await io._cmd_agent(make_cmd_update(f"/agent {arg}"), make_ctx([arg]))
+
+    assert env.read_text() == before
+    io._restart.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_agent_failed_write_does_not_restart(tmp_path):
+    io, _ = _agent_io(tmp_path)
+    io._env_path = str(tmp_path / "missing.env")
+    upd = make_cmd_update("/agent codex")
+
+    await io._cmd_agent(upd, make_ctx(["codex"]))
+
+    assert "Nepavyko" in upd.message.reply_text.await_args.args[0]
+    io._restart.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cmd_agent_without_args_offers_buttons(tmp_path):
+    io, _ = _agent_io(tmp_path, backend="codex")
+    upd = make_cmd_update("/agent")
+
+    await io._cmd_agent(upd, make_ctx([]))
+
+    markup = upd.message.reply_text.await_args.kwargs["reply_markup"]
+    data = [b.callback_data for b in markup.inline_keyboard[0]]
+    assert data == ["agent:claude", "agent:codex"]
+    io._restart.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_button_switches_and_restarts(tmp_path):
+    io, env = _agent_io(tmp_path, backend="codex")
+    query = AsyncMock()
+    query.data = "agent:claude"
+    query.from_user = MagicMock(id=42)
+
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    assert "AGENT_BACKEND=claude" in env.read_text()
+    assert "Claude" in query.edit_message_text.await_args.args[0]
+    io._restart.assert_called_once()
