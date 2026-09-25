@@ -65,6 +65,10 @@ def get_tts(cfg: Config) -> TTSBackend:
         from voice_bridge.tts.piper_tts import PiperTTS
 
         return PiperTTS(cfg.piper_voice_path)
+    if backend == "lithuanian":
+        from voice_bridge.tts.lithuanian_tts import LithuanianTTS
+
+        return LithuanianTTS(cfg.piper_lt_dir)
     if backend == "together":
         from voice_bridge.tts.together_tts import TogetherTTS
 
@@ -82,7 +86,7 @@ def available_voices(backend: str) -> list[str]:
         return list(_OPENAI_VOICES)
     if backend == "openai":
         return list(_OPENAI_VOICES)
-    if backend == "piper":
+    if backend in {"piper", "lithuanian"}:
         return ["default"]
     if backend == "together":
         return list(_TOGETHER_VOICES)

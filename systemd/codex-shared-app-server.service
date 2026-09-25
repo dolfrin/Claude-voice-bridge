@@ -1,0 +1,23 @@
+[Unit]
+Description=Shared Codex app-server for IDE and Telegram
+Documentation=https://learn.chatgpt.com/docs/developer-commands
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=/home/home
+Environment=PATH=/home/home/.local/bin:/usr/local/bin:/usr/bin:/bin
+RuntimeDirectory=codex-shared
+RuntimeDirectoryMode=0700
+ExecStart=/home/home/.local/bin/codex app-server --listen unix://%t/codex-shared/app-server.sock
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=codex-shared-app-server
+
+[Install]
+WantedBy=default.target

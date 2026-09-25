@@ -1,7 +1,7 @@
 """Bridge: wire every module together and run the main async loop.
 
 This is the integration capstone. It constructs config/Store/Transcriber/TTS/
-ApprovalManager/SessionManager/TelegramIO, builds the outbound and inbound
+ApprovalManager/session controller/TelegramIO, builds the outbound and inbound
 closures, implements the :class:`Controls` panel surface, and runs until a
 SIGINT/SIGTERM stop event fires.
 
@@ -32,6 +32,9 @@ from typing import Awaitable, Callable
 
 from .attachments import format_attachment_prompt, save_attachments
 from .approvals import ApprovalManager, parse_yes_no
+from .backend import SessionController
+from .codex_app_server import CodexAppServerClient
+from .codex_sessions import CodexSessionManager
 from .config import (
     Config,
     EFFORT_LEVELS,
@@ -200,8 +203,9 @@ def make_outbound(
     telegram: TelegramIO,
     store: Store,
     cfg: Config,
-    sessions: SessionManager,
+    sessions: SessionController,
     controls: "_Controls",
+    spoken_by_project: dict[str, bool] | None = None,
 ) -> Callable[[Outbound], Awaitable[None]]:
     """Build the outbound closure.
 
@@ -219,6 +223,11 @@ def make_outbound(
     still resolve to its project). Marking last-active (both the store and
     the Controls mirror) and appending a one-line recap summary to the
     project's recap buffer (B3b's ``/recap``) are both skipped when
+    ``spoken_by_project`` is the shared channel mirror written by
+    :func:`make_inbound`: True when that project's last message arrived as a
+    voice note. Missing entry -> speak, so a project that has not been talked
+    to yet (a notification, a scheduled run) behaves as before.
+
     ``o.transient`` is True: NOISE like the per-turn "Working." status, the
     heartbeat, and verbose tool-activity flushes must not inflate the
     recap's update count, nor hijack routing away from whatever project the
@@ -226,6 +235,7 @@ def make_outbound(
     send fires — guarded so a recap-tracking failure can never break the
     never-raises send path.
     """
+    _spoken = spoken_by_project if spoken_by_project is not None else {}
 
     async def outbound(o: Outbound) -> None:
         if o.spoken:
@@ -236,7 +246,16 @@ def make_outbound(
         proj = sessions.project(o.project)
         voice = _resolve_voice(cfg, proj, o.alert)
 
-        voice_bytes = await _synthesize(tts_holder, spoken, voice, o.project)
+        # An ordinary answer mirrors how the question arrived: typed at the
+        # keyboard -> text only. Alerts (crash notices, approval questions) are
+        # not answers to anything and keep their voice, because their whole
+        # job is to reach someone who is not looking at the screen.
+        say_it = o.alert or bool(o.spoken) or _spoken.get(o.project, True)
+        voice_bytes = (
+            await _synthesize(tts_holder, spoken, voice, o.project)
+            if say_it
+            else None
+        )
 
         try:
             if o.file_path:
@@ -335,9 +354,10 @@ def make_inbound(
     transcriber: Transcriber,
     store: Store,
     approvals: ApprovalManager,
-    sessions: SessionManager,
+    sessions: SessionController,
     telegram: TelegramIO,
     controls: "_Controls",
+    spoken_by_project: dict[str, bool] | None = None,
 ) -> Callable[[dict], Awaitable[None]]:
     """Build the inbound closure.
 
@@ -367,6 +387,8 @@ def make_inbound(
        ``none`` -> ask which project; ``off`` -> tell the user it is
        disabled; ``ok`` -> deliver (interrupting first if urgent).
     """
+    if spoken_by_project is None:
+        spoken_by_project = {}
 
     async def inbound(msg: dict) -> None:
         controls.mark_recap_boundary()
@@ -431,7 +453,7 @@ def make_inbound(
         # A failed send falls through to normal routing rather than swallowing
         # the message.
         if telegram.live_target() is not None:
-            if await telegram.live_send(text):
+            if await telegram.live_send(text, spoken=bool(msg.get("is_voice"))):
                 return
 
         # Urgent '!' is consumed BEFORE name-prefix routing: otherwise
@@ -473,6 +495,12 @@ def make_inbound(
         # the ONE place the user is actually looking at, instead of the bridge
         # spawning a second, invisible session for the same directory. Falls
         # back to our own session when the editor has none open.
+        # Mirror the channel back: a typed message means they are at a keyboard
+        # and reading, so the answer stays text; a voice note means they are
+        # not, so it gets read out. Recorded per project because two projects
+        # can be talked to in different ways at the same time.
+        spoken_by_project[project] = bool(msg.get("is_voice"))
+
         proj = sessions.project(project) if hasattr(sessions, "project") else None
         if proj is not None and await telegram.live_route(proj.cwd, text):
             return
@@ -485,7 +513,7 @@ async def _attach_files_to_prompt(
     project: str,
     text: str,
     msg: dict,
-    sessions: SessionManager,
+    sessions: SessionController,
 ) -> str:
     attachments = msg.get("attachments") or []
     if not attachments:
@@ -577,7 +605,7 @@ class _Controls:
 
     def __init__(
         self,
-        sessions: SessionManager,
+        sessions: SessionController,
         store: Store,
         cfg: Config,
         tts_holder: dict,
@@ -1088,7 +1116,7 @@ def _local_now() -> tuple[str, str]:
 
 
 def _make_schedule_deliver(
-    sessions: "SessionManager", store: Store
+    sessions: SessionController, store: Store
 ) -> Callable[[str, str], Awaitable[bool]]:
     """Build the scheduler's deliver closure: the SAME path an inbound turn uses.
 
@@ -1148,7 +1176,7 @@ class Wiring:
 
     cfg: Config
     store: Store
-    sessions: SessionManager
+    sessions: SessionController
     telegram: TelegramIO
     controls: _Controls
     outbound: Callable[[Outbound], Awaitable[None]]
@@ -1218,7 +1246,7 @@ async def build() -> Wiring:
             proj.effort = override["effort"]
 
     tts_holder = {"backend": get_tts(cfg)}
-    transcriber = Transcriber(cfg.whisper_model)
+    transcriber = Transcriber(cfg.whisper_model, cfg.whisper_language or None)
 
     # Telegram is constructed last (it needs the controls + inbound closure),
     # but ApprovalManager.send_question and the controls notices need it. Use a
@@ -1304,9 +1332,13 @@ async def build() -> Wiring:
             io = telegram_ref.get("io")
             return io.live_target() if io is not None else None
 
-        async def live_send(self, text):
+        async def live_send(self, text, spoken: bool = False):
             io = telegram_ref.get("io")
-            return await io.live_send(text) if io is not None else False
+            return await io.live_send(text, spoken) if io is not None else False
+
+        async def live_route(self, cwd, text):
+            io = telegram_ref.get("io")
+            return await io.live_route(cwd, text) if io is not None else False
 
     lazy_telegram = _LazyTelegram()
 
@@ -1348,18 +1380,47 @@ async def build() -> Wiring:
 
     controls = _Controls(lazy_sessions, store, cfg, tts_holder)
 
+    # Written by inbound, read by outbound: whether each project's last message
+    # came in spoken. One dict so the answer leaves the same way the question
+    # arrived.
+    spoken_by_project: dict[str, bool] = {}
+
     outbound = make_outbound(
-        tts_holder, lazy_telegram, store, cfg, lazy_sessions, controls
+        tts_holder, lazy_telegram, store, cfg, lazy_sessions, controls,
+        spoken_by_project,
     )
 
-    sessions = SessionManager(
-        projects, cfg, store, outbound, approvals, lazy_telegram.ask_user
+    sessions_class = (
+        CodexSessionManager if cfg.agent_backend == "codex" else SessionManager
+    )
+    session_kwargs = {}
+    if cfg.agent_backend == "codex":
+        session_kwargs["client"] = CodexAppServerClient(
+            endpoint=getattr(cfg, "codex_app_server_url", "") or None
+        )
+    sessions = sessions_class(
+        projects,
+        cfg,
+        store,
+        outbound,
+        approvals,
+        lazy_telegram.ask_user,
+        **session_kwargs,
     )
     sessions_ref["sm"] = sessions
 
     inbound = make_inbound(
-        transcriber, store, approvals, lazy_sessions, lazy_telegram, controls
+        transcriber, store, approvals, lazy_sessions, lazy_telegram, controls,
+        spoken_by_project,
     )
+
+    async def speak_live(text: str) -> bytes | None:
+        """Voice for a /live stream line.
+
+        That stream comes from a session this bridge does not own, so there is
+        no project to take a voice from -- the global default stands in. Reads
+        the backend from tts_holder at send time, same as every other send."""
+        return await _synthesize(tts_holder, to_spoken(text), cfg.tts_voice, "live")
 
     telegram = TelegramIO(
         cfg,
@@ -1370,6 +1431,7 @@ async def build() -> Wiring:
         # So a quote-reply to a /live stream line or a permission prompt routes
         # back to that project instead of falling through to the last-active one.
         on_sent=store.map_message,
+        on_speak=speak_live,
     )
     telegram_ref["io"] = telegram
     controls.attach_telegram(telegram)

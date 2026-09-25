@@ -13,7 +13,8 @@ import yaml
 # picker through these tuples in this exact preferred order. Validation
 # sets are derived below so accepted values stay in sync automatically.
 AUTONOMY_MODES = ("safe", "full", "ask")
-TTS_BACKENDS = ("auto", "openai", "piper", "together")
+AGENT_BACKENDS = ("claude", "codex")
+TTS_BACKENDS = ("auto", "openai", "piper", "together", "lithuanian")
 # Canonical, ORDERED source of truth for the per-project reasoning effort. The
 # SDK's ClaudeAgentOptions.effort accepts exactly these levels; passing None
 # keeps the SDK default. /effort cycles/sets through this exact preferred order.
@@ -21,6 +22,7 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 _VALID_TTS_BACKENDS = set(TTS_BACKENDS)
 _VALID_AUTONOMY_MODES = set(AUTONOMY_MODES)
 _VALID_EFFORT_LEVELS = set(EFFORT_LEVELS)
+_VALID_AGENT_BACKENDS = set(AGENT_BACKENDS)
 
 
 @dataclass
@@ -42,6 +44,14 @@ class Config:
     # Optional distinct voice for ALERT-class TTS (approval questions + crash
     # notices). Empty string -> fall back to the project/default voice.
     tts_alert_voice: str = ""
+    # Language code forced on transcription ("lt", "en", ...). Empty means let
+    # Whisper detect it -- which it gets wrong on short utterances, happily
+    # rendering a Lithuanian sentence as Cyrillic nonsense.
+    whisper_language: str = ""
+    # Directory holding the Lithuanian voice: the model, its text-mode config,
+    # the stress dictionary and the voice's own phonemizer modules. Only the
+    # "lithuanian" backend reads it.
+    piper_lt_dir: str = ""
     auto_discover_projects: bool = False
     auto_discover_limit: int = 12
     open_vscode_on_enable: bool = False
@@ -50,6 +60,12 @@ class Config:
     # IDE catch-up (recent git changes + the gist of the most recent OTHER
     # session) prepended. Feeds SessionManager.catchup_idle_seconds.
     catchup_idle_minutes: int = 10
+    # Agent runtime selected for project turns. Claude remains the compatibility
+    # default; Codex uses the local authenticated ``codex app-server`` process.
+    agent_backend: str = "claude"
+    # Optional shared Codex endpoint. Empty keeps the private stdio child for
+    # backwards compatibility; unix:///... lets Telegram and IDE share it.
+    codex_app_server_url: str = ""
 
 
 @dataclass
@@ -135,6 +151,13 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             f"{sorted(_VALID_AUTONOMY_MODES)}, got: {autonomy_mode!r}"
         )
 
+    agent_backend = (env.get("AGENT_BACKEND") or "claude").strip().lower()
+    if agent_backend not in _VALID_AGENT_BACKENDS:
+        raise ValueError(
+            f"Config key AGENT_BACKEND must be one of "
+            f"{sorted(_VALID_AGENT_BACKENDS)}, got: {agent_backend!r}"
+        )
+
     return Config(
         telegram_bot_token=_require(env, "TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_id=_require_int(env, "TELEGRAM_ALLOWED_USER_ID"),
@@ -150,7 +173,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         tts_voice=env.get("TTS_VOICE") or "alloy",
         tts_alert_voice=env.get("TTS_ALERT_VOICE") or "",
         piper_voice_path=env.get("PIPER_VOICE_PATH") or "",
+        piper_lt_dir=env.get("PIPER_LT_DIR") or "",
         whisper_model=env.get("WHISPER_MODEL") or "large-v3",
+        whisper_language=env.get("WHISPER_LANGUAGE") or "",
         autonomy_mode=autonomy_mode,
         approval_timeout=_optional_int(env, "APPROVAL_TIMEOUT", 300),
         db_path=env.get("DB_PATH") or "voice-bridge.db",
@@ -161,6 +186,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         open_vscode_on_enable=_optional_bool(env, "OPEN_VSCODE_ON_ENABLE", False),
         close_vscode_on_disable=_optional_bool(env, "CLOSE_VSCODE_ON_DISABLE", False),
         catchup_idle_minutes=_optional_int(env, "CATCHUP_IDLE_MINUTES", 10),
+        agent_backend=agent_backend,
+        codex_app_server_url=(env.get("CODEX_APP_SERVER_URL") or "").strip(),
     )
 
 

@@ -12,3 +12,8 @@ docs/superpowers/
 .claude/
 /var/
 .venv/
+
+# Backups of secret-bearing config: never commit (they hold live tokens).
+.env.bak*
+*.bak-*
+projects.yaml.bak*

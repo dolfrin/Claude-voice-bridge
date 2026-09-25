@@ -3,6 +3,7 @@ import textwrap
 import pytest
 
 from voice_bridge.config import (
+    AGENT_BACKENDS,
     AUTONOMY_MODES,
     Config,
     EFFORT_LEVELS,
@@ -65,6 +66,8 @@ def test_load_config_parses_all_fields_with_correct_types():
     assert cfg.auto_discover_limit == 8
     assert cfg.open_vscode_on_enable is True
     assert cfg.close_vscode_on_disable is True
+    assert cfg.agent_backend == "claude"
+    assert cfg.codex_app_server_url == ""
 
 
 def test_load_config_applies_defaults_for_optional_keys():
@@ -89,6 +92,31 @@ def test_load_config_applies_defaults_for_optional_keys():
     assert cfg.auto_discover_limit == 12
     assert cfg.open_vscode_on_enable is False
     assert cfg.close_vscode_on_disable is False
+    assert cfg.agent_backend == "claude"
+    assert cfg.codex_app_server_url == ""
+
+
+def test_load_config_accepts_codex_agent_backend():
+    env = _full_env()
+    env["AGENT_BACKEND"] = "CoDeX"
+    assert load_config(env).agent_backend == "codex"
+    assert AGENT_BACKENDS == ("claude", "codex")
+
+
+def test_load_config_accepts_shared_codex_endpoint():
+    env = _full_env()
+    env["CODEX_APP_SERVER_URL"] = " unix:///run/user/1000/codex/app.sock "
+    assert (
+        load_config(env).codex_app_server_url
+        == "unix:///run/user/1000/codex/app.sock"
+    )
+
+
+def test_load_config_rejects_invalid_agent_backend():
+    env = _full_env()
+    env["AGENT_BACKEND"] = "shell"
+    with pytest.raises(ValueError, match="AGENT_BACKEND"):
+        load_config(env)
 
 
 def test_load_config_missing_required_key_raises_clear_error():
@@ -348,7 +376,7 @@ def test_autonomy_modes_and_tts_backends_are_canonical_ordered_tuples():
     # Order matters: telegram_io's panel cycles through these in this exact
     # preferred order (safe -> full -> ask; auto -> openai -> piper -> together).
     assert AUTONOMY_MODES == ("safe", "full", "ask")
-    assert TTS_BACKENDS == ("auto", "openai", "piper", "together")
+    assert TTS_BACKENDS == ("auto", "openai", "piper", "together", "lithuanian")
 
 
 def test_validation_sets_derive_from_canonical_tuples():

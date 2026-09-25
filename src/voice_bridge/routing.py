@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS schedules (
     enabled  INTEGER NOT NULL DEFAULT 1,
     last_run TEXT                -- "YYYY-MM-DD" the schedule last fired (per-day dedup)
 );
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    project    TEXT NOT NULL,
+    backend    TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (project, backend)
+);
 """
 
 # Columns the ``projects`` table must carry. A fresh db gets them from _SCHEMA;
@@ -301,6 +307,36 @@ class Store:
         async with aiosqlite.connect(self.db_path) as db:
             cur = await db.execute(
                 "SELECT session_id FROM projects WHERE name = ?", (project,)
+            )
+            row = await cur.fetchone()
+        return row[0] if row is not None else None
+
+    async def set_agent_session_id(
+        self, project: str, backend: str, session_id: str
+    ) -> None:
+        """Persist a backend-scoped session/thread identifier.
+
+        Kept separate from ``projects.session_id`` so selecting Codex can never
+        overwrite the legacy Claude resume ID.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO agent_sessions (project, backend, session_id) "
+                "VALUES (?, ?, ?) ON CONFLICT(project, backend) DO UPDATE SET "
+                "session_id=excluded.session_id",
+                (project, backend, session_id),
+            )
+            await db.commit()
+
+    async def get_agent_session_id(
+        self, project: str, backend: str
+    ) -> str | None:
+        """Return a backend-scoped session/thread ID, if one is stored."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT session_id FROM agent_sessions "
+                "WHERE project = ? AND backend = ?",
+                (project, backend),
             )
             row = await cur.fetchone()
         return row[0] if row is not None else None

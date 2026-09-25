@@ -366,10 +366,25 @@ class TelegramIO:
         on_approval: Callable[[int, bool], bool] | None = None,
         on_always_allow: Callable[[int], Awaitable[bool]] | None = None,
         on_sent: Callable[[int, str], Awaitable] | None = None,
+        on_speak: Callable[[str], Awaitable[bytes | None]] | None = None,
     ) -> None:
         self.cfg = cfg
         self.on_user_message = on_user_message
         self.controls = controls
+        # Claude editor sessions and Codex app-server are separate runtimes.
+        # One Telegram channel must never switch between them implicitly.
+        self._claude_live_enabled = (
+            getattr(cfg, "agent_backend", "claude") == "claude"
+        )
+        # Text -> voice bytes for the /live stream, which has no project and so
+        # cannot go through the project-scoped outbound path. Wired in bridge to
+        # the same TTS backend everything else uses; None means text-only.
+        self._on_speak = on_speak
+        # Whether the last message driving the live session came in as a voice
+        # note. Mirrors the user's own channel back at them: talk to it and it
+        # talks back, type at it and it stays quiet. Starts False so attaching
+        # from the keyboard does not start reading the stream aloud.
+        self._live_spoken = False
         # Resolver for inline Allow/Deny taps: returns True if a live pending
         # approval was resolved, False if it was already answered / timed out.
         # Wired in bridge to ApprovalManager.resolve_token.
@@ -983,6 +998,11 @@ class TelegramIO:
             await query.edit_message_text(await self._attach_live(index_str))
             return
         if action == "perm":
+            if not self._claude_live_enabled:
+                await query.edit_message_text(
+                    "Claude leidimai šiame kanale išjungti — kanalas skirtas Codex."
+                )
+                return
             ident, _, code = index_str.rpartition(":")
             allow = code == "1"
             if self.answer_permission(ident, allow):
@@ -996,7 +1016,7 @@ class TelegramIO:
         if action == "liveans":
             # Answer a live session's plain-text question by sending the chosen
             # number, exactly as typing it would.
-            if self._live_session is None:
+            if self.live_target() is None:
                 await query.edit_message_text("Nebeprisijungta prie sesijos.")
                 return
             if await self.live_send(index_str):
@@ -1489,7 +1509,9 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args or context.args[0] not in _ENGINES:
-            await msg.reply_text("usage: /engine <auto|openai|piper|together>")
+            await msg.reply_text(
+                "usage: /engine <auto|openai|piper|together|lithuanian>"
+            )
             return
         name = context.args[0]
         await self.controls.set_engine(name)
@@ -1669,15 +1691,23 @@ class TelegramIO:
 
     def live_target(self):
         """The live session this chat is driving, or None."""
-        return self._live_session
+        return self._live_session if self._claude_live_enabled else None
 
-    async def live_send(self, text: str) -> bool:
+    async def live_send(self, text: str, spoken: bool = False) -> bool:
         """Deliver *text* into the attached live session. False if not attached
         or the socket refused (the envelope is Claude Code's internal wire
-        format, so a future release can break it without warning)."""
+        format, so a future release can break it without warning).
+
+        ``spoken`` says the message arrived as a voice note, which is how the
+        stream decides whether to answer out loud: away from the keyboard you
+        talk and want to be talked back to, at the desk a voice note is just
+        noise over the text you are already reading."""
+        if not self._claude_live_enabled:
+            return False
         session = self._live_session
         if session is None or not text.strip():
             return False
+        self._live_spoken = spoken
         try:
             await live.send(session.socket_path, text)
             return True
@@ -1696,7 +1726,7 @@ class TelegramIO:
         Returns False when no such session is running, and the caller falls
         back to the bridge's own session exactly as before.
         """
-        if not cwd or not text.strip():
+        if not self._claude_live_enabled or not cwd or not text.strip():
             return False
         try:
             sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
@@ -1771,12 +1801,32 @@ class TelegramIO:
             logger.exception("live: could not send notice")
             return None
 
+    async def _send_plain_voice(self, voice_bytes: bytes):
+        """Voice note to the owner, outside the project-scoped path; never raises.
+
+        Mirrors :meth:`_send_plain`: the /live stream has no project, so it
+        cannot use ``send_update``'s caption."""
+        try:
+            return await _send_with_retry(
+                lambda: self.app.bot.send_voice(
+                    chat_id=self._chat_id, voice=voice_bytes
+                )
+            )
+        except TelegramError:
+            logger.exception("live: could not send voice")
+            return None
+
     async def _cmd_live(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Attach to a running Claude Code session, or `/live off` to detach."""
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
+            return
+        if not self._claude_live_enabled:
+            await msg.reply_text(
+                "Claude /live šiame kanale išjungtas — kanalas skirtas Codex."
+            )
             return
         args = list(context.args or [])
         if args and args[0] in {"off", "stop", "detach"}:
@@ -1805,6 +1855,8 @@ class TelegramIO:
 
     async def _attach_live(self, pid_str: str) -> str:
         """Attach to the session with this pid; returns the reply text."""
+        if not self._claude_live_enabled:
+            return "Claude /live šiame kanale išjungtas — kanalas skirtas Codex."
         try:
             pid = int(pid_str)
         except (TypeError, ValueError):
@@ -1871,7 +1923,14 @@ class TelegramIO:
                     continue
                 try:
                     # Already rendered to Telegram lines by read_new.
+                    start = offset
                     lines, offset = live.read_new(path, offset)
+                    # Typed at the keyboard means sitting at the screen: stop
+                    # reading answers aloud. Only a Telegram message can turn
+                    # it back on (live_send), so the voice follows wherever the
+                    # user last actually spoke from -- not just the phone.
+                    if live.typed_here(path, start, offset):
+                        self._live_spoken = False
                 except Exception:  # noqa: BLE001 - a bad read must not kill the tail
                     logger.exception("live: transcript read failed")
                     continue
@@ -1903,10 +1962,33 @@ class TelegramIO:
                         chunk, markup if i == len(chunks) - 1 else None
                     )
                     await self._remember_sent(message, session.cwd)
+                # Text first, voice after: the text is the record, the voice is
+                # for when you are away from the screen. Only the assistant's
+                # own words are spoken -- see live.spoken_of.
+                await self._speak_live(body, session.cwd)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - the tail must never take the bot down
             logger.exception("live: tail loop stopped for pid %s", session.pid)
+
+    async def _speak_live(self, body: str, cwd: str) -> None:
+        """Read the speakable part of a /live body aloud; never raises.
+
+        No speak hook, nothing worth speaking, or a TTS failure all degrade to
+        the text that was already sent -- the tail must survive either way."""
+        if self._on_speak is None or not self._live_spoken:
+            return
+        try:
+            spoken = live.spoken_of(body)
+            if not spoken:
+                return
+            voice_bytes = await self._on_speak(spoken)
+            if voice_bytes is None:
+                return
+            message = await self._send_plain_voice(voice_bytes)
+            await self._remember_sent(message, cwd)
+        except Exception:  # noqa: BLE001 - voice is a nicety, the text already went
+            logger.exception("live: could not voice the stream line")
 
     # --- editor permission prompts, answerable from here ------------------
 
@@ -2129,10 +2211,49 @@ class TelegramIO:
             only_me & filters.TEXT & ~filters.COMMAND, self._handle_text))
 
         await app.initialize()
-        await app.bot.set_my_commands(_BOT_COMMANDS)
+        commands = (
+            _BOT_COMMANDS
+            if self._claude_live_enabled
+            else [command for command in _BOT_COMMANDS if command.command != "live"]
+        )
+        await app.bot.set_my_commands(commands)
         await app.start()
         await app.updater.start_polling()
-        self._perm_task = asyncio.create_task(self._watch_permissions())
+        if self._claude_live_enabled:
+            self._perm_task = asyncio.create_task(self._watch_permissions())
+            await self._restore_live()
+        else:
+            self._detach_live()
+            try:
+                self.alive_marker().unlink(missing_ok=True)
+            except OSError:
+                logger.exception("could not clear disabled Claude relay heartbeat")
+
+    async def _restore_live(self) -> None:
+        """Re-attach to the session we were tailing before a restart.
+
+        The attachment lives in memory, so a bridge restart drops it -- but the
+        marker file stays, and the Stop hook reads that marker to stay quiet for
+        the streamed session. Left alone, the two together are a silent hole:
+        nothing tails the session AND its finish notifications are suppressed,
+        so someone on their phone simply stops hearing from it with no error
+        anywhere. Re-attach if that session is still up, clear the marker if it
+        is not. Never raises: a failure here must not stop the bot starting."""
+        if not self._claude_live_enabled:
+            self._detach_live()
+            return
+        try:
+            marker = self.live_marker()
+            session_id = marker.read_text().strip() if marker.exists() else ""
+            if not session_id:
+                return
+            for session in live.list_sessions():
+                if session.session_id == session_id:
+                    await self._attach_live(str(session.pid))
+                    return
+            marker.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 - startup must survive a bad marker
+            logger.exception("live: could not restore the attachment")
 
     async def stop(self) -> None:
         """Stop polling and shut the Application down (idempotent)."""

@@ -1,11 +1,11 @@
 # Design Notes
 
 Claude Voice Bridge is a single always-on Python service that connects Telegram to
-long-running Claude Agent SDK sessions.
+long-running Claude Agent SDK sessions or persistent local Codex app-server threads.
 
 ## Goals
 
-- Control multiple Claude coding sessions from a phone.
+- Control multiple Claude or Codex coding sessions from a phone.
 - Support both text and voice input.
 - Keep project conversations resumable from the local IDE.
 - Route replies to the correct project without manual command syntax for every turn.
@@ -18,9 +18,9 @@ long-running Claude Agent SDK sessions.
 Telegram user
   -> TelegramIO
   -> bridge routing
-  -> SessionManager
-  -> Claude Agent SDK session
-  -> bridge MCP tools
+  -> SessionController
+     -> SessionManager -> Claude Agent SDK + bridge MCP tools
+     -> CodexSessionManager -> CodexAppServerClient -> codex app-server (stdio)
   -> TelegramIO
   -> Telegram user
 ```
@@ -31,6 +31,8 @@ Telegram user
 |---|---|
 | `TelegramIO` | Telegram polling, commands, inline buttons, inbound/outbound files |
 | `SessionManager` | One Claude SDK client and queue per project |
+| `CodexSessionManager` | One persistent Codex thread and queue per project |
+| `CodexAppServerClient` | One sanitized local stdio JSON-RPC process for all Codex threads |
 | `Store` | SQLite routing state, last-active project, enabled flags, session ids |
 | `Transcriber` | Local faster-whisper transcription for voice/audio |
 | `TTS` | OpenAI, Piper, Together, or automatic backend routing |
@@ -50,7 +52,9 @@ Telegram user
 ## Persistence
 
 - SQLite stores Telegram message-to-project mappings, enabled flags, last-active
-  project, and Claude SDK session ids.
+  project, legacy Claude SDK session ids, and backend-scoped session/thread ids.
+- Codex thread ids live in `agent_sessions`; selecting Codex never overwrites the
+  Claude resume id in `projects.session_id`.
 - Each project gets its own transcript mirror at:
 
 ```text
@@ -85,3 +89,7 @@ work before the next turn is delivered.
 - `safe` asks for risky operations.
 - `ask` asks for every tool call.
 - `send_file` only allows paths inside the active project directory.
+- Codex app-server is stdio-only. Its child environment is allowlisted and excludes
+  Telegram, TTS, Anthropic, OpenAI, DeepSeek, and other application/provider secrets.
+- Codex command, file-change, and permission requests fail closed on malformed input,
+  unknown threads, timeout, disconnect, or Telegram denial.

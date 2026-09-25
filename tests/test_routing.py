@@ -171,6 +171,24 @@ async def test_session_id_round_trip_and_overwrite(tmp_db):
 
 
 @pytest.mark.asyncio
+async def test_backend_session_ids_are_separate_from_legacy_session(tmp_db):
+    store = Store(tmp_db)
+    await store.init()
+    await store.set_session_id("qwing", "claude-old")
+    await store.set_agent_session_id("qwing", "codex", "thread-1")
+    await store.set_agent_session_id("qwing", "other", "other-1")
+
+    assert await store.get_session_id("qwing") == "claude-old"
+    assert await store.get_agent_session_id("qwing", "codex") == "thread-1"
+    assert await store.get_agent_session_id("qwing", "other") == "other-1"
+    assert await store.get_agent_session_id("missing", "codex") is None
+
+    await store.set_agent_session_id("qwing", "codex", "thread-2")
+    assert await store.get_agent_session_id("qwing", "codex") == "thread-2"
+    assert await store.get_session_id("qwing") == "claude-old"
+
+
+@pytest.mark.asyncio
 async def test_set_session_id_creates_row_preserving_enabled(tmp_db):
     store = Store(tmp_db)
     await store.init()  # no seeded projects

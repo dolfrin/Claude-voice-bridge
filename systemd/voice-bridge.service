@@ -15,10 +15,10 @@
 # Example: replace /home/home/Projects/claude-voice-bridge with /opt/voice-bridge
 
 [Unit]
-Description=Claude Voice Bridge (Telegram <-> Claude Agent SDK)
+Description=Telegram Voice Bridge (Claude or Codex)
 Documentation=file:///home/home/Projects/claude-voice-bridge/README.md
-After=network-online.target
-Wants=network-online.target
+After=network-online.target codex-shared-app-server.service
+Wants=network-online.target codex-shared-app-server.service
 
 [Service]
 Type=simple

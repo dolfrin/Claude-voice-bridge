@@ -193,6 +193,7 @@ class FakeTelegram:
         # /live: None = not attached, so inbound routes to projects as before.
         self.live_session = None
         self.live_sent: list[str] = []
+        self.live_spoken: list[bool] = []
         self.live_send_result = True
         self.live_routed: list[tuple[str, str]] = []
         self.live_route_result = False
@@ -200,8 +201,9 @@ class FakeTelegram:
     def live_target(self):
         return self.live_session
 
-    async def live_send(self, text):
+    async def live_send(self, text, spoken=False):
         self.live_sent.append(text)
+        self.live_spoken.append(spoken)
         return self.live_send_result
 
     async def live_route(self, cwd, text):
@@ -352,11 +354,13 @@ class FakeCfg:
     autonomy_mode = "safe"
     db_path = "/tmp/ignored.db"
     whisper_model = "large-v3"
+    whisper_language = ""
     approval_timeout = 300
     auto_discover_projects = False
     auto_discover_limit = 12
     open_vscode_on_enable = False
     close_vscode_on_disable = False
+    agent_backend = "claude"
 
 
 def _msg(message_id=7, reply_to=None, text="", is_voice=False, audio=None):
@@ -2074,7 +2078,7 @@ async def test_build_wires_and_run_loop(monkeypatch):
     monkeypatch.setattr(bridge_mod, "SessionManager",
                         lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None: telegram)
+                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None, on_speak=None: telegram)
 
     wired = await build()
     assert store.inited == 1
@@ -2091,6 +2095,86 @@ async def test_build_wires_and_run_loop(monkeypatch):
     assert telegram.ran == 1
     assert telegram.stopped == 1
     assert sessions.stopped == 1
+
+
+@pytest.mark.asyncio
+async def test_build_selects_codex_manager_only_when_explicit(monkeypatch):
+    import voice_bridge.bridge as bridge_mod
+
+    class CodexCfg(FakeCfg):
+        agent_backend = "codex"
+
+    cfg = CodexCfg()
+    projects = [FakeProject("qwing", voice="echo")]
+    store = FakeStore(enabled={"qwing": True})
+    telegram = FakeTelegram()
+    codex_sessions = FakeSessions(projects)
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda path="projects.yaml": projects)
+    monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
+    monkeypatch.setattr(
+        bridge_mod, "Transcriber", lambda model_name, language="lt": FakeTranscriber()
+    )
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
+    monkeypatch.setattr(
+        bridge_mod,
+        "ApprovalManager",
+        lambda send_question, timeout, notify=None: FakeApprovals(),
+    )
+    monkeypatch.setattr(
+        bridge_mod, "SessionManager", lambda *a, **k: pytest.fail("Claude selected")
+    )
+    monkeypatch.setattr(
+        bridge_mod, "CodexSessionManager", lambda *a, **k: codex_sessions
+    )
+    monkeypatch.setattr(
+        bridge_mod,
+        "TelegramIO",
+        lambda cfg, on_user_message, controls, on_approval=None,
+        on_always_allow=None, on_sent=None, on_speak=None: telegram,
+    )
+
+    wired = await build()
+    assert wired.sessions is codex_sessions
+
+
+@pytest.mark.asyncio
+async def test_build_inbound_delegates_live_route_through_lazy_telegram(monkeypatch):
+    """The production build path must expose every Telegram method inbound uses."""
+    import voice_bridge.bridge as bridge_mod
+
+    cfg = FakeCfg()
+    projects = [FakeProject("qwing", voice="echo")]
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    telegram = FakeTelegram()
+    sessions = FakeSessions(projects)
+
+    monkeypatch.setattr(bridge_mod, "load_config", lambda env=None: cfg)
+    monkeypatch.setattr(bridge_mod, "load_projects", lambda path="projects.yaml": projects)
+    monkeypatch.setattr(bridge_mod, "Store", lambda db_path: store)
+    monkeypatch.setattr(
+        bridge_mod, "Transcriber", lambda model_name, language="lt": FakeTranscriber()
+    )
+    monkeypatch.setattr(bridge_mod, "get_tts", lambda c: FakeTTS())
+    monkeypatch.setattr(
+        bridge_mod,
+        "ApprovalManager",
+        lambda send_question, timeout, notify=None: FakeApprovals(),
+    )
+    monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
+    monkeypatch.setattr(
+        bridge_mod,
+        "TelegramIO",
+        lambda cfg, on_user_message, controls, on_approval=None,
+        on_always_allow=None, on_sent=None, on_speak=None: telegram,
+    )
+
+    wired = await build()
+    await wired.inbound(_msg(text="pataisyk testus"))
+
+    assert telegram.live_routed == [("/tmp/qwing", "pataisyk testus")]
+    assert sessions.delivered == [("qwing", "pataisyk testus")]
 
 
 @pytest.mark.asyncio
@@ -2118,7 +2202,7 @@ async def test_build_inbound_forwards_disabled_project_prompt(monkeypatch):
     monkeypatch.setattr(
         bridge_mod,
         "TelegramIO",
-        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None: telegram,
+        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None, on_speak=None: telegram,
     )
 
     wired = await build()
@@ -2154,7 +2238,7 @@ async def test_build_approval_send_uses_alert_voice_and_token(monkeypatch):
         return approvals
 
     def capture_tg(cfg_, on_user_message, controls, on_approval=None,
-                   on_always_allow=None, on_sent=None):
+                   on_always_allow=None, on_sent=None, on_speak=None):
         captured["on_approval"] = on_approval
         captured["on_always_allow"] = on_always_allow
         return telegram
@@ -2228,7 +2312,7 @@ async def test_build_reloads_created_projects_and_applies_overrides(tmp_path, mo
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None, on_speak=None: FakeTelegram())
 
     await build()
 
@@ -2266,7 +2350,7 @@ async def test_build_skips_created_project_missing_on_disk(tmp_path, monkeypatch
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None, on_speak=None: FakeTelegram())
 
     await build()
 
@@ -2310,7 +2394,7 @@ async def test_persisted_mode_override_survives_rebuild(tmp_path, monkeypatch):
     monkeypatch.setattr(bridge_mod, "ApprovalManager", lambda sq, t, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", capture_sm)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None: FakeTelegram())
+                        lambda c, oi, controls, on_approval=None, on_always_allow=None, on_sent=None, on_speak=None: FakeTelegram())
 
     # First boot: qwing runs at the yaml autonomy "full".
     w1 = await build()
@@ -2633,7 +2717,7 @@ async def test_run_until_stopped_starts_and_cancels_scheduler(monkeypatch):
                         lambda send_question, timeout, notify=None: FakeApprovals())
     monkeypatch.setattr(bridge_mod, "SessionManager", lambda *a, **k: sessions)
     monkeypatch.setattr(bridge_mod, "TelegramIO",
-                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None: telegram)
+                        lambda cfg, on_user_message, controls, on_approval=None, on_always_allow=None, on_sent=None, on_speak=None: telegram)
 
     state = {"called": False, "cancelled": False}
 
@@ -2693,3 +2777,51 @@ async def test_make_inbound_falls_back_when_no_editor_session_open():
 
     assert telegram.live_routed  # it looked
     assert sessions.delivered == [("qwing", "pataisyk testus")]  # bridge session
+
+
+@pytest.mark.asyncio
+async def test_inbound_tells_the_live_stream_whether_the_message_was_spoken():
+    # The stream answers out loud only when spoken to, so the voice flag has to
+    # survive the whole inbound path -- including the lazy telegram proxy,
+    # whose signature drifted from TelegramIO's once already.
+    telegram = FakeTelegram()
+    telegram.live_session = object()  # attached
+
+    inbound = _inbound(
+        FakeTranscriber(), FakeStore(), FakeApprovals(), FakeSessions([]), telegram
+    )
+    await inbound(_msg(reply_to=None, text="typed at the desk"))
+    await inbound(_msg(reply_to=None, is_voice=True, audio=b"ogg"))
+
+    assert telegram.live_spoken == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_outbound_stays_silent_when_the_question_was_typed():
+    # "If I write to Telegram, I have time to read" -- a typed question gets a
+    # typed answer. An alert still speaks: it is not an answer to anything and
+    # its job is to reach someone who is not looking at the screen.
+    store = FakeStore()
+    tts_holder = {"backend": FakeTTS(out=b"VOICE")}
+    telegram = FakeTelegram(ids=[101])
+    sessions = FakeSessions([FakeProject("qwing", voice="echo")])
+    controls = _Controls(sessions, store, FakeCfg(), tts_holder)
+    spoken_by_project = {"qwing": False}
+
+    outbound = make_outbound(
+        tts_holder, telegram, store, FakeCfg(), sessions, controls, spoken_by_project
+    )
+    await outbound(Outbound(project="qwing", text="Padaryta.", spoken=""))
+
+    assert tts_holder["backend"].calls == []          # nothing synthesized
+    assert telegram.updates[-1][3] is None            # ...and no voice sent
+
+    # Same project, now asked by voice -> answered by voice.
+    spoken_by_project["qwing"] = True
+    await outbound(Outbound(project="qwing", text="Padaryta.", spoken=""))
+    assert telegram.updates[-1][3] == b"VOICE"
+
+    # An alert speaks even though the last message was typed.
+    spoken_by_project["qwing"] = False
+    await outbound(Outbound(project="qwing", text="Krito.", spoken="", alert=True))
+    assert telegram.updates[-1][3] == b"VOICE"

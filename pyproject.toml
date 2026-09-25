@@ -16,6 +16,7 @@ dependencies = [
     "piper-tts",
     "pyyaml",
     "aiosqlite",
+    "websockets>=13,<17",
 ]
 
 [project.optional-dependencies]

@@ -31,7 +31,7 @@ from voice_bridge.telegram_io import (
 from voice_bridge.transcript import transcript_path
 
 
-def make_cfg(allowed_id=42):
+def make_cfg(allowed_id=42, agent_backend="claude"):
     return Config(
         telegram_bot_token="TESTTOKEN",
         telegram_allowed_user_id=allowed_id,
@@ -49,6 +49,7 @@ def make_cfg(allowed_id=42):
         db_path=":memory:",
         open_vscode_on_enable=False,
         close_vscode_on_disable=False,
+        agent_backend=agent_backend,
     )
 
 
@@ -1271,7 +1272,7 @@ def test_modes_and_engines_mirror_config_canonical_ordered_tuples():
     assert _ENGINES == list(TTS_BACKENDS)
     # Panel cycle order is preserved exactly.
     assert _MODES == ["safe", "full", "ask"]
-    assert _ENGINES == ["auto", "openai", "piper", "together"]
+    assert _ENGINES == ["auto", "openai", "piper", "together", "lithuanian"]
 
 
 # --------------------------------------------------------------------------
@@ -2977,6 +2978,46 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_codex_backend_hides_and_disables_claude_relays(monkeypatch, tmp_path):
+    import voice_bridge.telegram_io as mod
+
+    fake_app = MagicMock()
+    fake_app.add_handler = MagicMock()
+    fake_app.initialize = AsyncMock()
+    fake_app.start = AsyncMock()
+    fake_app.bot = MagicMock()
+    fake_app.bot.set_my_commands = AsyncMock()
+    fake_app.updater = MagicMock()
+    fake_app.updater.start_polling = AsyncMock()
+
+    fake_builder = MagicMock()
+    fake_builder.token.return_value = fake_builder
+    fake_builder.build.return_value = fake_app
+    monkeypatch.setattr(
+        mod.Application, "builder", classmethod(lambda cls: fake_builder)
+    )
+
+    io = TelegramIO(
+        make_cfg(agent_backend="codex"), AsyncMock(), FakeControls()
+    )
+    monkeypatch.setattr(
+        type(io), "live_marker", staticmethod(lambda: tmp_path / "live")
+    )
+    monkeypatch.setattr(
+        type(io), "alive_marker", staticmethod(lambda: tmp_path / "alive")
+    )
+    io._watch_permissions = MagicMock(
+        side_effect=AssertionError("Claude permission relay started")
+    )
+
+    await io.run()
+
+    registered = fake_app.bot.set_my_commands.await_args.args[0]
+    assert "live" not in {command.command for command in registered}
+    assert io._perm_task is None
+
+
+@pytest.mark.asyncio
 async def test_run_returns_without_blocking(monkeypatch):
     """run() must return so bridge main() owns the run-forever wait (C3)."""
     import voice_bridge.telegram_io as mod
@@ -3667,3 +3708,104 @@ def test_answer_permission_refuses_when_the_session_stopped_waiting(tmp_path, mo
     assert io.answer_permission("gone", True) is False
     assert list(tmp_path.glob("*.ans")) == []
     assert io._perm_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_restore_live_reattaches_to_a_session_that_is_still_up(monkeypatch, tmp_path):
+    # A bridge restart drops the in-memory attachment but leaves the marker,
+    # and the Stop hook honours that marker -- so without this the user simply
+    # stops hearing from the session, with no error anywhere.
+    from voice_bridge import live as live_mod
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    marker = tmp_path / ".voice-bridge-live"
+    marker.write_text("sess-123")
+    monkeypatch.setattr(type(io), "live_marker", staticmethod(lambda: marker))
+    monkeypatch.setattr(
+        live_mod, "list_sessions",
+        lambda *a, **k: [live_mod.LiveSession(
+            pid=4242, session_id="sess-123", cwd="/tmp/p", socket_path="/tmp/s"
+        )],
+    )
+    attached: list[str] = []
+
+    async def fake_attach(pid_str):
+        attached.append(pid_str)
+        return "ok"
+
+    io._attach_live = fake_attach
+    await io._restore_live()
+
+    assert attached == ["4242"]
+
+
+@pytest.mark.asyncio
+async def test_restore_live_clears_a_marker_whose_session_is_gone(monkeypatch, tmp_path):
+    # A stale marker keeps the Stop hook quiet forever; it must not outlive
+    # the session it names.
+    from voice_bridge import live as live_mod
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    marker = tmp_path / ".voice-bridge-live"
+    marker.write_text("sess-gone")
+    monkeypatch.setattr(type(io), "live_marker", staticmethod(lambda: marker))
+    monkeypatch.setattr(live_mod, "list_sessions", lambda *a, **k: [])
+
+    await io._restore_live()
+
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_backend_cannot_route_or_restore_claude_live(monkeypatch, tmp_path):
+    from voice_bridge import live as live_mod
+
+    io = TelegramIO(
+        make_cfg(agent_backend="codex"), AsyncMock(), FakeControls()
+    )
+    marker = tmp_path / ".voice-bridge-live"
+    marker.write_text("claude-session")
+    monkeypatch.setattr(type(io), "live_marker", staticmethod(lambda: marker))
+    listed = MagicMock(return_value=[])
+    monkeypatch.setattr(live_mod, "list_sessions", listed)
+
+    io._live_session = SimpleNamespace(pid=42, socket_path="/tmp/claude.sock")
+    assert io.live_target() is None
+    assert await io.live_send("do work") is False
+    assert await io.live_route("/tmp/project", "do work") is False
+    await io._restore_live()
+
+    listed.assert_not_called()
+    assert io._live_session is None
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_backend_rejects_claude_live_command():
+    io = TelegramIO(
+        make_cfg(agent_backend="codex"), AsyncMock(), FakeControls()
+    )
+    msg = make_message(user_id=42, text="/live")
+    msg.reply_text = AsyncMock()
+
+    await io._cmd_live(MagicMock(message=msg), MagicMock(args=[]))
+
+    assert "Codex" in msg.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_live_stream_speaks_only_after_a_voice_note():
+    # Mirror the user's own channel: talk to it and it talks back, type at it
+    # and it stays quiet -- a voice note read out at the desk is just noise
+    # over the text already on screen.
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls(), on_speak=AsyncMock(return_value=b"ogg"))
+    io._send_plain_voice = AsyncMock(return_value=None)
+    io._remember_sent = AsyncMock()
+
+    io._live_spoken = False
+    await io._speak_live("Padaryta.", "/tmp/p")
+    assert io._send_plain_voice.await_count == 0
+
+    io._live_spoken = True
+    await io._speak_live("Padaryta.", "/tmp/p")
+    assert io._send_plain_voice.await_count == 1

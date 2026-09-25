@@ -320,3 +320,82 @@ def test_parse_options_rejects_long_lines_as_prose():
 def test_parse_options_never_raises_on_odd_input():
     assert live.parse_options(None) == []
     assert live.parse_options(12345) == []
+
+
+def test_spoken_of_drops_tool_and_thinking_lines():
+    # The voice note must not read out "Bash: ls" every two seconds; the text
+    # message already carries that for anyone looking at the screen.
+    entry = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "thinking", "thinking": "weighing two options"},
+                {"type": "text", "text": "Fixing the parser"},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+            ]
+        },
+    }
+    body = live.render(entry)
+
+    assert "Fixing the parser" in body and "Bash" in body
+    assert live.spoken_of(body) == "Fixing the parser"
+
+
+def test_spoken_of_is_empty_for_a_tool_only_turn():
+    # A turn that only ran tools has nothing to say out loud -- the caller
+    # uses the empty string to skip synthesis entirely.
+    entry = {
+        "type": "assistant",
+        "message": {
+            "content": [{"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}}]
+        },
+    }
+
+    assert live.spoken_of(live.render(entry)) == ""
+
+
+def test_spoken_of_keeps_a_pending_question():
+    # A question IS the thing worth hearing when away from the keyboard.
+    entry = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "name": "AskUserQuestion",
+                    "input": {
+                        "questions": [
+                            {"question": "Deploy now?", "options": [
+                                {"label": "Yes"}, {"label": "Wait"}
+                            ]}
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+
+    assert "Deploy now?" in live.spoken_of(live.render(entry))
+
+
+def test_typed_here_tells_the_keyboard_from_telegram(tmp_path):
+    # The voice follows wherever the user last actually spoke from: a line
+    # typed in the editor means they are at the screen, a Telegram message
+    # (a "peer" turn) or a finished background task does not.
+    path = tmp_path / "t.jsonl"
+    telegram = {"type": "user", "origin": {"kind": "peer"},
+                "message": {"content": "labas"}}
+    task = {"type": "user", "origin": {"kind": "task-notification"},
+            "message": {"content": "<task-notification>"}}
+    keyboard = {"type": "user", "origin": {"kind": "human"},
+                "message": {"content": "rašau prie kompo"}}
+
+    path.write_text(json.dumps(telegram) + "\n" + json.dumps(task) + "\n")
+    first = path.stat().st_size
+    assert live.typed_here(path, 0, first) is False
+
+    with path.open("a") as fh:
+        fh.write(json.dumps(keyboard) + "\n")
+    assert live.typed_here(path, first, path.stat().st_size) is True
+    # Nothing new since then -> nothing to report.
+    assert live.typed_here(path, path.stat().st_size, path.stat().st_size) is False

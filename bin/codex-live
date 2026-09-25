@@ -1,0 +1,57 @@
+#!/home/home/Projects/claude-voice-bridge/.venv/bin/python
+"""Open the TUI on the same Codex thread used by Telegram."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import sqlite3
+import sys
+
+
+ROOT = Path("/home/home/Projects/claude-voice-bridge")
+
+
+def env_value(name: str) -> str:
+    for raw in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#") and line.partition("=")[0] == name:
+            return line.partition("=")[2].strip()
+    return ""
+
+
+def main() -> None:
+    db_path = env_value("DB_PATH") or str(ROOT / "voice-bridge.db")
+    endpoint = env_value("CODEX_APP_SERVER_URL")
+    if not endpoint:
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        endpoint = f"unix://{runtime}/codex-shared/app-server.sock"
+
+    connection = sqlite3.connect(db_path)
+    try:
+        project = sys.argv[1] if len(sys.argv) > 1 else None
+        if not project:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key = 'last_active'"
+            ).fetchone()
+            project = row[0] if row else None
+        if not project:
+            raise SystemExit("No active Telegram project. Pass its name as an argument.")
+        row = connection.execute(
+            "SELECT session_id FROM agent_sessions "
+            "WHERE project = ? AND backend = 'codex'",
+            (project,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if not row:
+        raise SystemExit(f"No Codex thread stored for Telegram project: {project}")
+
+    os.execv(
+        "/home/home/.local/bin/codex",
+        ["codex", "resume", row[0], "--remote", endpoint],
+    )
+
+
+if __name__ == "__main__":
+    main()

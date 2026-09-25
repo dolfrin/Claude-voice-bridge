@@ -255,6 +255,35 @@ def read_new(path: Path, offset: int) -> tuple[list[str], int]:
     return lines, offset
 
 
+def typed_here(path: Path, start: int, end: int) -> bool:
+    """Whether a turn typed at the keyboard landed between ``start`` and ``end``.
+
+    Claude Code stamps each user entry with where it came from:
+    ``origin.kind == "human"`` is typed in that session's own editor or
+    terminal; a Telegram message arrives as ``"peer"``, a finished background
+    task as ``"task-notification"``. Only "human" means the person is sitting
+    at the screen. Never raises -- a failed read reads as "no"."""
+    if end <= start:
+        return False
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            chunk = fh.read(end - start)
+    except OSError:
+        return False
+    for raw in chunk.decode("utf-8", "replace").splitlines():
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") != "user":
+            continue
+        origin = entry.get("origin")
+        if isinstance(origin, dict) and origin.get("kind") == "human":
+            return True
+    return False
+
+
 def render(entry: dict) -> str:
     """One transcript entry as a Telegram line, or "" if it is not worth one.
 
@@ -280,13 +309,31 @@ def render(entry: dict) -> str:
             if reasoning:
                 if len(reasoning) > THINKING_LEN:
                     reasoning = reasoning[: THINKING_LEN - 1] + "…"
-                parts.append(f"\U0001F4AD *{reasoning}*")
+                parts.append(f"{THINKING_MARK} *{reasoning}*")
         elif kind == "tool_use":
             if block.get("name") == "AskUserQuestion":
                 parts.append(_question_lines(block.get("input")))
             else:
-                parts.append(f"\U0001F527 {_tool_line(block)}")
+                parts.append(f"{TOOL_MARK} {_tool_line(block)}")
     return "\n".join(parts)
+
+
+def spoken_of(body: str) -> str:
+    """The part of a rendered ``/live`` body worth reading aloud.
+
+    Drops the thinking and tool-activity lines :func:`render` prefixes with
+    their markers: a busy session emits a tool line every second or two, and
+    hearing "Bash: ls" read out is noise. The assistant's own text -- and a
+    pending question, which is exactly what you want to hear when away from
+    the keyboard -- is kept.
+    """
+    kept = [
+        line
+        for line in body.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith((THINKING_MARK, TOOL_MARK))
+    ]
+    return "\n".join(kept).strip()
 
 
 def _question_lines(inputs) -> str:
@@ -336,6 +383,10 @@ _TOOL_DETAIL = {
 _DETAIL_LEN = 90
 # Reasoning is shown, but a long block would push the answer off the screen.
 THINKING_LEN = 400
+# Line markers render() stamps on the two kinds of output that are worth
+# SEEING but not HEARING; spoken_of strips them back out.
+THINKING_MARK = "\U0001F4AD"
+TOOL_MARK = "\U0001F527"
 
 
 def _tool_line(block: dict) -> str:

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+REPO=/home/home/Projects/claude-voice-bridge
+REAL_CODEX=/home/home/.local/bin/codex
+
+for arg in "$@"; do
+    if [ "$arg" = "app-server" ]; then
+        exec "$REPO/.venv/bin/python" "$REPO/scripts/codex_ws_stdio_proxy.py"
+    fi
+done
+
+exec "$REAL_CODEX" "$@"
