@@ -35,16 +35,16 @@ Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 |  | Feature | What it gives you |
 |---|---|---|
 | 🤖 | Claude or Codex | Run projects on the Claude Agent SDK or a local `codex app-server`; switch live with `/agent` |
-| 🔗 | Editor sessions | `/live` drives a Claude Code session already open in your IDE; project messages join it automatically |
+| 🔗 | Editor sessions | Messages go straight into the Claude Code session already open in your IDE; the bridge starts its own only when none is |
 | 🔐 | Editor permissions | Answer the IDE's tool-permission prompts from Telegram with ✅/❌ buttons |
 | 💬 | Text control | Send instructions and replies from Telegram |
 | 🎤 | Voice control | Voice messages are transcribed locally with faster-whisper |
 | 🔊 | Spoken replies | The agent replies with text plus a clean voice summary |
-| 🧭 | Project routing | Quote-reply, `project: ...` name prefix, or last-active fallback |
+| 🧭 | Routing | A reply goes to the session that sent the message, plain text to the one that spoke last, `project: ...` to that project; `➡️`/`💬` labels show where things go and come from |
 | 🗣 | Hands-free answers | Answer approvals and `ask_user` questions by voice or text, not only by tapping |
 | 🎛 | Inline controls | `/menu`, `/projects`, `/panel`, buttons for mode, voice, on/off, stop |
 | ⏰ | Schedules | `/schedule` delivers a daily prompt to a project at a local time |
-| 🗒 | Recap & cost | `/recap` shows what happened while away; `/cost` shows token/cost usage |
+| 🗒 | Recap & limits | `/recap` shows what happened while away; `/usage` shows your Claude 5-hour, weekly and per-model limits and this PC's share of them |
 | 🆕 | New projects | `/newproject <name>` creates `~/Projects/<name>`, runs `git init`, and switches to it |
 | ♾ | Always allow | Approvals can remember narrow per-project grants; review them with `/policies` |
 | 🔁 | Context sync | IDE work is summarized into the next Telegram turn, and vice versa via a hook |
@@ -55,7 +55,7 @@ Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 | ⛔ | Interrupt | `/stop`, menu Stop, or `!` prefix interrupts/restarts the session |
 | 🔘 | Agent buttons | Claude `ask_user` and Codex `request_user_input` show tappable Telegram choices |
 | 📤 | File delivery | Claude can call `send_file` to send project-local files back |
-| 🧠 | Session resume | Claude session IDs and Codex thread IDs persist in SQLite and resume after restart |
+| 🧠 | Session resume | Claude session IDs and Codex thread IDs persist in SQLite and resume after restart; a conversation open elsewhere is forked, never opened twice |
 | 🇱🇹 | Lithuanian TTS | Optional local `lithuanian` TTS engine (Piper reginute1 voice) |
 | 🛡 | Safe mode | Risky tool calls ask for Telegram approval before running |
 
@@ -65,7 +65,7 @@ Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 /menu
 ├─ 🟢 Active       active sessions
 ├─ 📚 All          all discovered projects
-├─ 🎛 Panel        mode / voice / engine / on-off / verbose / cost / recap
+├─ 🎛 Panel        mode / voice / engine / on-off / verbose / limits / recap
 ├─ 🧾 Handoff      last-active project transcript
 ├─ ⛔ Stop         interrupt current work
 └─ 🔎 Refresh      refresh local projects
@@ -76,9 +76,11 @@ Common patterns:
 | Action | Use |
 |---|---|
 | Select project | Tap a project in `/projects` or `/projects_all` |
-| Reply to exact project | Telegram quote-reply any bot message from that project |
-| Address a project by name | Start the message with its name, e.g. `api: run the tests` |
-| Send to current project | Send plain text or voice |
+| Answer a specific session | Quote-reply any message it sent (including the IDE's "finished" notices) |
+| Address a project by name | Start with its name, label or folder name, e.g. `api: run the tests` |
+| Continue the conversation | Send plain text or voice: it goes to the session that spoke last |
+| See which is which | `/projects` (🖥 = open in VS Code, ✍️ = what to type); `➡️` says where a message went |
+| Check your limits | `/usage` |
 | Interrupt and replace task | Start a message with `!`, e.g. `! stop, fix tests instead` or `!api: fix tests` |
 | Answer a question/approval | Tap a button, or quote-reply / just say "yes", "no", "2", "the second one" |
 | Switch Claude ⇄ Codex | `/agent` and tap, or `/agent codex` / `/agent claude` |
@@ -460,9 +462,9 @@ journalctl --user -u voice-bridge -f
 |  | Command | Effect |
 |---|---|---|
 | 🏠 | `/menu` | Main tappable menu |
-| 🎛 | `/panel` | Full control board: per-project on/off, mode, voice, verbose (🔧); global ALL ON / ALL OFF, engine, 💰 Cost, 🗒 Recap |
-| 🟢 | `/projects` | Active/last-active projects with select and on/off buttons |
-| 📚 | `/projects_all` or `/projects all` | All known projects, including disabled ones |
+| 🎛 | `/panel` | Control board for the switched-on projects: on/off, mode, voice, verbose (🔧); global ALL ON / ALL OFF, engine, 📊 Limits, 🗒 Recap |
+| 🟢 | `/projects` | Active/last-active projects: whether a session is open in VS Code (🖥), what to type to address it (✍️), select and on/off buttons |
+| 📚 | `/projects_all` or `/projects all` | All known projects, including disabled ones, paged (◀ ▶) |
 | 🔎 | `/projects_refresh` | Scan recent VS Code/Claude projects and add new ones disabled |
 | 🆕 | `/newproject <name>` | Create `~/Projects/<name>`, `git init` it, enable it, and make it the active project |
 | 🤖 | `/agent` / `/agent <claude\|codex>` | Show which agent answers (with switch buttons), or switch; the bridge restarts in ~10 s |
@@ -472,14 +474,14 @@ journalctl --user -u voice-bridge -f
 | ⏸ | `/off [project]` | Disable one project, or all projects with no arg |
 | ⛔ | `/stop [project]` | Interrupt and restart active or named project, clearing queued work |
 | 📡 | `/status [project]` | Ask a project for a quick status update |
-| ℹ️ | `/info` | Show per-project model, effort, mode, voice, and verbose setting |
+| ℹ️ | `/info` | Show model, effort, mode, voice, and verbose for the switched-on projects |
 | 🛡 | `/mode <full\|safe\|ask> [project]` | Set autonomy globally or per project |
 | 🧩 | `/effort <low\|medium\|high\|xhigh\|max> [project]` | Set reasoning effort globally or per project |
 | 🔊 | `/voice list` / `/voice <name> [for <project>]` | List or set TTS voices |
 | 🔧 | `/verbose [on\|off] [project]` | Toggle live tool-activity streaming (default off); omit on/off to enable |
 | 🧠 | `/engine <auto\|openai\|piper\|together\|lithuanian>` | Switch TTS backend live |
 | 🗒 | `/recap` | Show what changed across all projects while you were away |
-| 💰 | `/cost` | Show per-project and total token and cost usage |
+| 📊 | `/usage` (or `/cost`) | Claude limits of the logged-in account — 5-hour, weekly, per-model (e.g. Fable) — and this PC's estimated share, per session |
 | ♾ | `/policies` / `/policies clear [project]` | List, or revoke (all / one project's), the always-allow grants |
 | ⏰ | `/schedule` / `/schedule <project> <HH:MM> <prompt>` / `/schedule remove\|on\|off <id>` | List, add, or toggle/remove a daily recurring prompt delivered to a project at a local time |
 | ❓ | `/help` | Routing rules (name-prefix, last-active, quote-reply, `!` urgent), how to answer approvals/questions from the phone, and the command list |
@@ -533,15 +535,26 @@ An incoming text or voice message is handled in this order:
    question. If exactly one question is open and the message has no quote and no
    `project:` prefix, it answers that one. Answers can be the option number, an
    ordinal ("second", "antras"), the label, a unique part of it, or free text.
-3. **`/live` attachment** — while attached, the message goes into that editor session.
-4. **Project routing:**
-   - **Swipe-reply (quote-reply)** a specific message → that message's project.
-   - **Name prefix** — `api: run the tests` → project `api`.
-   - **Plain message** → the **last-active** project (the one that most recently
-     sent you a message).
-5. If the chosen project has a Claude Code session already open in the IDE on the same
-   directory, the message joins that session instead of starting a second one (Claude
-   backend only; falls back to the bridge's own session if none is open).
+3. **Quote-reply** → the session that sent the replied-to message. That includes the
+   IDE's own "finished"/question notifications (see
+   [Telegram notifications from IDE hooks](#telegram-notifications-from-ide-hooks)).
+   A quote-reply wins over any name prefix in the text.
+4. **Name prefix** → that project. A project answers to its name, its Telegram label
+   and its folder name followed by `:`, `,` or `-` (`api: run the tests`). The bare
+   form without a separator (`api run the tests`, how speech is usually transcribed)
+   works for switched-on projects only, so a sentence starting with a folder name like
+   `docs` or `web` is not hijacked.
+5. **Plain message** → the session that sent the **last** message in the chat.
+
+Wherever a message is headed, if that conversation — or, failing that, any Claude Code
+session on that project's directory, the most recently active one — is **open on this
+machine, the message goes straight into it**. The bridge runs a project in a session of
+its own only when nothing is open there (Claude backend; see
+[Editor sessions](#editor-sessions-claude-backend)).
+
+So you always know where things go: `➡️ Project · conversation` is posted whenever the
+destination changes, and every message streamed from an editor session is headed
+`💬 Project · conversation`.
 
 A leading `!` is stripped first and marks the turn urgent (interrupts current work), so
 `!api: fix it` interrupts `api`. A disabled project gets a short "project is off" note
@@ -696,9 +709,10 @@ Every Claude Code session (CLI or VS Code extension) registers itself under
 `~/.claude/sessions/` and listens on a Unix socket. `/live` lists the running sessions
 with a button each; tap one to attach. While attached:
 
-- Your Telegram messages (text or voice) are delivered into that session as user turns.
+- Your Telegram messages (text or voice, attachments included) are delivered into that
+  session as user turns.
 - The session's own transcript is tailed back into Telegram, batched into one message
-  per poll. Attaching does not replay old history.
+  per poll and headed `💬 Project · conversation`. Attaching does not replay old history.
 - If you spoke, the reply is spoken back; if you typed, it is text only.
 - When the session asks a question as a numbered list, you get one button per option;
   a tap sends that number. (Claude Code's own `AskUserQuestion` picker can only be
@@ -709,9 +723,30 @@ The session's "finished" notification from your own Stop hook would duplicate th
 stream, so the bridge writes the attached session id to `~/.claude/.voice-bridge-live`
 for such a hook to check.
 
-Even without `/live`, a message routed to a project whose directory already has a
-Claude Code session open in the IDE **joins that session** instead of starting a
-second, invisible one. With nothing open, it goes to the bridge's own session as before.
+You rarely need `/live` by hand: routing attaches to the right open session by itself
+(see [Reply routing](#reply-routing)). With nothing open, a project runs in the bridge's
+own session. If the conversation the bridge would resume is open in another process,
+it is **forked** (full history, new id) rather than opened a second time, which would
+lose messages; if its transcript is gone, a fresh one is started.
+
+### Telegram notifications from IDE hooks
+
+Claude Code hooks that post straight to Telegram (a Stop hook saying "finished", a
+Notification or `AskUserQuestion` hook relaying a question) are anonymous to the bridge
+unless they record which session sent which message. Pipe the Telegram reply through
+`scripts/telegram-record-sent.py`:
+
+```bash
+curl -s "https://api.telegram.org/bot$TOKEN/sendMessage" \
+  --data-urlencode "chat_id=$CHAT_ID" --data-urlencode "text=$TEXT" \
+  | python3 scripts/telegram-record-sent.py "$SESSION_ID" "$CWD"
+```
+
+`SESSION_ID` and `CWD` come from the hook's JSON input (`session_id`, `cwd`). The
+script appends `{"m": message_id, "s": session_id, "c": cwd, "t": time}` to
+`~/.claude/.voice-bridge-sent.jsonl`, which the bridge also writes for its own messages
+and trims on start. It never fails the hook. With it, replying to — or simply writing
+after — such a notification reaches that exact session.
 
 > The socket format is internal to Claude Code and can change without notice. Sessions
 > started before a Claude Code version with this socket cannot be attached; restart them.
@@ -735,6 +770,27 @@ request file when it gives up, and fall through to the normal editor prompt on
 timeout or any error. When the request file disappears, the Telegram message is edited
 to "⌛ Per vėlu — atsakyk editoriuje" so a late tap is never mistaken for an answer.
 Request ids must match `[A-Za-z0-9_-]`; anything else is refused.
+
+## Usage and limits
+
+`/usage` (also `/cost` and the panel's 📊 button) shows, for the Claude account logged
+in on this machine:
+
+- **Every limit the account has** — the 5-hour session, the week, and model-scoped
+  weeks such as Fable — with the account's total percentage across all devices and
+  when it resets. These come from the endpoint Claude Code's own `/usage` reads; it is
+  not a documented public API, so a failure is reported, never guessed.
+- **This PC's part** of each, and the sessions it went to, in percent of the limit.
+  Anthropic does not report per-device use and Claude Code transcripts do not record the
+  account, so the bridge keeps a ledger (`claude-usage.jsonl` next to its database),
+  sampled every 5 minutes: which account was logged in, each limit's percentage, and
+  this PC's price-weighted tokens. It counts only turns made while that account was
+  logged in and learns the price of 1 % from how far a limit rose against this PC's
+  tokens — other devices only push that ratio up, so the smallest one observed is used.
+  The result is an estimate (`≈`); until there is enough rise to learn from, the rise
+  since the first reading is shown as a ceiling instead. Model-scoped limits count only
+  that model's turns. `claude.ai` web/desktop chats are not visible here and count as
+  other devices.
 
 ---
 
