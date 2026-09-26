@@ -1936,26 +1936,34 @@ class TelegramIO:
                 text = t("schedule.toggled", id=sid, state=state)
         await query.message.reply_text(text)
 
-    async def _note_if_busy(self, session) -> None:
+    async def _note_if_busy(self, session, text: str = "") -> None:
         """Say so when a message reached a session that is mid-task: Claude
         Code queues it and answers only when the current work is done, which
-        otherwise looks like being ignored. At most every 10 minutes per
-        session."""
+        otherwise looks like being ignored -- or like the message went
+        nowhere. Every such message gets a line naming the session, with
+        "↪️ not for it" buttons; what it is doing and for how long is added at
+        most every 10 minutes."""
         # The status at attach time is stale; read it as it is now.
         with contextlib.suppress(Exception):
             session = live.find(session.pid, Path.home() / ".claude" / "sessions") or session
         if getattr(session, "status", "") != "busy":
             return
         now = time.time()
+        label = self.session_label(session)
+        rows = self._move_rows(text, session.session_id, label)
+        stop = self._interrupt_markup(session)
+        if stop is not None:
+            rows = list(stop.inline_keyboard) + rows
+        markup = InlineKeyboardMarkup(rows) if rows else None
         if now - self._busy_noted.get(session.session_id, 0) < 600:
+            await self._send_plain(t("route.queued_short", label=label), markup)
             return
         self._busy_noted[session.session_id] = now
         activity = live.current_activity(
             live.transcript_of(Path.home() / ".claude" / "projects", session.session_id)
         )
         if activity is None:
-            await self._send_plain(t("route.busy", label=self.session_label(session)),
-                                   self._interrupt_markup(session))
+            await self._send_plain(t("route.busy", label=label), markup)
             return
         what, since = activity
         what = t("route.thinking") if what == "🤔" else what
@@ -1964,9 +1972,9 @@ class TelegramIO:
         # read "0 min"; a stuck step is the one whose own time keeps growing.
         busy_since = (getattr(session, "status_since", 0) or 0) / 1000 or since
         await self._send_plain(
-            t("route.busy_doing", label=self.session_label(session), what=what,
+            t("route.busy_doing", label=label, what=what,
               total=_duration(now - busy_since), step=_duration(now - since)),
-            self._interrupt_markup(session),
+            markup,
         )
 
     def _interrupt_markup(self, session) -> InlineKeyboardMarkup | None:
@@ -2362,7 +2370,7 @@ class TelegramIO:
         self._live_spoken = spoken
         try:
             await live.send(session.socket_path, text)
-            await self._note_if_busy(session)
+            await self._note_if_busy(session, text)
             return True
         except Exception:  # noqa: BLE001 - never crash the inbound path
             logger.exception("live: send failed for pid %s", session.pid)
@@ -2489,6 +2497,29 @@ class TelegramIO:
                 )
         return seen_until
 
+    def _move_rows(self, text: str, session_id: str, label: str) -> list:
+        """"↪️ other session" buttons that re-deliver *text* there."""
+        others = self._other_open_sessions(session_id)
+        if not others or not text:
+            return []
+        self._move_seq += 1
+        token = str(self._move_seq)
+        self._moves[token] = (text, session_id)
+        for old in list(self._moves)[:-20]:  # keep the last few
+            self._moves.pop(old, None)
+        rows, seen = [], {label}
+        for x in others:
+            other = self.session_label(x)[:40]
+            if other in seen:
+                continue
+            seen.add(other)
+            rows.append([InlineKeyboardButton(
+                t("move.not_here", label=other), callback_data=f"mv:{token}:{x.pid}",
+            )])
+            if len(rows) == 3:
+                break
+        return rows
+
     def _other_open_sessions(self, session_id: str) -> list:
         """Live sessions other than *session_id*, most recently active first."""
         try:
@@ -2554,25 +2585,8 @@ class TelegramIO:
             return
         others = self._other_open_sessions(session_id) if text and session_id else []
         self._last_route = key
-        markup = None
-        if others:
-            self._move_seq += 1
-            token = str(self._move_seq)
-            self._moves[token] = (text, session_id)
-            for old in list(self._moves)[:-20]:  # keep the last few
-                self._moves.pop(old, None)
-            rows, seen = [], {label}
-            for x in others:
-                other = self.session_label(x)[:40]
-                if other in seen:
-                    continue
-                seen.add(other)
-                rows.append([InlineKeyboardButton(
-                    t("move.button", label=other), callback_data=f"mv:{token}:{x.pid}",
-                )])
-                if len(rows) == 4:
-                    break
-            markup = InlineKeyboardMarkup(rows) if rows else None
+        rows = self._move_rows(text, session_id, label) if others else []
+        markup = InlineKeyboardMarkup(rows) if rows else None
         text_out = t("route.went_to", label=label) + ("\n" + t("route.move_hint") if markup else "")
         message = await self._send_plain(text_out, markup)
         # A reply to the notice itself must reach the same place.

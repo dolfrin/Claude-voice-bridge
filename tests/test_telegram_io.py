@@ -4071,7 +4071,7 @@ async def test_with_several_sessions_open_a_message_can_be_moved(monkeypatch):
     assert io._send_plain.await_count == 1  # only when the destination changes
     markup = io._send_plain.await_args_list[0].args[1]
     button = markup.inline_keyboard[0][0]
-    assert button.text == "↪️ b" and button.callback_data.startswith("mv:1:2")
+    assert button.text == "↪️ Ne jai — perkelti į b" and button.callback_data.startswith("mv:1:2")
 
     query = AsyncMock()
     query.data = button.callback_data
@@ -4324,10 +4324,12 @@ async def test_message_to_a_busy_session_says_it_is_queued(monkeypatch):
     io.session_label = lambda s: "Qwing"
 
     await io.live_send("labas")
-    await io.live_send("dar")  # not repeated within 10 minutes
+    await io.live_send("dar")  # every message says where it went; detail once
 
-    io._send_plain.assert_awaited_once()
-    assert "eilėje" in io._send_plain.await_args.args[0]
+    sent = [c.args[0] for c in io._send_plain.await_args_list]
+    assert len(sent) == 2
+    assert "eilėje" in sent[0]
+    assert sent[1] == "⏳ Eilėje pas Qwing (dirba)."
 
 
 @pytest.mark.asyncio

@@ -811,3 +811,11 @@ LT.update({
     "projects.btn_off": "⏸ Išjungti",
     "projects.legend": "🎯 pavadinimas — rašyti tam projektui · ▶/⏸ — įjungti/išjungti",
 })
+EN.update({
+    "route.queued_short": "⏳ Queued at {label} (busy).",
+    "move.not_here": "↪️ Not for it — move to {label}",
+})
+LT.update({
+    "route.queued_short": "⏳ Eilėje pas {label} (dirba).",
+    "move.not_here": "↪️ Ne jai — perkelti į {label}",
+})
