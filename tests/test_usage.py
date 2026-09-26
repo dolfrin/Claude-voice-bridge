@@ -61,7 +61,8 @@ def test_other_accounts_turns_are_not_counted_and_estimate_waits(home, monkeypat
 
     text = usage.format_usage(ledger, home, now)
     assert "acc-B@x (max 20x)" in text
-    assert "5 val.: 2 %" in text           # account total, exact
+    assert "Bendrai paskyroj (visi įrenginiai): 2 %" in text  # account total, exact
+    assert "(prisijungimo):" in text  # the PC's list starts at the login, not the window
     assert "sužinosiu nuo kito lango" in text  # window began before the login
 
 
@@ -80,8 +81,9 @@ def test_estimate_after_calibration_is_capped_by_account_total(home, monkeypatch
     _limits(monkeypatch, 40, 40, now + 60)
     text = usage.format_usage(ledger, home, now + 60)
 
-    assert "5 val.: 40 %" in text
-    assert "5 val.: ≈ 10 %" in text
+    assert "Bendrai paskyroj (visi įrenginiai): 40 %" in text
+    assert "Šis PC: ≈ 10 %" in text
+    assert "(lango pradžios):" in text
 
 
 def test_switching_account_restarts_attribution(home, monkeypatch):

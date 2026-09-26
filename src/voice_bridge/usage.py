@@ -219,23 +219,29 @@ def _project(cwd: str) -> str:
     return path.name or "?"
 
 
-def _when(ts: float, now: float) -> str:
+def _until(ts: float, now: float) -> str:
     left = ts - now
-    local = datetime.fromtimestamp(ts)
-    stamp = local.strftime("%H:%M" if left < 20 * 3600 else "%m-%d %H:%M")
     hours = left / 3600
-    rel = f"po {int(left // 60)} min" if hours < 1 else f"po {hours:.0f} val." if hours < 48 else f"po {hours / 24:.0f} d."
-    return f"{stamp} ({rel})"
+    if hours < 1:
+        return f"po {int(left // 60)} min"
+    return f"po {hours:.0f} val." if hours < 48 else f"po {hours / 24:.0f} d."
 
 
-def _session_lines(root: Path, since: float, now: float) -> list[str]:
+def _stamp(ts: float, now: float) -> str:
+    """Local time; the date only when it is not today."""
+    local = datetime.fromtimestamp(ts)
+    same_day = local.date() == datetime.fromtimestamp(now).date()
+    return local.strftime("%H:%M" if same_day else "%m-%d %H:%M")
+
+
+def _session_lines(root: Path, since: float, now: float, top: int = _TOP) -> list[str]:
     weights = session_weights(root, since)
     total = sum(w for w, _, _ in weights.values())
     if not total:
         return ["  (šiame PC su šita paskyra dar nedirbta)"]
     ranked = sorted(weights.items(), key=lambda kv: kv[1][0], reverse=True)
     lines = []
-    for uuid, (weight, cwd, last) in ranked[:_TOP]:
+    for uuid, (weight, cwd, last) in ranked[:top]:
         path = next(root.glob(f"*/{uuid}.jsonl"), None)
         name = claude_history.title(path) if path else ""
         if len(name) > 40:
@@ -244,9 +250,9 @@ def _session_lines(root: Path, since: float, now: float) -> list[str]:
         ago_text = f"prieš {ago} min" if ago < 90 else f"prieš {ago // 60} val."
         label = _project(cwd) + (f" · {name}" if name else "")
         lines.append(f"  {weight / total * 100:.0f} % — {label} ({ago_text})")
-    if len(ranked) > _TOP:
-        rest = sum(w for _, (w, _, _) in ranked[_TOP:])
-        lines.append(f"  {rest / total * 100:.0f} % — dar {len(ranked) - _TOP} sesijos")
+    if len(ranked) > top:
+        rest = sum(w for _, (w, _, _) in ranked[top:])
+        lines.append(f"  {rest / total * 100:.0f} % — dar {len(ranked) - top} sesijos")
     return lines
 
 
@@ -266,35 +272,45 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
 
     samples = _load(ledger)
     tier = sample["tier"].replace("default_claude_", "").replace("_", " ")
-    lines = [f"📊 {sample['email']}" + (f" ({tier})" if tier else ""), ""]
-    lines.append("Bendrai šitoj paskyroj (visi įrenginiai):")
-    for _, label, _, n in _WINDOWS:
-        if sample[f"u{n}"] is not None:
-            lines.append(
-                f"• {label}: {sample[f'u{n}']:.0f} % — atsinaujins {_when(sample[f'r{n}'], now)}"
-            )
-    lines.append("")
-    lines.append("Šis PC su šita paskyra:")
-    for _, label, span, n in _WINDOWS:
-        k = _pct_per_token(samples, sample["account"], n)
-        partial = sample[f"s{n}"] > sample[f"r{n}"] - span + 1
-        since = (
-            f" (skaičiuoju nuo {datetime.fromtimestamp(sample[f's{n}']).strftime('%m-%d %H:%M')})"
-            if partial else ""
+    login = sample["since"]
+    lines = [
+        f"📊 {sample['email']}" + (f" ({tier})" if tier else ""),
+        f"Šis PC prie jos prisijungęs nuo {_stamp(login, now)}.",
+    ]
+    for (_, _, span, n), title in zip(_WINDOWS, ("⏱ 5 val. langas", "📅 Savaitės langas")):
+        reset = sample[f"r{n}"]
+        start = reset - span
+        counted_from = sample[f"s{n}"]
+        partial = counted_from > start + 1
+        lines.append("")
+        lines.append(
+            f"{title}: {_stamp(start, now)} – {_stamp(reset, now)} "
+            f"(atsinaujins {_until(reset, now)})"
         )
-        if k is None and partial:
+        if sample[f"u{n}"] is not None:
+            lines.append(f"• Bendrai paskyroj (visi įrenginiai): {sample[f'u{n}']:.0f} %")
+        k = _pct_per_token(samples, sample["account"], n)
+        if k is not None:
+            mine = min(sample[f"u{n}"] or 0, k * sample[f"l{n}"])
+            lines.append(f"• Šis PC: ≈ {mine:.0f} %")
+        elif partial:
             # Part of this window's percentage predates the login, so it cannot
             # be split; the next window starts clean.
             lines.append(
-                f"• {label}: sužinosiu nuo kito lango, {_when(sample[f'r{n}'], now)} — "
-                "šitas prasidėjo prieš prisijungiant šia paskyra"
+                "• Šis PC: sužinosiu nuo kito lango — šitas prasidėjo "
+                "prieš prisijungiant šia paskyra"
             )
-        elif k is None:
-            lines.append(f"• {label}: dar mokausi — reikia bent {_MIN_CALIBRATION_PCT} % naudojimo")
         else:
-            mine = min(sample[f"u{n}"] or 0, k * sample[f"l{n}"])
-            lines.append(f"• {label}: ≈ {mine:.0f} %{since}")
+            lines.append(
+                f"• Šis PC: dar mokausi — reikia bent {_MIN_CALIBRATION_PCT} % naudojimo"
+            )
+        why = " (prisijungimo)" if partial else " (lango pradžios)"
+        lines.append(f"• Šio PC sesijos nuo {_stamp(counted_from, now)}{why}:")
+        lines.extend(_session_lines(home / ".claude" / "projects", counted_from, now, top=3))
     lines.append("")
-    lines.append("Šio PC sesijos su šita paskyra (savaitė):")
-    lines.extend(_session_lines(home / ".claude" / "projects", sample["s7"], now))
+    lines.append(
+        "Sesijų % — dalis nuo šio PC darbo tame lange. Skaičiuojamos visos šio "
+        "PC Claude Code sesijos: VS Code, terminalas, tiltas, agentai. "
+        "claude.ai naršyklėje ar programėlėje — ne, jos patenka į „kitus“."
+    )
     return "\n".join(lines)
