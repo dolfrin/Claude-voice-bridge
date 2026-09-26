@@ -201,6 +201,9 @@ def _patch_sdk(monkeypatch):
     FakeClaudeSDKClient.instances = []
     FakeClaudeSDKClient.fail_connect = False
     monkeypatch.setattr(sessions_mod, "ClaudeSDKClient", FakeClaudeSDKClient)
+    # Stored ids in these tests are fakes; pretend their transcripts exist.
+    monkeypatch.setattr(sessions_mod, "_conversation_exists", lambda sid: True)
+    monkeypatch.setattr(sessions_mod, "_open_elsewhere", lambda sid: False)
     yield
     FakeClaudeSDKClient.instances = []
     FakeClaudeSDKClient.fail_connect = False
@@ -582,6 +585,42 @@ async def test_resume_session_id_passed_to_options():
 
     opts = FakeClaudeSDKClient.instances[0].options
     assert opts.resume == "prev-sess-9"
+
+    await sm.stop_all()
+
+
+async def test_missing_transcript_starts_fresh_and_says_so(monkeypatch):
+    monkeypatch.setattr(sessions_mod, "_conversation_exists", lambda sid: False)
+    project = make_project("qwing", autonomy="safe")
+    store = FakeStore(enabled={"qwing": True},
+                      session_ids={"qwing": "gone-sess"})
+    sent = []
+
+    async def on_outbound(o):
+        sent.append(o.text)
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    assert FakeClaudeSDKClient.instances[0].options.resume is None
+    assert any("naują pokalbį" in t for t in sent)
+
+    await sm.stop_all()
+
+
+async def test_session_open_in_editor_is_forked_not_reopened(monkeypatch):
+    monkeypatch.setattr(sessions_mod, "_open_elsewhere", lambda sid: sid == "ide-sess")
+    project = make_project("qwing", autonomy="safe")
+    store = FakeStore(enabled={"qwing": True}, session_ids={"qwing": "ide-sess"})
+
+    async def on_outbound(o):
+        pass
+
+    sm = make_sm([project], store, on_outbound)
+    await sm.start_all()
+
+    opts = FakeClaudeSDKClient.instances[0].options
+    assert opts.resume == "ide-sess" and opts.fork_session is True
 
     await sm.stop_all()
 

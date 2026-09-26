@@ -53,6 +53,7 @@ from .stt import Transcriber
 from .telegram_io import TelegramIO
 from .tts import get_tts
 from .types import Outbound
+from . import usage
 
 logger = logging.getLogger(__name__)
 
@@ -700,47 +701,6 @@ class _Controls:
         """Enable/disable a schedule by id (for /schedule on|off)."""
         return await self._store.set_schedule_enabled(schedule_id, enabled)
 
-    async def cost_summary(self) -> str:
-        """Per-project + TOTAL token/cost summary, read fresh from the store.
-
-        One line per project with recorded usage:
-        ``"{display}: {turns} turai, {in}+{out} tok, ${cost:.4f}"`` plus a
-        TOTAL line. Under Claude Code subscription auth the SDK never reports
-        ``total_cost_usd`` so every accumulated cost stays 0 — in that case
-        (no project shows a nonzero cost) the TOTAL line notes the cost is
-        unavailable instead of a misleading ``$0.0000``.
-        """
-        all_usage = await self._store.all_usage()
-        if not all_usage:
-            return "No usage recorded yet."
-
-        lines: list[str] = []
-        total_turns = total_in = total_out = 0
-        total_cost = 0.0
-        for name, row in all_usage.items():
-            display = self._mirror.get(name, {}).get("display_name", name)
-            turns = row.get("turns", 0)
-            tin = row.get("input_tokens", 0)
-            tout = row.get("output_tokens", 0)
-            cost = row.get("cost_usd", 0.0) or 0.0
-            total_turns += turns
-            total_in += tin
-            total_out += tout
-            total_cost += cost
-            lines.append(f"{display}: {turns} turai, {tin}+{tout} tok, ${cost:.4f}")
-
-        if total_cost > 0:
-            lines.append(
-                f"TOTAL: {total_turns} turai, {total_in}+{total_out} tok, "
-                f"${total_cost:.4f}"
-            )
-        else:
-            lines.append(
-                f"TOTAL: {total_turns} turai, {total_in}+{total_out} tok "
-                "(cost n/a — subscription auth?)"
-            )
-        return "\n".join(lines)
-
     def mark_last_active(self, project: str) -> None:
         """Flip last_active on for *project* and off for every other in the mirror."""
         for name, row in self._mirror.items():
@@ -932,7 +892,13 @@ class _Controls:
         The real model is the last ACTUAL model that answered a turn, read from
         the SessionManager's in-memory last-model map (None -> em dash)."""
         lines: list[str] = []
+        hidden = 0
         for name, row in self._mirror.items():
+            # Every known project made this longer than Telegram accepts, and
+            # /info silently failed; the switched-off ones are summarised.
+            if not (row.get("enabled") or row.get("last_active")):
+                hidden += 1
+                continue
             display = row.get("display_name", name)
             model = row.get("model") or "default"
             real = None
@@ -945,6 +911,8 @@ class _Controls:
                 f"effort={effort} · mode={row['mode']} · voice={row['voice']} · "
                 f"verbose={verbose}"
             )
+        if hidden:
+            lines.append(f"(+{hidden} išjungti — /projects_all)")
         lines.append(f"engine: {self._cfg.tts_backend}")
         return "\n".join(lines)
 
@@ -1450,8 +1418,26 @@ async def build() -> Wiring:
     )
 
 
+async def _sample_usage(ledger, stop: asyncio.Event, interval: float = 300) -> None:
+    """Record the Claude account's limits every *interval* seconds.
+
+    /usage can only tell this PC's part from the account's total by comparing
+    samples over time, and only turns made while an account was logged in
+    count toward it, so the samples have to keep coming whether or not anyone
+    asks."""
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(usage.take_sample, Path.home(), ledger)
+        except Exception:  # noqa: BLE001 - a missed sample is not worth dying for
+            logger.warning("usage: sample failed", exc_info=True)
+        try:
+            await asyncio.wait_for(stop.wait(), interval)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
-    """Start sessions, start telegram polling (returns), wait for *stop*, shut down.
+    """Start telegram polling (returns), start sessions, wait for *stop*, shut down.
 
     ``telegram.run()`` does NOT block (C3); this function owns the run-forever
     wait via ``stop``. The I4 scheduler runs as a long-lived background task
@@ -1459,8 +1445,10 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
     shutdown) and is ALSO cancelled/awaited in ``finally`` so a mid-``sleep``
     tick can't delay shutdown. Shutdown is symmetric and runs in ``finally``.
     """
-    await wiring.sessions.start_all()
+    # Telegram first: a project that fails to start reports it through
+    # Telegram, and before run() there is no bot to report with.
     await wiring.telegram.run()
+    await wiring.sessions.start_all()
     scheduler_task = asyncio.create_task(
         run_scheduler(
             wiring.store,
@@ -1471,14 +1459,18 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
             sleep_fn=asyncio.sleep,
         )
     )
+    usage_task = asyncio.create_task(
+        _sample_usage(usage.ledger_path(wiring.cfg.db_path), stop)
+    )
     try:
         await stop.wait()
     finally:
-        scheduler_task.cancel()
-        try:
-            await scheduler_task
-        except asyncio.CancelledError:
-            pass
+        for task in (scheduler_task, usage_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await wiring.telegram.stop()
         await wiring.sessions.stop_all()
 

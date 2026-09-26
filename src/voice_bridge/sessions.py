@@ -43,6 +43,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
+from . import claude_history
 from .approvals import ApprovalManager, make_can_use_tool
 from .catchup import build_catchup
 from .config import (
@@ -622,7 +623,24 @@ class SessionManager:
             self._make_on_ask_user(name),
         )
         resume = await self._store.get_session_id(name)
+        # The CLI refuses to start at all ("No conversation found") when the
+        # stored conversation's .jsonl is gone, which left the project dead on
+        # every boot and every message. Start fresh instead, and say so.
+        if resume and not _conversation_exists(resume):
+            logger.warning("%s: stored session %s is gone; starting fresh", name, resume)
+            resume = None
+            await self._emit_status(
+                name, "Ankstesnio pokalbio failo nebėra — pradedu naują pokalbį."
+            )
         options = self._build_options(project, resume, notify_server)
+        # A conversation already open in the editor or a CLI must not be opened
+        # a second time: both processes append to the same .jsonl without
+        # seeing each other and messages get lost. Branch off it instead; the
+        # fork carries the whole history and gets its own id, stored after the
+        # first turn like any other.
+        if resume and _open_elsewhere(resume):
+            logger.warning("%s: session %s is open elsewhere; forking", name, resume)
+            options.fork_session = True
 
         client = ClaudeSDKClient(options)
         try:
@@ -1067,6 +1085,19 @@ class SessionManager:
                 transient=transient,
             )
         )
+
+
+def _open_elsewhere(session_id: str) -> bool:
+    """Is *session_id* running in another live Claude Code process right now?"""
+    return session_id in claude_history.live_sessions(
+        Path.home() / ".claude" / "sessions"
+    )
+
+
+def _conversation_exists(session_id: str) -> bool:
+    """Is the Claude Code transcript for *session_id* still on disk?"""
+    root = Path.home() / ".claude" / "projects"
+    return any(root.glob(f"*/{session_id}.jsonl"))
 
 
 def _resolve_project_file(cwd: str, requested: str) -> Path | None:

@@ -53,7 +53,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import live
+from . import live, usage
 from .approvals import _TOKEN_RE, _fold
 from .config import AGENT_BACKENDS, Config, set_env_value
 from .scheduler import parse_hhmm
@@ -120,7 +120,6 @@ class Controls(Protocol):
     async def interrupt(self, project: str | None) -> str: ...
     def recap(self) -> str: ...
     def info(self) -> str: ...
-    async def cost_summary(self) -> str: ...
     async def list_policies(self) -> list[tuple[str, str]]: ...
     async def clear_policies(self, project: str | None) -> None: ...
     async def list_schedules(self, project: str | None = None) -> list[dict]: ...
@@ -407,6 +406,9 @@ class TelegramIO:
         self._env_path = ".env"
         self._restart = lambda: os.kill(os.getpid(), signal.SIGTERM)
         self._agent_switched: str | None = None
+        # Which Claude account was logged in when, and its limits over time:
+        # what /usage needs to tell this PC's part from the account's total.
+        self.usage_ledger = usage.ledger_path(cfg.db_path)
         self.app: Application | None = None
         self._pending_off_sends: dict[str, tuple[str, str]] = {}
         self._pending_off_seq = 0
@@ -1038,7 +1040,7 @@ class TelegramIO:
             return
         if action == "cost":
             # Info action: reply with a fresh message, do not touch the panel.
-            await query.message.reply_text(await self.controls.cost_summary())
+            await query.message.reply_text(await asyncio.to_thread(usage.format_usage, self.usage_ledger))
             return
         if action == "recap":
             await query.message.reply_text(self.controls.recap())
@@ -1192,11 +1194,13 @@ class TelegramIO:
                 format_projects(snapshot),
                 build_projects_list_markup(snapshot),
             )
-        elif action == "projects_all":
+        elif action.startswith("projects_all"):
+            _, _, page_str = action.partition(":")
+            page = int(page_str) if page_str.isdigit() else 0
             await self._edit_callback_text(
                 query,
-                format_projects(snapshot, show_all=True),
-                build_projects_list_markup(snapshot, show_all=True),
+                format_projects(snapshot, show_all=True, page=page),
+                build_projects_list_markup(snapshot, show_all=True, page=page),
             )
         elif action == "panel":
             await self._edit_callback_text(query, "Control panel", build_panel_markup(snapshot))
@@ -1604,11 +1608,14 @@ class TelegramIO:
     async def _cmd_cost(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """B3c: per-project + total token/cost usage summary."""
+        """/usage (and the old /cost): Claude limits in % plus this PC's sessions.
+
+        Dollars were meaningless here: on a subscription the SDK reports no
+        cost, so the old summary always said "n/a"."""
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        await msg.reply_text(await self.controls.cost_summary())
+        await msg.reply_text(await asyncio.to_thread(usage.format_usage, self.usage_ledger))
 
     async def _cmd_policies(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2245,7 +2252,7 @@ class TelegramIO:
         app.add_handler(
             CommandHandler("recap", self._cmd_recap, filters=only_me))
         app.add_handler(
-            CommandHandler("cost", self._cmd_cost, filters=only_me))
+            CommandHandler(["usage", "cost"], self._cmd_cost, filters=only_me))
         app.add_handler(
             CommandHandler("policies", self._cmd_policies, filters=only_me))
         app.add_handler(

@@ -44,7 +44,7 @@ _BOT_COMMANDS = [
     BotCommand("engine", "🧠 Change TTS backend"),
     BotCommand("agent", "🤖 Switch Claude / Codex"),
     BotCommand("recap", "🗒 What happened while away"),
-    BotCommand("cost", "💰 Token & cost usage"),
+    BotCommand("usage", "📊 Limits: 5h / week %"),
     BotCommand("policies", "♾ Always-allow grants"),
     BotCommand("schedule", "⏰ Daily scheduled prompts"),
     BotCommand("help", "❓ Routing rules & commands"),
@@ -71,13 +71,29 @@ def parse_callback(data: str) -> tuple[str, str]:
     return action, index_str
 
 
-def format_projects(snapshot: list[dict], show_all: bool = False) -> str:
+# Telegram rejects a message over 4096 characters or ~100 buttons outright, so
+# a list that grows with the project count must be paged: at 50+ projects the
+# full list (and the old all-projects panel) silently never arrived.
+_PAGE_SIZE = 15
+
+
+def _paged(rows: list, page: int) -> tuple[list, int, int]:
+    """``(rows_on_page, page, page_count)`` with *page* clamped into range."""
+    pages = max(1, -(-len(rows) // _PAGE_SIZE))
+    page = min(max(page, 0), pages - 1)
+    return rows[page * _PAGE_SIZE:(page + 1) * _PAGE_SIZE], page, pages
+
+
+def format_projects(
+    snapshot: list[dict], show_all: bool = False, page: int = 0
+) -> str:
     """Render /projects as a scannable HTML summary."""
     rows = _project_list_rows(snapshot, show_all=show_all)
     if not rows:
         return "no active projects\nUse /projects_all to show every project."
+    rows, page, pages = _paged(rows, page)
 
-    lines: list[str] = []
+    lines: list[str] = [f"Puslapis {page + 1}/{pages}", ""] if pages > 1 else []
     for _idx, row in rows:
         status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
@@ -96,11 +112,12 @@ def format_projects(snapshot: list[dict], show_all: bool = False) -> str:
 
 
 def build_projects_list_markup(
-    snapshot: list[dict], show_all: bool = False
+    snapshot: list[dict], show_all: bool = False, page: int = 0
 ) -> InlineKeyboardMarkup:
     """Project picker with separate select-target and on/off controls."""
     rows: list[list[InlineKeyboardButton]] = []
-    for idx, row in _project_list_rows(snapshot, show_all=show_all):
+    listed, page, pages = _paged(_project_list_rows(snapshot, show_all=show_all), page)
+    for idx, row in listed:
         status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
         name = row.get("display_name") or row["project"]
@@ -112,6 +129,14 @@ def build_projects_list_markup(
             ),
             InlineKeyboardButton(toggle_label, callback_data=f"ptgl:{idx}"),
         ])
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀", callback_data=f"menu:projects_all:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="noop:"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("▶", callback_data=f"menu:projects_all:{page + 1}"))
+        rows.append(nav)
     return InlineKeyboardMarkup(rows)
 
 
@@ -214,7 +239,7 @@ def _format_help() -> str:
         "/panel — valdymo skydelis (įjungti/išjungti, režimas, balsas).",
         "/projects — aktyvūs projektai (visi: /projects_all).",
         "/recap — kas nutiko, kol nebuvai.",
-        "/cost — tokenų ir kainos suvestinė.",
+        "/usage — Claude limitai (5 val., savaitė) ir šio PC sesijos.",
         "/info — modelis, effort ir nustatymai.",
         "/voice — parodyti ar nustatyti TTS balsą.",
         "/agent — kas atsako: Claude ar Codex (perjungti: /agent codex).",
@@ -290,7 +315,12 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
     Telegram limit. Index order is stable (projects come from static config).
     """
     rows: list[list[InlineKeyboardButton]] = []
+    # Only running (or last-used) projects: five buttons per project for every
+    # known project blew past Telegram's button limit and the panel never
+    # opened. The rest are switched on from /projects_all.
     for i, row in enumerate(snapshot):
+        if not (row["enabled"] or row.get("last_active")):
+            continue
         proj = row.get("display_name") or row["project"]
         dot = "\U0001F7E2" if row["enabled"] else "\U0001F534"  # green/red
         on_label = "ON" if row["enabled"] else "OFF"
@@ -315,7 +345,7 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
             f"engine: {engine} ▾", callback_data="engine"),
     ])
     rows.append([
-        InlineKeyboardButton("💰 Cost", callback_data="cost"),
+        InlineKeyboardButton("📊 Limitai", callback_data="cost"),
         InlineKeyboardButton("🗒 Recap", callback_data="recap"),
     ])
     return InlineKeyboardMarkup(rows)

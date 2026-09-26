@@ -134,8 +134,6 @@ class FakeControls:
         self.calls.append(("recap",))
         return self.recap_text
 
-    async def cost_summary(self):
-        self.calls.append(("cost_summary",))
         return self.cost_text
 
     async def list_policies(self):
@@ -1026,7 +1024,7 @@ async def test_cmd_help_documents_routing_and_commands():
     assert ":" in sent  # name-prefix "projektas: tekstas"
     assert "!" in sent  # urgent interrupt prefix
     # command reference — every command listed one line each
-    for cmd in ("/panel", "/projects", "/recap", "/cost", "/info",
+    for cmd in ("/panel", "/projects", "/recap", "/usage", "/info",
                 "/voice", "/policies", "/schedule", "/help"):
         assert cmd in sent, cmd
     # HTML-safe: no raw markup metacharacters that would break a parse_mode send.
@@ -1484,6 +1482,7 @@ async def test_send_update_chunks_text_over_4096_chars_into_multiple_messages():
 # --------------------------------------------------------------------------
 def test_build_panel_markup_has_per_project_and_global_rows():
     snap = FakeControls().snapshot()
+    snap[1]["last_active"] = True  # disabled but last used: still listed
     markup = build_panel_markup(snap)
     kb = markup.inline_keyboard
 
@@ -1503,6 +1502,7 @@ def test_build_panel_markup_has_per_project_and_global_rows():
 
 def test_build_panel_markup_has_verbose_toggle_buttons_with_state_label():
     snap = FakeControls().snapshot()  # qwing verbose=True, othersapp verbose=False
+    snap[1]["last_active"] = True  # disabled but last used: still listed
     markup = build_panel_markup(snap)
     kb = markup.inline_keyboard
 
@@ -1530,6 +1530,7 @@ def test_build_menu_markup_has_primary_actions():
 
 def test_build_panel_markup_reflects_enabled_mode_voice_engine():
     snap = FakeControls().snapshot()
+    snap[1]["last_active"] = True  # disabled but last used: still listed
     markup = build_panel_markup(snap)
     texts = [b.text for row in markup.inline_keyboard for b in row]
     joined = " ".join(texts)
@@ -1935,26 +1936,6 @@ async def test_callback_from_non_whitelisted_user_is_ignored():
 
 
 @pytest.mark.asyncio
-async def test_callback_cost_replies_with_cost_summary_and_does_not_rerender():
-    controls = FakeControls()
-    io = TelegramIO(make_cfg(), AsyncMock(), controls)
-    query = AsyncMock()
-    query.data = "cost"
-    query.from_user = MagicMock(id=42)
-    query.answer = AsyncMock()
-    query.message = AsyncMock()
-    query.edit_message_reply_markup = AsyncMock()
-    update = MagicMock()
-    update.callback_query = query
-
-    await io._handle_callback(update, MagicMock())
-
-    assert ("cost_summary",) in controls.calls
-    query.message.reply_text.assert_awaited_once_with(controls.cost_text)
-    query.edit_message_reply_markup.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_callback_recap_replies_with_recap_and_does_not_rerender():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
@@ -2086,7 +2067,8 @@ async def test_cmd_panel_replies_with_markup():
 
     msg.reply_text.assert_awaited_once()
     markup = msg.reply_text.await_args.kwargs["reply_markup"]
-    assert len(markup.inline_keyboard) == 4
+    # qwing (on) + the two global rows; othersapp is off and not last used.
+    assert len(markup.inline_keyboard) == 3
 
 
 @pytest.mark.asyncio
@@ -2880,37 +2862,6 @@ async def test_cmd_recap_rejects_non_whitelisted():
 
 
 @pytest.mark.asyncio
-async def test_cmd_cost_replies_with_controls_cost_summary():
-    controls = FakeControls()
-    controls.cost_text = "qwing: 3 turai, 1000+400 tok, $0.0567"
-    io = TelegramIO(make_cfg(), AsyncMock(), controls)
-    upd = make_cmd_update("/cost")
-
-    await io._cmd_cost(upd, make_ctx([]))
-
-    assert ("cost_summary",) in controls.calls
-    sent = upd.message.reply_text.await_args.args[0]
-    assert sent == "qwing: 3 turai, 1000+400 tok, $0.0567"
-
-
-@pytest.mark.asyncio
-async def test_cmd_cost_shows_tokens_and_cost_unavailable_note():
-    controls = FakeControls()
-    controls.cost_text = (
-        "qwing: 2 turai, 500+200 tok, $0.0000\n"
-        "TOTAL: 2 turai, 500+200 tok (cost n/a — subscription auth?)"
-    )
-    io = TelegramIO(make_cfg(), AsyncMock(), controls)
-    upd = make_cmd_update("/cost")
-
-    await io._cmd_cost(upd, make_ctx([]))
-
-    sent = upd.message.reply_text.await_args.args[0]
-    assert "500+200 tok" in sent
-    assert "n/a" in sent.lower()
-
-
-@pytest.mark.asyncio
 async def test_cmd_cost_rejects_non_whitelisted():
     controls = FakeControls()
     io = TelegramIO(make_cfg(allowed_id=42), AsyncMock(), controls)
@@ -2968,12 +2919,12 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
         if cmds:
             cmd_names |= set(cmds)
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "on", "off", "stop",
-            "mode", "effort", "voice", "engine", "status", "recap", "cost", "info", "agent"} <= cmd_names
+            "mode", "effort", "voice", "engine", "status", "recap", "cost", "usage", "info", "agent"} <= cmd_names
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
-            "mode", "effort", "voice", "verbose", "engine", "recap", "cost", "info", "policies", "schedule", "help",
+            "mode", "effort", "voice", "verbose", "engine", "recap", "usage", "info", "policies", "schedule", "help",
             "live", "agent"} == registered_names
 
 
@@ -3885,3 +3836,58 @@ async def test_agent_button_switches_and_restarts(tmp_path):
     assert "AGENT_BACKEND=claude" in env.read_text()
     assert "Claude" in query.edit_message_text.await_args.args[0]
     io._restart.assert_called_once()
+
+
+# --------------------------------------------------------------------------
+# /usage (and /cost, and the panel button): limits in %, not dollars
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cmd_usage_replies_with_usage_report(monkeypatch):
+    import voice_bridge.usage as usage_mod
+    monkeypatch.setattr(usage_mod, "format_usage", lambda ledger: "5 val.: 7 %")
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    upd = make_cmd_update("/usage")
+
+    await io._cmd_cost(upd, make_ctx([]))
+
+    upd.message.reply_text.assert_awaited_once_with("5 val.: 7 %")
+
+
+@pytest.mark.asyncio
+async def test_callback_cost_replies_with_usage_and_does_not_rerender(monkeypatch):
+    import voice_bridge.usage as usage_mod
+    monkeypatch.setattr(usage_mod, "format_usage", lambda ledger: "Savaitė: 29 %")
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    query = AsyncMock()
+    query.data = "cost"
+    query.from_user = MagicMock(id=42)
+    query.message = AsyncMock()
+
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    query.message.reply_text.assert_awaited_once_with("Savaitė: 29 %")
+    query.edit_message_reply_markup.assert_not_awaited()
+
+
+def test_project_views_stay_within_telegram_limits_with_many_projects():
+    """70 known projects once made /panel and /projects_all exceed Telegram's
+    ~100-button / 4096-character limits, so they silently never arrived."""
+    snap = [
+        {"project": f"p{i}", "enabled": i < 3, "mode": "safe", "voice": "echo",
+         "engine": "openai", "last_active": i == 0, "verbose": False,
+         "cwd": f"/home/u/Projects/some-long-project-name-{i}"}
+        for i in range(70)
+    ]
+    panel = build_panel_markup(snap)
+    assert sum(len(r) for r in panel.inline_keyboard) == 3 * 5 + 5  # 3 on + globals
+
+    seen = set()
+    for page in range(10):
+        text = format_projects(snap, show_all=True, page=page)
+        kb = build_projects_list_markup(snap, show_all=True, page=page).inline_keyboard
+        assert len(text) <= 4096
+        assert sum(len(r) for r in kb) <= 100
+        seen |= {b.callback_data for r in kb for b in r if b.callback_data.startswith("sel:")}
+    assert len(seen) == 70  # every project reachable through the pages
+    last = build_projects_list_markup(snap, show_all=True, page=0).inline_keyboard[-1]
+    assert last[-1].callback_data == "menu:projects_all:1"

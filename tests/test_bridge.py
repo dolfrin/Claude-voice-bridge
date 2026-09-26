@@ -1924,6 +1924,7 @@ async def test_controls_info_renders_model_effort_mode_voice_verbose():
     sessions._last_model["qwing"] = "claude-opus-4-8-20990101"
     await controls.seed()
     await controls.set_effort("qwing", "high")
+    controls.mark_last_active("othersapp")  # off projects are listed only if last used
 
     text = controls.info()
 
@@ -1974,81 +1975,6 @@ async def test_controls_set_engine_rebuilds_backend_and_outbound_uses_it():
         assert telegram.updates[0][3] == b"PIPER"
     finally:
         bm.get_tts = orig
-
-
-# --------------------------------------------------------------------------- #
-# cost_summary (B3c: per-project token & cost tracking)
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.asyncio
-async def test_cost_summary_reports_per_project_and_total():
-    cfg = FakeCfg()
-    store = FakeStore(
-        enabled={"qwing": True, "othersapp": False},
-        usage={
-            "qwing": {
-                "turns": 3, "input_tokens": 1000, "output_tokens": 400,
-                "cache_read_tokens": 50, "cache_creation_tokens": 20,
-                "cost_usd": 0.0567,
-            },
-            "othersapp": {
-                "turns": 1, "input_tokens": 100, "output_tokens": 40,
-                "cache_read_tokens": 0, "cache_creation_tokens": 0,
-                "cost_usd": 0.0033,
-            },
-        },
-    )
-    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
-    tts_holder = {"backend": FakeTTS()}
-    controls = _Controls(sessions, store, cfg, tts_holder)
-    await controls.seed()
-
-    text = await controls.cost_summary()
-
-    assert "qwing: 3 turai, 1000+400 tok, $0.0567" in text
-    assert "othersapp: 1 turai, 100+40 tok, $0.0033" in text
-    assert "TOTAL: 4 turai, 1100+440 tok, $0.0600" in text
-
-
-@pytest.mark.asyncio
-async def test_cost_summary_shows_tokens_and_notes_cost_unavailable_when_zero():
-    # Claude Code subscription auth: total_cost_usd is always None -> every
-    # accumulated cost_usd stays 0. The summary must not lie with "$0.0000"
-    # for every project; it should show tokens and flag cost as unavailable.
-    cfg = FakeCfg()
-    store = FakeStore(
-        enabled={"qwing": True},
-        usage={
-            "qwing": {
-                "turns": 2, "input_tokens": 500, "output_tokens": 200,
-                "cache_read_tokens": 0, "cache_creation_tokens": 0,
-                "cost_usd": 0.0,
-            },
-        },
-    )
-    sessions = FakeSessions([FakeProject("qwing")])
-    tts_holder = {"backend": FakeTTS()}
-    controls = _Controls(sessions, store, cfg, tts_holder)
-    await controls.seed()
-
-    text = await controls.cost_summary()
-
-    assert "500+200 tok" in text
-    assert "n/a" in text.lower() or "unavailable" in text.lower()
-
-
-@pytest.mark.asyncio
-async def test_cost_summary_no_usage_recorded_yet():
-    cfg = FakeCfg()
-    store = FakeStore(enabled={"qwing": True})
-    sessions = FakeSessions([FakeProject("qwing")])
-    tts_holder = {"backend": FakeTTS()}
-    controls = _Controls(sessions, store, cfg, tts_holder)
-    await controls.seed()
-
-    text = await controls.cost_summary()
-    assert text  # non-empty, does not raise on empty usage
 
 
 # --------------------------------------------------------------------------- #
