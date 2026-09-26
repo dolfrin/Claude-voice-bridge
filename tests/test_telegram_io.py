@@ -1477,41 +1477,31 @@ async def test_send_update_chunks_text_over_4096_chars_into_multiple_messages():
         assert len(call.kwargs["text"]) <= 4096
 
 
-# --------------------------------------------------------------------------
-# /panel render + callback dispatch
-# --------------------------------------------------------------------------
 def test_build_panel_markup_has_per_project_and_global_rows():
     snap = FakeControls().snapshot()
     snap[1]["last_active"] = True  # disabled but last used: still listed
-    markup = build_panel_markup(snap)
-    kb = markup.inline_keyboard
+    kb = build_panel_markup(snap).inline_keyboard
 
-    # two project rows + all-on/off/engine row + cost/recap row
-    assert len(kb) == 4
-    # per-project toggle buttons use index-based callback_data
-    toggle_btns = [b for row in kb for b in row
-                   if b.callback_data.startswith("tog:")]
-    assert {b.callback_data for b in toggle_btns} == {"tog:0", "tog:1"}
-    # all-on/all-off/engine row (no colon suffix)
-    engine_row = kb[-2]
-    assert [b.callback_data for b in engine_row] == ["allon", "alloff", "engine"]
-    # new cost/recap row
-    cost_recap_row = kb[-1]
-    assert [b.callback_data for b in cost_recap_row] == ["cost", "recap"]
+    # one full-width button per project -> its settings screen
+    assert [r[0].callback_data for r in kb[:2]] == ["pset:0", "pset:1"]
+    assert all(len(r) == 1 for r in kb[:2])
+    assert "qwing" in kb[0][0].text  # the full name, not "q…"
+    # shared settings; no "all on" (it would start every project)
+    data = [b.callback_data for r in kb[2:] for b in r]
+    assert data == ["cmopen:engine:0", "cost", "recap", "alloff"]
 
 
-def test_build_panel_markup_has_verbose_toggle_buttons_with_state_label():
-    snap = FakeControls().snapshot()  # qwing verbose=True, othersapp verbose=False
-    snap[1]["last_active"] = True  # disabled but last used: still listed
-    markup = build_panel_markup(snap)
-    kb = markup.inline_keyboard
+def test_project_settings_screen_explains_each_setting_and_labels_each_button():
+    from voice_bridge.telegram_views import build_project_settings
 
-    verb_btns = {b.callback_data: b.text for row in kb for b in row
-                 if b.callback_data.startswith("verb:")}
-    assert verb_btns == {"verb:0": "\U0001F527✓", "verb:1": "\U0001F527·"}
-    # verb button is the last button on its project row.
-    assert kb[0][-1].callback_data == "verb:0"
-    assert kb[1][-1].callback_data == "verb:1"
+    snap = FakeControls().snapshot()  # qwing: verbose on, mode safe
+    text, markup = build_project_settings(snap, 0)
+
+    assert "klausia leidimo prieš rizikingus veiksmus" in text  # what "safe" means
+    assert "Rodo kiekvieną žingsnį dirbdamas: taip" in text
+    labels = [b.text for r in markup.inline_keyboard for b in r]
+    assert "🔧 Nerodyti žingsnių" in labels and "⏸ Išjungti" in labels
+    assert "⬅️ Atgal" in labels
 
 
 def test_build_menu_markup_has_primary_actions():
@@ -1529,30 +1519,18 @@ def test_build_menu_markup_has_primary_actions():
     ]
 
 
-def test_build_panel_markup_reflects_enabled_mode_voice_engine():
+def test_build_panel_markup_reflects_state_and_engine():
     snap = FakeControls().snapshot()
-    snap[1]["last_active"] = True  # disabled but last used: still listed
-    markup = build_panel_markup(snap)
-    texts = [b.text for row in markup.inline_keyboard for b in row]
-    joined = " ".join(texts)
-    # ON for qwing (enabled), OFF for othersapp (disabled)
-    on_labels = [t for t in texts if t in ("ON", "OFF")]
-    assert "ON" in on_labels and "OFF" in on_labels
-    # modes / voices / engine surfaced
-    assert any("safe" in t for t in texts)
-    assert any("full" in t for t in texts)
-    assert any("alloy" in t for t in texts)
-    assert any("echo" in t for t in texts)
-    assert "openai" in joined
+    snap[1]["last_active"] = True
+    texts = [b.text for r in build_panel_markup(snap).inline_keyboard for b in r]
+    assert texts[0].endswith("🟢") and texts[1].endswith("⏸")  # on / off
+    assert any("openai" in x for x in texts)
 
 
 def test_build_panel_markup_empty_snapshot():
-    markup = build_panel_markup([])
-    # no project rows, but the two global rows are always present.
-    kb = markup.inline_keyboard
-    assert len(kb) == 2
-    assert [b.callback_data for b in kb[0]] == ["allon", "alloff", "engine"]
-    assert [b.callback_data for b in kb[1]] == ["cost", "recap"]
+    kb = build_panel_markup([]).inline_keyboard
+    # no project rows, only the shared settings
+    assert [b.callback_data for r in kb for b in r] == ["cmopen:engine:0", "cost", "recap", "alloff"]
 
 
 def test_format_projects_uses_status_path_and_last_active_first():
@@ -1599,11 +1577,11 @@ def test_build_projects_list_markup_uses_select_and_toggle_buttons():
     assert [button.callback_data for button in buttons] == [
         "sel:0", "ptgl:0", "sel:1", "ptgl:1", "sel:2", "ptgl:2",
     ]
-    assert buttons[0].text == "\u270D \U0001F7E2 qwing \u2B50"
-    assert buttons[2].text == "\u270D \u26AA othersapp"
-    assert buttons[1].text == "ON"
-    assert buttons[3].text == "OFF"
-    assert [len(row) for row in markup.inline_keyboard] == [2, 2, 2]
+    assert buttons[0].text == "🎯 qwing \u2B50"
+    assert buttons[2].text == "🎯 othersapp"
+    # verbs, not states: "OFF" used to read as "it is off" but switched it on
+    assert buttons[1].text == "⏸ Išjungti"
+    assert buttons[3].text == "▶ Įjungti"
 
 
 def test_build_mode_markup_lists_explicit_modes():
@@ -1811,7 +1789,7 @@ async def test_callback_back_returns_to_main_panel():
     assert controls.calls == []
     markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
     data = [b.callback_data for row in markup.inline_keyboard for b in row]
-    assert "tog:0" in data
+    assert "pset:0" in data
 
 
 @pytest.mark.asyncio
@@ -2027,12 +2005,11 @@ async def test_colon_project_name_toggle_resolves_correctly():
     controls = ColonControls()
     snap = controls.snapshot()
 
-    # Verify the panel encodes project 'a:b:c' (index 0) as "tog:0"
+    # The panel encodes project 'a:b:c' by its INDEX, never by name; the old
+    # "tog:<index>" callback (still on panels already in the chat) must work.
     markup = build_panel_markup(snap)
-    kb = markup.inline_keyboard
-    tog_btn = next(b for b in kb[0] if b.callback_data.startswith("tog:"))
-    assert tog_btn.callback_data == "tog:0", (
-        f"Expected 'tog:0', got {tog_btn.callback_data!r}")
+    assert markup.inline_keyboard[0][0].callback_data == "pset:0"
+    tog_btn = MagicMock(callback_data="tog:0")
 
     # Simulate tapping that button: _handle_callback must call toggle('a:b:c', False)
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
@@ -2068,8 +2045,9 @@ async def test_cmd_panel_replies_with_markup():
 
     msg.reply_text.assert_awaited_once()
     markup = msg.reply_text.await_args.kwargs["reply_markup"]
-    # qwing (on) + the two global rows; othersapp is off and not last used.
-    assert len(markup.inline_keyboard) == 3
+    # qwing (on) + the shared rows; othersapp is off and not last used.
+    assert [r[0].callback_data for r in markup.inline_keyboard][0] == "pset:0"
+    assert "pset:1" not in [b.callback_data for r in markup.inline_keyboard for b in r]
 
 
 @pytest.mark.asyncio
@@ -3921,7 +3899,7 @@ def test_project_views_stay_within_telegram_limits_with_many_projects():
         for i in range(70)
     ]
     panel = build_panel_markup(snap)
-    assert sum(len(r) for r in panel.inline_keyboard) == 3 * 5 + 5  # 3 on + globals
+    assert sum(len(r) for r in panel.inline_keyboard) == 3 + 4  # 3 on + shared
 
     seen = set()
     for page in range(10):

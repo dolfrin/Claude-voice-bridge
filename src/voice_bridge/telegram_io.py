@@ -85,6 +85,7 @@ from .telegram_views import (
     build_menu_markup,
     build_mode_markup,
     build_panel_markup,
+    build_project_settings,
     build_projects_list_markup,
     build_voice_markup,
     format_projects,
@@ -1222,6 +1223,9 @@ class TelegramIO:
         if action == "intr":
             await self._handle_interrupt(query, index_str)
             return
+        if action in {"pset", "pact"}:
+            await self._handle_settings(query, action, index_str)
+            return
         if action in {"cm", "cmopen"}:
             await self._handle_choice(query, action, index_str)
             return
@@ -2009,7 +2013,27 @@ class TelegramIO:
                     return idx
         return 0 if snap else None
 
-    def _choice_markup(self, kind: str, idx: int) -> InlineKeyboardMarkup:
+    async def _handle_settings(self, query, action: str, arg: str) -> None:
+        """The per-project settings screen of /panel."""
+        what, _, idx_str = arg.rpartition(":") if action == "pact" else ("", "", arg)
+        snap = self.controls.snapshot()
+        if not idx_str.isdigit() or int(idx_str) >= len(snap):
+            return
+        idx = int(idx_str)
+        row = snap[idx]
+        if what == "toggle":
+            await self.controls.toggle(row["project"], not row["enabled"])
+            if not row["enabled"]:
+                await self._opened_on_enable(row["project"])
+        elif what == "verbose":
+            await self.controls.set_verbose(row["project"], not row.get("verbose"))
+        elif what == "select":
+            await self.controls.select(row["project"])
+            await self.focus_project(row["project"])
+        text, markup = build_project_settings(self.controls.snapshot(), idx)
+        await self._edit_callback_text(query, text, markup)
+
+    def _choice_markup(self, kind: str, idx: int, back: bool = False) -> InlineKeyboardMarkup:
         """Buttons for one setting of one project, ✓ on the current value."""
         row = self.controls.snapshot()[idx]
         if kind == "mode":
@@ -2025,10 +2049,13 @@ class TelegramIO:
         buttons = [
             InlineKeyboardButton(("✓ " if v == current else "") + t(f"choose.v_{v}") if kind == "verbose"
                                  else ("✓ " if v == current else "") + v,
-                                 callback_data=f"cm:{kind}:{idx}:{v}")
+                                 callback_data=f"cm:{kind}:{idx}:{v}" + (":s" if back else ""))
             for v in values
         ]
-        return InlineKeyboardMarkup([buttons[i:i + 3] for i in range(0, len(buttons), 3)])
+        rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+        if back:
+            rows.append([InlineKeyboardButton(t("settings.back"), callback_data=f"pset:{idx}")])
+        return InlineKeyboardMarkup(rows)
 
     async def _reply_choices(self, msg, kind: str) -> None:
         idx = self._current_idx()
@@ -2041,13 +2068,14 @@ class TelegramIO:
         await msg.reply_text(title, reply_markup=self._choice_markup(kind, idx))
 
     async def _handle_choice(self, query, action: str, arg: str) -> None:
-        parts = arg.split(":", 2)
+        parts = arg.split(":")
         snap = self.controls.snapshot()
         if len(parts) < 2 or not parts[1].isdigit() or int(parts[1]) >= len(snap):
             return
         kind, idx = parts[0], int(parts[1])
+        from_settings = parts[-1] == "s"
         if action == "cmopen":
-            await self._edit_callback_markup(query, self._choice_markup(kind, idx))
+            await self._edit_callback_markup(query, self._choice_markup(kind, idx, back=from_settings))
             return
         value = parts[2] if len(parts) > 2 else ""
         project = snap[idx]["project"]
@@ -2062,6 +2090,11 @@ class TelegramIO:
         elif kind == "verbose" and value in {"on", "off"}:
             await self.controls.set_verbose(project, value == "on")
         else:
+            return
+        if from_settings:
+            # Chosen from a project's settings screen: show it updated.
+            text, markup = build_project_settings(self.controls.snapshot(), idx)
+            await self._edit_callback_text(query, text, markup)
             return
         shown = t(f"choose.v_{value}") if kind == "verbose" else value
         await self._edit_callback_markup(query, InlineKeyboardMarkup([[

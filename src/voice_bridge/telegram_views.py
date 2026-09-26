@@ -106,7 +106,9 @@ def format_projects(
         return t("projects.none_active")
     rows, page, pages = _paged(rows, page)
 
-    lines: list[str] = [t("projects.page", page=page + 1, pages=pages), ""] if pages > 1 else []
+    lines: list[str] = [t("projects.legend"), ""]
+    if pages > 1:
+        lines += [t("projects.page", page=page + 1, pages=pages), ""]
     for _idx, row in rows:
         status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
@@ -136,15 +138,12 @@ def build_projects_list_markup(
     rows: list[list[InlineKeyboardButton]] = []
     listed, page, pages = _paged(_project_list_rows(snapshot, show_all=show_all), page)
     for idx, row in listed:
-        status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
         name = row.get("display_name") or row["project"]
-        toggle_label = "ON" if row["enabled"] else "OFF"
+        # Verbs, not states: "OFF" read as "it is off" but switched it on.
+        toggle_label = t("projects.btn_off") if row["enabled"] else t("projects.btn_on")
         rows.append([
-            InlineKeyboardButton(
-                f"\u270D {status} {name}{active}",
-                callback_data=f"sel:{idx}",
-            ),
+            InlineKeyboardButton(f"🎯 {name}{active}", callback_data=f"sel:{idx}"),
             InlineKeyboardButton(toggle_label, callback_data=f"ptgl:{idx}"),
         ])
     if pages > 1:
@@ -292,51 +291,58 @@ def _clean_choices(choices: list[str], limit: int = 6) -> list[str]:
 
 
 def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
-    """Render the /panel inline keyboard from a controls snapshot.
+    """The /panel: one full-width button per running project (its settings),
+    then the settings shared by all.
 
-    Pure function: maps a snapshot (list of dicts keyed by ``"project"``) to an
-    ``InlineKeyboardMarkup`` with one row per project plus a global row.
-
-    Per-project buttons encode the project's INDEX into the snapshot list as
-    callback_data (e.g. ``"tog:0"``). This avoids any dependency on project-name
-    characters (especially ``:``) and keeps callback_data well under the 64-byte
-    Telegram limit. Index order is stable (projects come from static config).
+    Five narrow buttons per project cut the names to "q…" and said nothing
+    about what a tap does; a project now opens its own settings screen where
+    every button is labelled with its effect (build_project_settings). There
+    is no "all on": it would start every known project at once.
     """
     rows: list[list[InlineKeyboardButton]] = []
-    # Only running (or last-used) projects: five buttons per project for every
-    # known project blew past Telegram's button limit and the panel never
-    # opened. The rest are switched on from /projects_all.
     for i, row in enumerate(snapshot):
         if not (row["enabled"] or row.get("last_active")):
             continue
-        proj = row.get("display_name") or row["project"]
-        dot = "\U0001F7E2" if row["enabled"] else "\U0001F534"  # green/red
-        on_label = "ON" if row["enabled"] else "OFF"
-        verbose_label = "\U0001F527✓" if row.get("verbose") else "\U0001F527·"
-        rows.append([
-            InlineKeyboardButton(
-                f"{dot} {proj}", callback_data=f"noop:{i}"),
-            InlineKeyboardButton(
-                on_label, callback_data=f"tog:{i}"),
-            InlineKeyboardButton(
-                f"{row['mode']} ▾", callback_data=f"mode:{i}"),
-            InlineKeyboardButton(
-                f"{row['voice']} ▾", callback_data=f"voice:{i}"),
-            InlineKeyboardButton(
-                verbose_label, callback_data=f"verb:{i}"),
-        ])
+        state = "\U0001F7E2" if row["enabled"] else "⏸"
+        rows.append([InlineKeyboardButton(
+            f"⚙️ {row.get('display_name') or row['project']} {state}", callback_data=f"pset:{i}"
+        )])
     engine = snapshot[0]["engine"] if snapshot else "openai"
-    rows.append([
-        InlineKeyboardButton(t("panel.all_on"), callback_data="allon"),
-        InlineKeyboardButton(t("panel.all_off"), callback_data="alloff"),
-        InlineKeyboardButton(
-            t("panel.engine", engine=engine), callback_data="engine"),
-    ])
+    rows.append([InlineKeyboardButton(t("panel.engine", engine=engine), callback_data="cmopen:engine:0")])
     rows.append([
         InlineKeyboardButton(t("panel.limits"), callback_data="cost"),
         InlineKeyboardButton(t("panel.recap"), callback_data="recap"),
     ])
+    rows.append([InlineKeyboardButton(t("panel.all_off"), callback_data="alloff")])
     return InlineKeyboardMarkup(rows)
+
+
+def build_project_settings(snapshot: list[dict], idx: int) -> tuple[str, InlineKeyboardMarkup]:
+    """One project's settings: what each one is now and what it means, and a
+    button per change that says what it will do."""
+    row = snapshot[idx]
+    name = row.get("display_name") or row["project"]
+    verbose = bool(row.get("verbose"))
+    text = "\n".join([
+        f"⚙️ {name}",
+        t("settings.on") if row["enabled"] else t("settings.off"),
+        t("settings.mode", mode=row["mode"], meaning=t(f"settings.mode_{row['mode']}")),
+        t("settings.effort", effort=row.get("effort") or t("settings.default")),
+        t("settings.voice", voice=row["voice"]),
+        t("settings.verbose_on") if verbose else t("settings.verbose_off"),
+    ])
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton(t("settings.btn_mode"), callback_data=f"cmopen:mode:{idx}:s"),
+         InlineKeyboardButton(t("settings.btn_effort"), callback_data=f"cmopen:effort:{idx}:s")],
+        [InlineKeyboardButton(t("settings.btn_voice"), callback_data=f"cmopen:voice:{idx}:s"),
+         InlineKeyboardButton(t("settings.btn_verbose_off") if verbose else t("settings.btn_verbose_on"),
+                              callback_data=f"pact:verbose:{idx}")],
+        [InlineKeyboardButton(t("settings.btn_disable") if row["enabled"] else t("settings.btn_enable"),
+                              callback_data=f"pact:toggle:{idx}"),
+         InlineKeyboardButton(t("settings.btn_select"), callback_data=f"pact:select:{idx}")],
+        [InlineKeyboardButton(t("settings.back"), callback_data="back")],
+    ])
+    return text, markup
 
 
 def build_mode_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
