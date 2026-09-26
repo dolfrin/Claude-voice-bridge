@@ -1525,6 +1525,7 @@ def test_build_menu_markup_has_primary_actions():
         "menu:stop",
         "menu:refresh",
         "menu:policies",
+        "menu:help",
     ]
 
 
@@ -4021,3 +4022,88 @@ async def test_pc_refuses_an_unknown_action():
     io = _pc_io()
     await io._handle_callback(MagicMock(callback_query=_pc_query("pcgo:rm-rf")), MagicMock())
     io._power.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------
+# Several sessions open: every delivery shown, with "↪️" to move it
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_with_several_sessions_open_a_message_can_be_moved(monkeypatch):
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    qwing = SimpleNamespace(pid=1, session_id="q", cwd="/p/qwing", socket_path="/s/q", last_active=2)
+    bridge = SimpleNamespace(pid=2, session_id="b", cwd="/p/bridge", socket_path="/s/b", last_active=1)
+    monkeypatch.setattr(live_mod, "list_sessions", lambda d: [qwing, bridge])
+    monkeypatch.setattr(live_mod, "find", lambda pid, d: {1: qwing, 2: bridge}[pid])
+    socket_sends = []
+
+    async def fake_send(path, text, from_name="telegram"):
+        socket_sends.append((path, text))
+
+    monkeypatch.setattr(live_mod, "send", fake_send)
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._send_plain = AsyncMock(return_value=MagicMock(message_id=5))
+    io.session_label = lambda s: s.session_id
+    io._send_to = AsyncMock(return_value=True)
+
+    await io.note_route("q", "q", session_id="q", cwd="/p/qwing", text="padaryk README")
+    await io.note_route("q", "q", session_id="q", cwd="/p/qwing", text="dar vienas")
+
+    assert io._send_plain.await_count == 2  # shown every time, not only on change
+    markup = io._send_plain.await_args_list[0].args[1]
+    button = markup.inline_keyboard[0][0]
+    assert button.text == "↪️ b" and button.callback_data.startswith("mv:1:2")
+
+    query = AsyncMock()
+    query.data = button.callback_data
+    query.from_user = MagicMock(id=42)
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    io._send_to.assert_awaited_once_with(bridge, "padaryk README", False)
+    assert socket_sends and socket_sends[0][0] == "/s/q"  # qwing told to disregard
+    assert "Nekreipk dėmesio" in socket_sends[0][1]
+
+
+# --------------------------------------------------------------------------
+# The current session, pinned at the top ("🎯 Rašai: …")
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_current_session_is_pinned_then_edited_in_place(tmp_path):
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._pin_file = tmp_path / "pin.json"
+    io.app = MagicMock()
+    io.app.bot = AsyncMock()
+    io.app.bot.send_message.return_value = MagicMock(message_id=70)
+
+    await io._show_target("Qwing · testai")
+    await io._show_target("Qwing · testai")        # unchanged: nothing sent
+    await io._show_target("bridge · README")
+
+    io.app.bot.send_message.assert_awaited_once()
+    assert "🎯 Rašai: Qwing · testai" in io.app.bot.send_message.await_args.kwargs["text"]
+    io.app.bot.pin_chat_message.assert_awaited_once()
+    edit = io.app.bot.edit_message_text.await_args.kwargs
+    assert edit["message_id"] == 70 and "bridge · README" in edit["text"]
+
+
+@pytest.mark.asyncio
+async def test_write_here_button_makes_that_session_current(monkeypatch):
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    other = SimpleNamespace(pid=9, session_id="s-other", cwd="/p/x")
+    monkeypatch.setattr(live_mod, "list_sessions", lambda d: [other])
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._attach_live = AsyncMock(return_value="ok")
+    query = AsyncMock()
+    query.data = "tgt:s-other"
+    query.from_user = MagicMock(id=42)
+
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    io._attach_live.assert_awaited_once_with("9")
+    label = query.edit_message_reply_markup.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text
+    assert label == "🎯 Dabar rašai čia"

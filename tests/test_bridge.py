@@ -2886,3 +2886,19 @@ async def test_reply_to_another_open_session_beats_the_attached_one():
 
     assert telegram.live_sent_to == [("ide-qwing", "šitam")]
     assert telegram.live_sent == []
+
+
+@pytest.mark.asyncio
+async def test_plain_message_goes_to_the_current_session_not_a_later_speaker():
+    """Reading Qwing (the current, pinned session), a "finished" notice from
+    another session arrives; the next plain message still goes to Qwing --
+    the target changes only by the user's own action."""
+    sent_log, sessions, telegram, inbound = _live_first_setup()
+    telegram.live_session = object()
+    sent_log.record(600, "ide-other", "/p/other")
+    telegram.open_sessions = {"ide-other"}
+
+    await inbound(_msg(text="toliau"))
+
+    assert telegram.live_sent == ["toliau"]
+    assert telegram.live_sent_to == []

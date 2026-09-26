@@ -20,6 +20,7 @@ run-forever wait. ``stop()`` shuts the Application down.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import html
 import json
@@ -428,8 +429,14 @@ class TelegramIO:
         self._env_path = ".env"
         self._restart = lambda: os.kill(os.getpid(), signal.SIGTERM)
         self._agent_switched: str | None = None
-        # Where the last message was delivered (see note_route).
+        # Where the last message was delivered (see note_route), and the
+        # messages that can still be moved to another session ("↪️").
         self._last_route: str | None = None
+        self._moves: dict[str, tuple[str, str]] = {}
+        # The pinned "🎯 you are writing to" message (see _show_target).
+        self._target_label: str | None = None
+        self._pin_file = Path(cfg.db_path).parent / "telegram-pinned-target.json"
+        self._move_seq = 0
         # Message ids this process sent: the hook-button watcher skips them.
         self._own_sent: set = set()
         self._hook_buttons_task: asyncio.Task | None = None
@@ -1078,6 +1085,12 @@ class TelegramIO:
             else:
                 await query.edit_message_text(t("answer.failed"))
             return
+        if action == "tgt":
+            await self._write_here(query, index_str)
+            return
+        if action == "mv":
+            await self._move_message(query, index_str)
+            return
         if action in {"acct", "acctgo", "acctno"}:
             await self._handle_account_callback(query, action, index_str)
             return
@@ -1247,6 +1260,8 @@ class TelegramIO:
             )
         elif action == "panel":
             await self._edit_callback_text(query, t("panel.title"), build_panel_markup(snapshot))
+        elif action == "help":
+            await query.message.reply_text(_format_help())
         elif action == "refresh":
             added = await self.controls.refresh_projects()
             snapshot = self.controls.snapshot()
@@ -1993,7 +2008,7 @@ class TelegramIO:
         if sent:
             await self.note_route(
                 session.session_id, self.session_label(session),
-                session_id=session.session_id, cwd=session.cwd,
+                session_id=session.session_id, cwd=session.cwd, text=text,
             )
         return sent
 
@@ -2040,15 +2055,60 @@ class TelegramIO:
             if (e.get("t") or 0) > seen_until and e.get("s")
             and e.get("m") not in self._own_sent
         ]
+        current = getattr(self._live_session, "session_id", None)
         for entry in sorted(entries, key=lambda e: e["t"]):
             seen_until = entry["t"]
             text = live.last_assistant_text(live.transcript_of(root, entry["s"]))
             markup = _answer_markup(text)
+            if entry["s"] != current:
+                # Another session spoke: one tap makes it the current one.
+                rows = list(markup.inline_keyboard) if markup is not None else []
+                rows.append([InlineKeyboardButton(
+                    t("target.write_here"), callback_data=f"tgt:{entry['s']}"
+                )])
+                markup = InlineKeyboardMarkup(rows)
             if markup is not None and self.app is not None:
                 await self.app.bot.edit_message_reply_markup(
                     chat_id=self._chat_id, message_id=entry["m"], reply_markup=markup
                 )
         return seen_until
+
+    def _other_open_sessions(self, session_id: str) -> list:
+        """Live sessions other than *session_id*, most recently active first."""
+        try:
+            sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
+        except Exception:  # noqa: BLE001 - a listing must not break delivery
+            return []
+        return sorted(
+            (x for x in sessions if x.session_id != session_id),
+            key=lambda x: x.last_active, reverse=True,
+        )
+
+    async def _move_message(self, query, arg: str) -> None:
+        """The "↪️" button: deliver the message to another session instead,
+        and tell the session that got it by mistake to disregard it."""
+        token, _, pid = arg.partition(":")
+        pending = self._moves.pop(token, None)
+        target = live.find(int(pid), Path.home() / ".claude" / "sessions") if pid.isdigit() else None
+        if pending is None or target is None:
+            await self._edit_callback_markup(query, InlineKeyboardMarkup([[
+                InlineKeyboardButton(t("move.gone"), callback_data="noop:")
+            ]]))
+            return
+        text, wrong_id = pending
+        wrong = next((x for x in self._other_open_sessions(target.session_id)
+                      if x.session_id == wrong_id), None)
+        if wrong is not None:
+            try:
+                await live.send(wrong.socket_path, t("move.ignore", text=text[:200]))
+            except Exception:  # noqa: BLE001 - the move itself matters more
+                logger.exception("move: could not tell %s to disregard", wrong_id)
+        self._last_route = None  # say where it went now
+        moved = await self._send_to(target, text, self._live_spoken)
+        await self._edit_callback_markup(query, InlineKeyboardMarkup([[InlineKeyboardButton(
+            t("move.done", label=self.session_label(target)[:40]) if moved else t("move.gone"),
+            callback_data="noop:",
+        )]]))
 
     def session_label(self, session) -> str:
         """``Project · conversation title`` for a live session."""
@@ -2061,17 +2121,35 @@ class TelegramIO:
         return f"{name} · {title}" if title else name
 
     async def note_route(
-        self, key: str, label: str, session_id: str | None = None, cwd: str = ""
+        self, key: str, label: str, session_id: str | None = None, cwd: str = "",
+        text: str | None = None,
     ) -> None:
-        """Say where a message went -- once per change of destination.
+        """Say where a message went.
 
-        Every message confirmed would be noise; never confirming left the user
-        guessing which project a message reached. Saying it when the target
-        changes answers exactly that."""
-        if key == self._last_route:
+        With one session open: once per change of destination (every message
+        confirmed would be noise). With several open, no rule reliably knows
+        which one a plain message was meant for, so every delivery is shown,
+        with a button per other open session that moves the message there.
+        """
+        others = self._other_open_sessions(session_id) if text and session_id else []
+        if key == self._last_route and not others:
             return
         self._last_route = key
-        message = await self._send_plain(f"➡️ {label}")
+        markup = None
+        if others:
+            self._move_seq += 1
+            token = str(self._move_seq)
+            self._moves[token] = (text, session_id)
+            for old in list(self._moves)[:-20]:  # keep the last few
+                self._moves.pop(old, None)
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    t("move.button", label=self.session_label(x)[:40]),
+                    callback_data=f"mv:{token}:{x.pid}",
+                )]
+                for x in others[:4]
+            ])
+        message = await self._send_plain(f"➡️ {label}", markup)
         # A reply to the notice itself must reach the same place.
         await self._remember_sent(message, cwd, session_id)
 
@@ -2185,6 +2263,7 @@ class TelegramIO:
         if args and args[0] in {"off", "stop", "detach"}:
             self._detach_live()
             await msg.reply_text(t("live.detached"))
+            await self._show_target(None)
             return
 
         sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
@@ -2218,6 +2297,7 @@ class TelegramIO:
         self._live_session = session
         self._write_live_marker(session.session_id)
         self._live_task = asyncio.create_task(self._tail_live(session))
+        await self._show_target(self.session_label(session))
         title = live.title_of(Path.home() / ".claude" / "projects", session.session_id)
         return t("live.attached", title=title or session.cwd)
 
@@ -2241,6 +2321,61 @@ class TelegramIO:
                 marker.unlink()
         except OSError:
             logger.exception("live: could not update the marker file")
+
+    async def _show_target(self, label: str | None) -> None:
+        """Keep "🎯 you are writing to: …" pinned at the top of the chat.
+
+        A plain message goes to the current session; guessing it from who
+        spoke last sent real messages astray, so it is shown instead. One
+        pinned message is edited in place (its id survives restarts in a
+        small file next to the database); if it is gone, a new one is sent
+        and pinned. Never raises."""
+        if label == self._target_label or self.app is None:
+            return
+        self._target_label = label
+        text = t("target.pinned", label=label) if label else t("target.none")
+        bot = self.app.bot
+        pinned = None
+        try:
+            pinned = json.loads(self._pin_file.read_text()).get("message_id")
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            if pinned:
+                try:
+                    await bot.edit_message_text(chat_id=self._chat_id, message_id=pinned, text=text)
+                    return
+                except BadRequest as exc:
+                    if "not modified" in str(exc).lower():
+                        return
+            message = await bot.send_message(
+                chat_id=self._chat_id, text=text, disable_notification=True
+            )
+            await bot.pin_chat_message(
+                chat_id=self._chat_id, message_id=message.message_id, disable_notification=True
+            )
+            if pinned:
+                with contextlib.suppress(TelegramError):
+                    await bot.unpin_chat_message(chat_id=self._chat_id, message_id=pinned)
+            self._pin_file.parent.mkdir(parents=True, exist_ok=True)
+            self._pin_file.write_text(json.dumps({"message_id": message.message_id}))
+        except Exception:  # noqa: BLE001 - the pin is a courtesy, never a failure
+            logger.exception("target: could not update the pinned message")
+
+    async def _write_here(self, query, session_id: str) -> None:
+        """The "🎯 Write here" button: make that session the current one."""
+        match = None
+        with contextlib.suppress(Exception):
+            match = next((x for x in live.list_sessions(Path.home() / ".claude" / "sessions")
+                          if x.session_id == session_id), None)
+        if match is None:
+            label = t("target.gone")
+        else:
+            await self._attach_live(str(match.pid))
+            label = t("target.now_here")
+        await self._edit_callback_markup(query, InlineKeyboardMarkup([[
+            InlineKeyboardButton(label, callback_data="noop:")
+        ]]))
 
     def _detach_live(self) -> None:
         """Stop tailing and forget the attachment (idempotent)."""
@@ -2540,7 +2675,7 @@ class TelegramIO:
         app.add_handler(
             CommandHandler("schedule", self._cmd_schedule, filters=only_me))
         app.add_handler(
-            CommandHandler("help", self._cmd_help, filters=only_me))
+            CommandHandler(["help", "start"], self._cmd_help, filters=only_me))
         app.add_handler(
             CommandHandler("live", self._cmd_live, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))

@@ -176,7 +176,6 @@ EN.update({
     'panel.mode_of': '{project} mode',
     'panel.voice_of': '{project} voice',
     'panel.back': 'back',
-    'help.text': "❓ How the bridge works\n\nWhere a message goes:\n• reply to a message — to the session it came from.\n• plain text — to the session that wrote here last.\n• “project: text” — to that project. Its name, label or folder name all work (see /projects).\n• If the project has a session open in VS Code, the message goes straight into it; a bridge session is started only when none is open.\n\nKnowing what is going on:\n• ➡️ — where your message went (shown when the destination changes).\n• 💬 Project · conversation — which session an answer is from.\n• /projects — 🖥 next to a project means a session is open in VS Code.\n\nUrgent:\n• “!” at the start — interrupts the project's current work and delivers at once (e.g. “!api: stop”).\n\nAnswering from the phone:\n• Questions get buttons (✅ Yes / ❌ No, or one per option); you can also reply “yes”/“no”.\n• An “ask_user” question takes a number, “first”, a label or free text.\n\nCommands:\n/panel — control panel (on/off, mode, voice).\n/projects — active projects (all: /projects_all).\n/recap — what happened while you were away.\n/usage — Claude limits (5-hour, week) and this PC's sessions.\n/info — model, effort and settings.\n/voice — show or set the TTS voice.\n/agent — who answers: Claude or Codex (switch: /agent codex).\n/policies — always-allow grants (clear: /policies clear).\n/schedule — daily scheduled prompts.\n/help — this help.",
 })
 LT.update({
     'cmd.menu': '🏠 Pagrindinis meniu',
@@ -227,7 +226,6 @@ LT.update({
     'panel.mode_of': '{project} režimas',
     'panel.voice_of': '{project} balsas',
     'panel.back': 'atgal',
-    'help.text': '❓ Kaip veikia tiltas\n\nKur nueina žinutė:\n• reply į žinutę — į tą sesiją, iš kurios ji atėjo.\n• vien tekstas — į sesiją, kuri paskutinė rašė čia.\n• „projektas: tekstas“ — į tą projektą. Tinka vidinis vardas, rodomas pavadinimas ar aplanko vardas (žr. /projects).\n• Jei projekto sesija atidaryta VS Code — rašoma tiesiai į ją; tilto sesija paleidžiama tik jei neatidaryta.\n\nKaip žinoti, kas vyksta:\n• ➡️ — kur nuėjo tavo žinutė (rodoma, kai adresatas pasikeičia).\n• 💬 Projektas · pokalbis — iš kurios sesijos atsakymas.\n• /projects — 🖥 prie projekto reiškia, kad sesija atidaryta VS Code.\n\nSkubu:\n• „!“ žinutės pradžioje — nutraukia dabartinį projekto darbą ir pristato iš karto (pvz. „!qwing: stok“).\n\nAtsakymai iš telefono:\n• Klausimai turi mygtukus (✅ Taip / ❌ Ne arba po vieną variantui); galima ir atsakyti „taip“/„ne“.\n• Į „ask_user“ klausimą atsakyk numeriu, „first“, etikete ar laisvu tekstu.\n\nKomandos:\n/panel — valdymo skydelis (įjungti/išjungti, režimas, balsas).\n/projects — aktyvūs projektai (visi: /projects_all).\n/recap — kas nutiko, kol nebuvai.\n/usage — Claude limitai (5 val., savaitė) ir šio PC sesijos.\n/info — modelis, effort ir nustatymai.\n/voice — parodyti ar nustatyti TTS balsą.\n/agent — kas atsako: Claude ar Codex (perjungti: /agent codex).\n/policies — „visada leisti“ politikos (išvalyti: /policies clear).\n/schedule — kasdienės suplanuotos užduotys.\n/help — ši pagalba.',
 })
 
 
@@ -592,3 +590,42 @@ LT.update({
     "account.not_applied": "⚠️ Perjungimas į {email} neišsilaikė — veikiantis Claude Code įrašė savo prisijungimą atgal. Uždaryk ar perkrauk redaktorių ir bandyk dar kartą.",
     "account.failed": "⚠️ Nepavyko perjungti: {error}",
 })
+
+
+# --- moving a message to another session -----------------------------------------------
+EN.update({
+    "move.button": "↪️ {label}",
+    "move.done": "↪️ Moved to {label}",
+    "move.gone": "⚠️ That session is closed or the message too old",
+    "move.ignore": "[bridge] Disregard the previous message from Telegram (“{text}”) — it was meant for another session and has been sent there.",
+})
+LT.update({
+    "move.button": "↪️ {label}",
+    "move.done": "↪️ Perkelta į {label}",
+    "move.gone": "⚠️ Ta sesija uždaryta arba žinutė per sena",
+    "move.ignore": "[bridge] Nekreipk dėmesio į ankstesnę žinutę iš Telegram („{text}“) — ji buvo skirta kitai sesijai ir nusiųsta ten.",
+})
+
+
+# --- the current session (pinned) ------------------------------------------------------
+EN.update({
+    "target.pinned": "🎯 Writing to: {label}\nA plain message goes here. To change: reply to another session's message, start with “name:”, /live, or tap 🎯 under a message.",
+    "target.none": "🎯 No current session — a plain message goes to whoever wrote last.",
+    "target.write_here": "🎯 Write here",
+    "target.now_here": "🎯 Writing here now",
+    "target.gone": "⚠️ That session is closed",
+})
+LT.update({
+    "target.pinned": "🎯 Rašai: {label}\nPaprasta žinutė eina čia. Pakeisti: reply į kitos sesijos žinutę, „vardas:“ pradžioje, /live arba 🎯 mygtukas po žinute.",
+    "target.none": "🎯 Dabartinės sesijos nėra — paprasta žinutė eis tam, kas rašė paskutinis.",
+    "target.write_here": "🎯 Rašyti čia",
+    "target.now_here": "🎯 Dabar rašai čia",
+    "target.gone": "⚠️ Ta sesija uždaryta",
+})
+
+
+# --- help ---------------------------------------------------------------------------
+EN["help.text"] = "❓ How the bridge works\n\n🎯 Where your message goes\n• Pinned at the top, “🎯 Writing to: …” — a plain message goes there.\n• Reply to a message — to the session it came from (it becomes the current one).\n• “project: text” — to that project (name, label or folder, see /projects).\n• 🎯 Write here — the button under another session's message makes it the current one.\n• ↪️ — if a message went to the wrong session, moves it in one tap.\n• If the project has a session open in VS Code, the message goes into it; a bridge session starts only when none is open.\n\nSigns\n• 💬 Project · conversation — which session an answer is from.\n• ➡️ — where your message went.\n• ✅ Yes / ❌ No, 1. 2. 3. — answers as buttons.\n• 🖥 next to a project (/projects) — a session is open in VS Code.\n• “!” at the start — interrupts the current work (e.g. “!api: stop”).\n\nCommands\n/menu — button menu\n/projects — projects (all: /projects_all)\n/live — pick one of the open sessions\n/usage — Claude limits: 5-hour, week, this PC, other accounts\n/account — switch the Claude account\n/agent — Claude or Codex\n/pc — suspend / shut down / restart the PC\n/recap — what happened while you were away\n/panel, /info, /voice, /mode, /policies, /schedule — settings\n/help — this help"
+LT["help.text"] = '❓ Kaip veikia tiltas\n\n🎯 Kur eina tavo žinutė\n• Viršuje prisegta „🎯 Rašai: …“ — paprasta žinutė eina ten.\n• Reply į žinutę — į tą sesiją, iš kurios ji atėjo (ji tampa dabartine).\n• „projektas: tekstas“ — į tą projektą (vardas, pavadinimas ar aplankas, žr. /projects).\n• 🎯 Rašyti čia — mygtukas po kitos sesijos žinute padaro ją dabartine.\n• ↪️ — jei žinutė nuėjo ne ten, vienu paspaudimu perkelia ją.\n• Jei projekto sesija atidaryta VS Code, rašoma į ją; tilto sesija paleidžiama tik jei neatidaryta.\n\nŽenklai\n• 💬 Projektas · pokalbis — iš kurios sesijos atsakymas.\n• ➡️ — kur nuėjo tavo žinutė.\n• ✅ Taip / ❌ Ne, 1. 2. 3. — atsakymai mygtukais.\n• 🖥 prie projekto (/projects) — sesija atidaryta VS Code.\n• „!“ žinutės pradžioje — nutraukia dabartinį darbą (pvz. „!qwing: stok“).\n\nKomandos\n/menu — meniu mygtukais\n/projects — projektai (visi: /projects_all)\n/live — pasirinkti vieną iš atidarytų sesijų\n/usage — Claude limitai: 5 val., savaitė, šis PC, kitos paskyros\n/account — perjungti Claude paskyrą\n/agent — Claude ar Codex\n/pc — užmigdyti / išjungti / perkrauti PC\n/recap — kas nutiko, kol nebuvai\n/panel, /info, /voice, /mode, /policies, /schedule — nustatymai\n/help — ši pagalba'
+EN["menu.help"] = "❓ Help"
+LT["menu.help"] = "❓ Pagalba"

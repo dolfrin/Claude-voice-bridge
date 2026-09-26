@@ -476,22 +476,42 @@ def make_inbound(
         # on this PC it goes straight in; a new session is never started for
         # it. The hooks record their notifications too (sent_log), so this
         # covers "finished"/question messages the bridge did not send itself.
+        tried_attached = False
         if prefix_project is None:
+            # No rule reads minds: guessing ("whoever spoke last") sent real
+            # messages to the wrong session. So the target is shown instead of
+            # guessed: a plain message goes to the current conversation -- the
+            # attached session, pinned at the top of the chat as "🎯" -- and
+            # only the user changes it (reply, "name:", /live, "🎯" button).
+            # "Whoever spoke last" only picks the first one.
+            attached = telegram.live_target()
+            if rid is None and attached is not None:
+                tried_attached = True
+                if await telegram.live_send(
+                    await _files_into(getattr(attached, "cwd", "") or "", text, msg), spoken=spoken
+                ):
+                    logger.info("route: plain message -> current session %s",
+                                getattr(attached, "session_id", "?"))
+                    return
             if rid is None:
                 entry = sent_log.last()
             if entry and entry.get("s") and await telegram.live_send_to(
                 entry["s"], await _files_into(entry.get("c") or "", text, msg), spoken=spoken
             ):
+                logger.info("route: %s -> session %s",
+                            f"reply to {rid}" if rid is not None else "last speaker", entry["s"])
                 return
             # Attached to a live session and nothing more specific is known --
-            # a plain message with no recorded history, or a reply to a message
-            # that belongs to no session (an old one, a status line): the live
-            # session is where the user is working.
+            # a plain message with no recorded history, or a reply to a
+            # message that belongs to no session (an old one, a status line):
+            # the live session is where the user is working.
             unknown = entry is None if rid is None else (
                 reply_project is None and not (entry and entry.get("s"))
             )
-            if unknown and telegram.live_target() is not None:
+            if unknown and attached is not None and not tried_attached:
                 if await telegram.live_send(text, spoken=spoken):
+                    logger.info("route: %s -> attached session",
+                                f"reply to unknown {rid}" if rid is not None else "plain message")
                     return
 
         entry_project = (
@@ -531,6 +551,7 @@ def make_inbound(
 
         proj = sessions.project(project) if hasattr(sessions, "project") else None
         if proj is not None and await telegram.live_route(proj.cwd, text, spoken=spoken):
+            logger.info("route: -> project %s, its open editor session", project)
             return
         # Nothing open on this project here: only now does the bridge run it
         # in a session of its own.
@@ -539,6 +560,7 @@ def make_inbound(
             f"bridge:{project}", t("route.bridge_session", project=label),
             cwd=getattr(proj, "cwd", "") or "",
         )
+        logger.info("route: -> project %s (bridge session)", project)
         await sessions.deliver(project, text)
 
     return inbound

@@ -173,6 +173,7 @@ def build_menu_markup() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(t("menu.policies"), callback_data="menu:policies"),
+            InlineKeyboardButton(t("menu.help"), callback_data="menu:help"),
         ],
     ])
 
