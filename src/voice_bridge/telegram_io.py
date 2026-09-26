@@ -2015,6 +2015,10 @@ class TelegramIO:
         except Exception:  # noqa: BLE001 - routing memory is best-effort
             logger.exception("could not map message %s to %s", mid, project)
 
+    async def send_notice(self, text: str) -> None:
+        """A plain notice from the bridge itself (e.g. a limit running out)."""
+        await self._send_plain(text)
+
     async def _send_plain(self, text: str, reply_markup=None):
         """Plain message to the owner (optionally with buttons); never raises.
 

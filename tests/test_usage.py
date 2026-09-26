@@ -171,3 +171,38 @@ def test_work_before_the_known_login_is_shown_not_counted(home, monkeypatch):
     text = usage.format_usage(home / "ledger.jsonl", home, now)
 
     assert "❔ iki" in text and "(sesijų: 1)" in text and "neįskaičiuota" in text
+
+
+def _reading(account, ts, u5, r5, u7=10, r7=None):
+    return {"ts": ts, "account": account, "email": f"{account}@x", "since": 0,
+            "w": {"session": {"u": u5, "r": r5, "s": 0, "l": 0},
+                  "weekly_all": {"u": u7, "r": r7 or ts + 5 * 86400, "s": 0, "l": 0}}}
+
+
+def test_other_accounts_freest_first_and_reset_windows_count_as_empty():
+    now = 1_800_000_000.0
+    samples = [
+        _reading("A", now - 3600, 100, now - 60),   # 5 h reset a minute ago
+        _reading("B", now - 600, 90, now + 3600),   # still full for an hour
+        _reading("C", now - 300, 20, now + 7200),   # current account
+    ]
+    others = usage.other_accounts(samples, "C", now)
+
+    assert [a["email"] for a in others] == ["A@x", "B@x"]
+    assert others[0]["limits"]["session"][0] == 0.0
+    assert "5 val. ✅ atsinaujino" in usage._account_line(others[0], now)
+
+
+def test_alert_once_when_crossing_80_and_95_with_the_freest_other_account():
+    now = 1_800_000_000.0
+    other = usage.other_accounts([_reading("A", now - 3600, 5, now + 60)], "C", now)
+    prev = _reading("C", now - 300, 70, now + 3600)
+
+    first = usage._alerts(prev, _reading("C", now, 82, now + 3600), other, now)
+    again = usage._alerts(_reading("C", now, 82, now + 3600), _reading("C", now + 300, 84, now + 3600), other, now)
+    both = usage._alerts(prev, _reading("C", now, 96, now + 3600), other, now)
+
+    assert len(first) == 1 and "5 val. limitas 82 %" in first[0] and "A@x" in first[0]
+    assert again == []                    # already warned in this window
+    assert len(both) == 1                 # one notice even if both thresholds crossed
+    assert usage._alerts(None, _reading("C", now, 99, now + 3600), other, now) == []  # fresh start

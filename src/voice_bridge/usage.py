@@ -43,6 +43,8 @@ _TOP = 3
 # mostly rounding error. Price tokens only once the account rose this much.
 _MIN_RISE_PCT = 3
 _KEEP_DAYS = 30
+# Tell the user when the logged-in account crosses these, once per window.
+_ALERT_AT = (80, 95)
 
 # Relative token prices (input = 1), the same ratios across current Claude
 # models. Cache reads dominate raw token counts but cost a tenth, so an
@@ -248,12 +250,87 @@ def take_sample(home: Path, ledger: Path, now: float | None = None, full: bool =
         },
     }
     _append(ledger, record, samples)
+    others = other_accounts(samples + [record], account, now)
+    prev = next((x for x in reversed(samples) if x["account"] == account), None)
     breakdown = [
         (row.get("display_name"), row.get("percent"))
         for row in ((data.get("seven_day_breakdown") or {}).get("rows") or [])
         if row.get("percent")
     ]
-    return {**record, "limits": limits, "turns": turns, "breakdown": breakdown}
+    return {
+        **record, "limits": limits, "turns": turns, "breakdown": breakdown,
+        "others": others, "alerts": _alerts(prev, record, others, now),
+    }
+
+
+def _title(key: str) -> str:
+    """Lithuanian name of a limit, for sentences."""
+    if key == "session":
+        return "5 val."
+    if key.startswith("weekly_scoped:"):
+        return f"savaitės ({key.split(':', 1)[1].capitalize()})"
+    return "savaitės"
+
+
+def other_accounts(samples: list[dict], current: str, now: float) -> list[dict]:
+    """The other accounts this PC has been logged in to, freest first.
+
+    Each from its LAST reading here, with every window whose reset time has
+    passed counted as empty again. Other devices may have used them since:
+    this is the best this PC can know without holding their logins.
+    """
+    latest: dict[str, dict] = {}
+    for sample in sorted(samples, key=lambda x: x["ts"]):
+        if sample["account"] != current:
+            latest[sample["account"]] = sample
+    out = []
+    for sample in latest.values():
+        limits = {
+            key: (0.0 if w["r"] <= now else float(w["u"] or 0), w["r"])
+            for key, w in sample.get("w", {}).items()
+        }
+        worst = max((v[0] for v in limits.values()), default=0.0)
+        out.append({"email": sample.get("email", "?"), "seen": sample["ts"],
+                    "limits": limits, "free": 100 - worst})
+    return sorted(out, key=lambda a: -a["free"])
+
+
+def _account_line(acc: dict, now: float) -> str:
+    parts = []
+    for key, (pct, reset) in sorted(acc["limits"].items()):
+        if pct == 0 and reset <= now:
+            parts.append(f"{_title(key)} ✅ atsinaujino")
+        else:
+            parts.append(f"{_title(key)} {pct:.0f} % iki {_stamp(reset, now)}")
+    return f"{acc['email']} — " + ", ".join(parts)
+
+
+def _alerts(prev: dict | None, record: dict, others: list[dict], now: float) -> list[str]:
+    """A notice per limit that crossed 80 % or 95 % since the previous reading.
+
+    No previous reading (first start) means no alerts, so a restart never
+    repeats one. A new window starts from 0 %.
+    """
+    if prev is None:
+        return []
+    out = []
+    for key, w in record["w"].items():
+        before = (prev.get("w") or {}).get(key)
+        was = float(before["u"] or 0) if before and abs(before["r"] - w["r"]) < 300 else 0.0
+        crossed = [t for t in _ALERT_AT if was < t <= float(w["u"] or 0)]
+        if not crossed:
+            continue
+        text = (
+            f"⚠️ {record['email']}: {_title(key)} limitas {float(w['u']):.0f} % — "
+            f"atsinaujins {_stamp(w['r'], now)} ({_until(w['r'], now)})."
+        )
+        better = [a for a in others if a["free"] > 100 - float(w["u"] or 0)]
+        text += (
+            f"\nLaisviausia kita paskyra: {_account_line(better[0], now)}"
+            if better else "\nLaisvesnės paskyros nežinau."
+        )
+        out.append(text)
+    return out
 
 
 def _window_samples(samples: list[dict], account: str, key: str, reset: float, start: float) -> list[dict]:
@@ -441,6 +518,13 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
                 f"  ❔ iki {_stamp(counted_from, now)} šiame PC buvo darbo (sesijų: {sessions}) — "
                 f"nežinau, kuria paskyra, neįskaičiuota{guess}"
             )
+    lines += ["", "👥 Kitos paskyros (paskutinė šiame PC matyta būsena):"]
+    if sample["others"]:
+        for i, acc in enumerate(sample["others"]):
+            star = "⭐ " if i == 0 else ""
+            lines.append(f"• {star}{_account_line(acc, now)} · matyta {_stamp(acc['seen'], now)}")
+    else:
+        lines.append("  atsiras čia, kai prie jų prisijungsi šiame PC")
     lines += [
         "",
         "🟦 šis PC · 🟩 kiti įrenginiai (ar dar neišskirta) · ⬜ liko",

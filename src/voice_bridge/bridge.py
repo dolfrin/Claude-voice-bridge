@@ -1503,7 +1503,9 @@ async def build() -> Wiring:
     )
 
 
-async def _sample_usage(ledger, stop: asyncio.Event, interval: float = 300) -> None:
+async def _sample_usage(
+    ledger, stop: asyncio.Event, notify=None, interval: float = 300
+) -> None:
     """Record the Claude account's limits every *interval* seconds.
 
     /usage can only tell this PC's part from the account's total by comparing
@@ -1512,7 +1514,9 @@ async def _sample_usage(ledger, stop: asyncio.Event, interval: float = 300) -> N
     asks."""
     while not stop.is_set():
         try:
-            await asyncio.to_thread(usage.take_sample, Path.home(), ledger)
+            sample = await asyncio.to_thread(usage.take_sample, Path.home(), ledger)
+            for text in sample["alerts"] if notify is not None else []:
+                await notify(text)
         except Exception:  # noqa: BLE001 - a missed sample is not worth dying for
             logger.warning("usage: sample failed", exc_info=True)
         try:
@@ -1546,7 +1550,10 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
         )
     )
     usage_task = asyncio.create_task(
-        _sample_usage(usage.ledger_path(wiring.cfg.db_path), stop)
+        _sample_usage(
+            usage.ledger_path(wiring.cfg.db_path), stop,
+            notify=getattr(wiring.telegram, "send_notice", None),
+        )
     )
     try:
         await stop.wait()
