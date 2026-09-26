@@ -1588,6 +1588,10 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
 
 async def main() -> None:
     """Top-level entry: build, install signal handlers, run until stopped."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # httpx logs every request URL at INFO, and every Telegram URL carries the
+    # bot token: keep it out of the journal.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     wiring = await build()
 
     stop = asyncio.Event()
