@@ -151,3 +151,23 @@ def test_bar_shows_this_pc_others_and_whats_left():
     assert usage._bar(85, 85) == "🟦🟦🟦🟦🟦🟦🟦🟦⬜⬜"   # all of it this PC
     assert usage._bar(90, 0) == "🟥" * 9 + "⬜"
     assert usage._bar(0, None) == "⬜" * 10
+
+
+def test_stamp_names_the_day():
+    now = datetime(2026, 9, 26, 22, 0).timestamp()
+    assert usage._stamp(datetime(2026, 9, 26, 18, 45).timestamp(), now) == "šiandien 18:45"
+    assert usage._stamp(datetime(2026, 9, 25, 9, 10).timestamp(), now) == "vakar 09:10"
+    assert usage._stamp(datetime(2026, 9, 24, 10, 0).timestamp(), now) == "09-24 10:00"
+
+
+def test_work_before_the_known_login_is_shown_not_counted(home, monkeypatch):
+    now = 1_800_000_000.0
+    transcript = home / ".claude" / "projects" / "p" / "s1.jsonl"
+    transcript.write_text(_turn(now - 50 * 60, "a", 40) + "\n")  # before the login
+    os.utime(transcript, (now, now))
+    _login(home, "acc-B", now - 30 * 60)
+    _limits(monkeypatch, 2, 30, now)
+
+    text = usage.format_usage(home / "ledger.jsonl", home, now)
+
+    assert "❔ iki" in text and "(sesijų: 1)" in text and "neįskaičiuota" in text

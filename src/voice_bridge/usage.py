@@ -216,11 +216,13 @@ def _account_since(samples: list[dict], account: str, home: Path) -> float:
     return max(logged_in, samples[-1]["ts"]) if samples else logged_in
 
 
-def take_sample(home: Path, ledger: Path, now: float | None = None) -> dict:
+def take_sample(home: Path, ledger: Path, now: float | None = None, full: bool = False) -> dict:
     """Record each limit and this PC's tokens toward it; return the sample.
 
     The sample also carries the parsed limits and the scanned turns under
     ``"limits"`` / ``"turns"`` for the caller; only the ledger fields are saved.
+    ``full`` scans from each window's start rather than from the login, for
+    /usage to show work it cannot attribute; the 5-minute sampler skips it.
     """
     now = time.time() if now is None else now
     samples = _load(ledger)
@@ -231,7 +233,10 @@ def take_sample(home: Path, ledger: Path, now: float | None = None) -> dict:
     for limit in limits:
         limit["start"] = max(limit["reset"] - limit["span"], since)
     root = home / ".claude" / "projects"
-    turns = _turns(root, min((l["start"] for l in limits), default=now))
+    scan_from = min(
+        (l["reset"] - l["span"] if full else l["start"] for l in limits), default=now
+    )
+    turns = _turns(root, scan_from)
     record = {
         "ts": now, "account": account, "email": email, "tier": tier, "since": since,
         "w": {
@@ -308,10 +313,11 @@ def _until(ts: float, now: float) -> str:
 
 
 def _stamp(ts: float, now: float) -> str:
-    """Local time; the date only when it is not today."""
+    """Local time with its day: "šiandien 18:45", "vakar 09:10", "09-24 10:00"."""
     local = datetime.fromtimestamp(ts)
-    same_day = local.date() == datetime.fromtimestamp(now).date()
-    return local.strftime("%H:%M" if same_day else "%m-%d %H:%M")
+    days = (datetime.fromtimestamp(now).date() - local.date()).days
+    day = {0: "šiandien", 1: "vakar", -1: "rytoj"}.get(days, local.strftime("%m-%d"))
+    return f"{day} {local.strftime('%H:%M')}"
 
 
 def _bar(total: float, mine: float | None) -> str:
@@ -322,6 +328,12 @@ def _bar(total: float, mine: float | None) -> str:
     own = min(used, max(1, round(mine / 10)) if mine and mine > 0 else 0)
     other = "🟥" if total >= 80 else "🟨" if total >= 50 else "🟩"
     return "🟦" * own + other * (used - own) + "⬜" * (10 - used)
+
+
+def _approx(value: float) -> str:
+    """"≈ 3.5 %", but just "< 0.1 %" -- an approximate bound reads oddly."""
+    text = _pct(value)
+    return text if text.startswith("<") else f"≈ {text}"
 
 
 def _pct(value: float) -> str:
@@ -350,11 +362,11 @@ def _session_lines(root: Path, turns: list, now: float, k: float | None) -> list
         ago = max(0, int((now - last) // 60))
         ago_text = f"prieš {ago} min" if ago < 90 else f"prieš {ago // 60} val."
         label = _project(cwd) + (f" · {name}" if name else "")
-        amount = f"≈ {_pct(k * weight)} — " if k is not None else "• "
+        amount = f"{_approx(k * weight)} — " if k is not None else "• "
         lines.append(f"  {amount}{label} ({ago_text})")
     if len(ranked) > _TOP:
         rest = sum(w for _, (w, _, _) in ranked[_TOP:])
-        amount = f"≈ {_pct(k * rest)} — " if k is not None else "• "
+        amount = f"{_approx(k * rest)} — " if k is not None else "• "
         lines.append(f"  {amount}dar {len(ranked) - _TOP} sesijos")
     return lines
 
@@ -364,7 +376,7 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
     home = home or Path.home()
     now = time.time() if now is None else now
     try:
-        sample = take_sample(home, ledger, now)
+        sample = take_sample(home, ledger, now, full=True)
     except urllib.error.HTTPError as exc:
         logger.warning("usage: HTTP %s", exc.code)
         hint = " — prisijungimas pasenęs, atidaryk Claude Code" if exc.code == 401 else ""
@@ -387,7 +399,10 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
             title = "⏱ 5 val. langas"
         else:
             title = "📅 Savaitė" + (f", tik {limit['model']}" if limit["model"] else "")
-        lines += ["", f"{title}: {_stamp(start, now)} – {_stamp(reset, now)} (atsinaujins {_until(reset, now)})"]
+        end = _stamp(reset, now)
+        if end.split()[0] == _stamp(start, now).split()[0]:
+            end = end.split()[1]  # same day: "šiandien 18:30 – 23:30"
+        lines += ["", f"{title}: {_stamp(start, now)} – {end} (atsinaujins {_until(reset, now)})"]
         k = _pct_per_token(samples, sample["account"], limit["key"])
         mine = sample["w"][limit["key"]]["l"]
         mine_pct = min(limit["pct"], k * mine) if k is not None else None
@@ -398,7 +413,7 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
 
         since = f"nuo {_stamp(counted_from, now)}"
         if mine_pct is not None:
-            lines.append(f"• Šis PC {since}: ≈ {_pct(mine_pct)}, iš jų:")
+            lines.append(f"• Šis PC {since}: {_approx(mine_pct)}, iš jų:")
         else:
             readings = _window_samples(samples, sample["account"], limit["key"], reset, counted_from)
             if len(readings) > 1:
@@ -413,6 +428,19 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
                 lines.append(f"• Šis PC {since}: dar nežinau — reikia bent dviejų matavimų")
         turns = [t for t in sample["turns"] if t[1] >= counted_from and _matches(t[2], limit["model"])]
         lines.extend(_session_lines(root, turns, now, k))
+        # Work on this PC earlier in the window, before the ledger knew the
+        # account: said out loud instead of silently left out.
+        before = [
+            t for t in sample["turns"]
+            if start <= t[1] < counted_from and _matches(t[2], limit["model"])
+        ]
+        if before:
+            sessions = len({t[0] for t in before})
+            guess = f"; jei šia — dar {_approx(k * sum(t[3] for t in before))}" if k is not None else ""
+            lines.append(
+                f"  ❔ iki {_stamp(counted_from, now)} šiame PC buvo darbo (sesijų: {sessions}) — "
+                f"nežinau, kuria paskyra, neįskaičiuota{guess}"
+            )
     lines += [
         "",
         "🟦 šis PC · 🟩 kiti įrenginiai (ar dar neišskirta) · ⬜ liko",
