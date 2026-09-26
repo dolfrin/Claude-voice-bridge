@@ -53,7 +53,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import live, usage
+from . import live, sent_log, usage
 from .approvals import _TOKEN_RE, _fold
 from .config import AGENT_BACKENDS, Config, set_env_value
 from .scheduler import parse_hhmm
@@ -589,6 +589,13 @@ class TelegramIO:
                 )
             )
             ids.append(voice_msg.message_id)
+        row = _find_project_row(self.controls.snapshot(), project)
+        cwd = (row or {}).get("cwd") or ""
+        for mid in ids:
+            try:
+                sent_log.record(mid, None, cwd)
+            except OSError:
+                logger.exception("could not record message %s", mid)
         return ids
 
     async def send_question(
@@ -1782,7 +1789,7 @@ class TelegramIO:
             await self._send_plain(f"⚠️ Nepavyko pasiekti sesijos {session.pid}.")
             return False
 
-    async def live_route(self, cwd: str, text: str) -> bool:
+    async def live_route(self, cwd: str, text: str, spoken: bool = False) -> bool:
         """Send *text* to the editor session already open on *cwd*, if any.
 
         This is what keeps a project's work in ONE place: when a session for
@@ -1806,18 +1813,39 @@ class TelegramIO:
                 path = Path(session.cwd).resolve()
             except (OSError, ValueError):
                 continue
-            # The session may sit in a subdirectory of the project.
+            # The session may sit in a subdirectory of the project. With
+            # several open, the one worked in last is the one being watched.
             if path == target or target in path.parents:
-                # Prefer the closest match to the project root.
-                if best is None or len(str(path)) < len(str(Path(best.cwd))):
+                if best is None or session.last_active > best.last_active:
                     best = session
         if best is None:
             return False
-        if self._live_session is None or self._live_session.pid != best.pid:
-            await self._attach_live(str(best.pid))
-        return await self.live_send(text)
+        return await self._send_to(best, text, spoken)
 
-    def _project_for_cwd(self, cwd: str) -> str | None:
+    async def live_send_to(self, session_id: str, text: str, spoken: bool = False) -> bool:
+        """Send *text* into the session *session_id* if it is open on this PC.
+
+        This is how a reply goes back to the conversation that produced the
+        message. False when that session is not running (closed editor), and
+        the caller routes by project instead.
+        """
+        if not self._claude_live_enabled or not session_id or not text.strip():
+            return False
+        try:
+            sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
+        except Exception:  # noqa: BLE001 - never break routing over this
+            logger.exception("live: could not list sessions")
+            return False
+        match = next((x for x in sessions if x.session_id == session_id), None)
+        return match is not None and await self._send_to(match, text, spoken)
+
+    async def _send_to(self, session, text: str, spoken: bool) -> bool:
+        """Attach to *session* (so its answer streams back) and send *text*."""
+        if self._live_session is None or self._live_session.pid != session.pid:
+            await self._attach_live(str(session.pid))
+        return await self.live_send(text, spoken=spoken)
+
+    def project_for_cwd(self, cwd: str) -> str | None:
         """The bridge project whose directory contains *cwd*, if any."""
         if not cwd:
             return None
@@ -1839,12 +1867,20 @@ class TelegramIO:
                     best = (row["project"], path)
         return best[0] if best else None
 
-    async def _remember_sent(self, message, cwd: str) -> None:
-        """Map a message we sent to the project it belongs to; never raises."""
+    async def _remember_sent(
+        self, message, cwd: str, session_id: str | None = None
+    ) -> None:
+        """Map a message we sent to its project and session; never raises."""
         mid = getattr(message, "message_id", None)
-        if message is None or mid is None or self._on_sent is None:
+        if message is None or mid is None:
             return
-        project = self._project_for_cwd(cwd)
+        try:
+            sent_log.record(mid, session_id, cwd)
+        except OSError:
+            logger.exception("could not record message %s", mid)
+        if self._on_sent is None:
+            return
+        project = self.project_for_cwd(cwd)
         if project is None:
             return
         try:
@@ -2027,7 +2063,7 @@ class TelegramIO:
                     message = await self._send_plain(
                         chunk, markup if i == len(chunks) - 1 else None
                     )
-                    await self._remember_sent(message, session.cwd)
+                    await self._remember_sent(message, session.cwd, session.session_id)
                 # Text first, voice after: the text is the record, the voice is
                 # for when you are away from the screen. Only the assistant's
                 # own words are spoken -- see live.spoken_of.
@@ -2127,7 +2163,9 @@ class TelegramIO:
         message = await self._send_plain(body, markup)
         if message is not None:
             self._perm_pending[ident] = message
-            await self._remember_sent(message, str(data.get("cwd") or ""))
+            await self._remember_sent(
+                message, str(data.get("cwd") or ""), data.get("session_id")
+            )
 
     async def _expire_permissions(self, directory: Path) -> None:
         """Mark buttons dead once the editor session stops waiting.

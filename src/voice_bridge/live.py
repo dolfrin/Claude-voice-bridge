@@ -70,6 +70,12 @@ class LiveSession:
     entrypoint: str = ""
     status: str = ""
     started_at: int = 0
+    updated_at: int = 0
+
+    @property
+    def last_active(self) -> int:
+        """When it last did something (ms); start time for older builds."""
+        return self.updated_at or self.started_at
 
     @property
     def surface(self) -> str:
@@ -122,6 +128,7 @@ def list_sessions(
                 entrypoint=str(data.get("entrypoint") or ""),
                 status=str(data.get("status") or ""),
                 started_at=int(data.get("startedAt") or 0),
+                updated_at=int(data.get("updatedAt") or 0),
             )
         )
     return sorted(out, key=lambda s: s.started_at, reverse=True)

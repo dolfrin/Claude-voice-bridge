@@ -27,3 +27,12 @@ def _no_real_usage_calls(monkeypatch):
         raise RuntimeError("no network in tests")
 
     monkeypatch.setattr(usage, "fetch_limits", _refuse)
+
+
+@pytest.fixture(autouse=True)
+def _private_sent_log(monkeypatch, tmp_path):
+    """Keep tests out of the real ~/.claude message->session log."""
+    import voice_bridge.sent_log as sent_log
+
+    target = tmp_path / "sent.jsonl"
+    monkeypatch.setattr(sent_log, "_path", lambda path=None: path or target)

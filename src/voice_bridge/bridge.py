@@ -53,7 +53,7 @@ from .stt import Transcriber
 from .telegram_io import TelegramIO
 from .tts import get_tts
 from .types import Outbound
-from . import usage
+from . import sent_log, usage
 
 logger = logging.getLogger(__name__)
 
@@ -447,16 +447,6 @@ def make_inbound(
         # resolve_ask False (blank/stale/already-answered) falls through to
         # normal routing below.
 
-        # /live: while attached to an already-running Claude Code session, plain
-        # messages drive THAT session instead of a bridge project. Placed after
-        # the approval and ask_user interceptions above (a quote-reply answering
-        # one of those still belongs to the bridge) and before project routing.
-        # A failed send falls through to normal routing rather than swallowing
-        # the message.
-        if telegram.live_target() is not None:
-            if await telegram.live_send(text, spoken=bool(msg.get("is_voice"))):
-                return
-
         # Urgent '!' is consumed BEFORE name-prefix routing: otherwise
         # "!qwing: fix it" fails parse_name_prefix (text starts with '!', not
         # a known name) and falls back to last-active, interrupting the
@@ -465,27 +455,55 @@ def make_inbound(
         # the name normally, and "!fix it" (no name) still falls back to
         # last-active exactly as before.
         urgent, text = _consume_urgent_prefix(text)
-
+        spoken = bool(msg.get("is_voice"))
+        # Audio attachments become text up front: every route below needs it.
+        text = await _append_attachment_transcripts(text, msg, transcriber)
         reply_project = await store.project_for_message(rid) if rid is not None else None
-        if reply_project is not None:
-            # A quote-reply that resolves to a known project is unambiguous
-            # and wins outright, exactly like before name-prefix routing
-            # existed.
-            project, reason = await resolve_target(msg, store)
-        else:
+        entry = sent_log.lookup(rid) if rid is not None else None
+        prefix_project, prefix_text = None, text
+        if reply_project is None and entry is None:
+            # A quote-reply is unambiguous and wins; only without one does a
+            # leading "<project>:" pick the target.
             names = sessions.names() if hasattr(sessions, "names") else []
             prefix_project, prefix_text = parse_name_prefix(text, names)
-            if prefix_project is not None:
-                project, text = prefix_project, prefix_text
-                reason = "ok" if await store.is_enabled(project) else "off"
-            else:
-                project, reason = await resolve_target(msg, store)
+
+        # Live first. Without a "<project>:" prefix, the message is for the
+        # conversation that sent the message being replied to, or -- no reply
+        # -- the one that sent the LAST message. When that conversation is open
+        # on this PC it goes straight in; a new session is never started for
+        # it. The hooks record their notifications too (sent_log), so this
+        # covers "finished"/question messages the bridge did not send itself.
+        if prefix_project is None:
+            if rid is None:
+                entry = sent_log.last()
+            if entry and entry.get("s") and await telegram.live_send_to(
+                entry["s"], await _files_into(entry.get("c") or "", text, msg), spoken=spoken
+            ):
+                return
+            # Explicitly attached with /live and nothing more specific known.
+            if entry is None and rid is None and telegram.live_target() is not None:
+                if await telegram.live_send(text, spoken=spoken):
+                    return
+
+        entry_project = (
+            telegram.project_for_cwd(entry.get("c") or "") if entry else None
+        )
+        if prefix_project is not None:
+            project, text = prefix_project, prefix_text
+            reason = "ok" if await store.is_enabled(project) else "off"
+        elif entry_project is not None:
+            # The conversation that spoke is closed: its project, which the
+            # editor may still have another session open on.
+            project = entry_project
+            reason = "ok" if await store.is_enabled(project) else "off"
+        else:
+            # A quote-reply to a bridge project's message, or last-active.
+            project, reason = await resolve_target(msg, store)
 
         if reason == "none":
             names = ", ".join(sessions.names()) if hasattr(sessions, "names") else ""
             await telegram.send_question("bridge", f"Which project? {names}".strip())
             return
-        text = await _append_attachment_transcripts(text, msg, transcriber)
         text = await _attach_files_to_prompt(project, text, msg, sessions)
         if reason == "off":
             await telegram.send_disabled_project_prompt(project, text)
@@ -500,11 +518,13 @@ def make_inbound(
         # and reading, so the answer stays text; a voice note means they are
         # not, so it gets read out. Recorded per project because two projects
         # can be talked to in different ways at the same time.
-        spoken_by_project[project] = bool(msg.get("is_voice"))
+        spoken_by_project[project] = spoken
 
         proj = sessions.project(project) if hasattr(sessions, "project") else None
-        if proj is not None and await telegram.live_route(proj.cwd, text):
+        if proj is not None and await telegram.live_route(proj.cwd, text, spoken=spoken):
             return
+        # Nothing open on this project here: only now does the bridge run it
+        # in a session of its own.
         await sessions.deliver(project, text)
 
     return inbound
@@ -516,13 +536,16 @@ async def _attach_files_to_prompt(
     msg: dict,
     sessions: SessionController,
 ) -> str:
-    attachments = msg.get("attachments") or []
-    if not attachments:
-        return text
     proj = sessions.project(project) if hasattr(sessions, "project") else None
-    if proj is None:
+    return await _files_into(proj.cwd if proj is not None else "", text, msg)
+
+
+async def _files_into(cwd: str, text: str, msg: dict) -> str:
+    """Save the message's files under *cwd* and point the prompt at them."""
+    attachments = msg.get("attachments") or []
+    if not attachments or not cwd:
         return text
-    saved = await save_attachments(proj.cwd, attachments)
+    saved = await save_attachments(cwd, attachments)
     return format_attachment_prompt(text, saved)
 
 
@@ -1304,9 +1327,17 @@ async def build() -> Wiring:
             io = telegram_ref.get("io")
             return await io.live_send(text, spoken) if io is not None else False
 
-        async def live_route(self, cwd, text):
+        async def live_route(self, cwd, text, spoken: bool = False):
             io = telegram_ref.get("io")
-            return await io.live_route(cwd, text) if io is not None else False
+            return await io.live_route(cwd, text, spoken) if io is not None else False
+
+        async def live_send_to(self, session_id, text, spoken: bool = False):
+            io = telegram_ref.get("io")
+            return await io.live_send_to(session_id, text, spoken) if io is not None else False
+
+        def project_for_cwd(self, cwd):
+            io = telegram_ref.get("io")
+            return io.project_for_cwd(cwd) if io is not None else None
 
     lazy_telegram = _LazyTelegram()
 
@@ -1445,6 +1476,7 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
     shutdown) and is ALSO cancelled/awaited in ``finally`` so a mid-``sleep``
     tick can't delay shutdown. Shutdown is symmetric and runs in ``finally``.
     """
+    sent_log.prune()
     # Telegram first: a project that fails to start reports it through
     # Telegram, and before run() there is no bot to report with.
     await wiring.telegram.run()

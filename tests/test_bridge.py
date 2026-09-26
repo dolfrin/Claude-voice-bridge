@@ -197,6 +197,9 @@ class FakeTelegram:
         self.live_send_result = True
         self.live_routed: list[tuple[str, str]] = []
         self.live_route_result = False
+        self.live_sent_to: list[tuple[str, str]] = []
+        self.open_sessions: set[str] = set()
+        self.cwd_projects: dict[str, str] = {}
 
     def live_target(self):
         return self.live_session
@@ -206,11 +209,19 @@ class FakeTelegram:
         self.live_spoken.append(spoken)
         return self.live_send_result
 
-    async def live_route(self, cwd, text):
+    async def live_route(self, cwd, text, spoken=False):
         # Default False = no editor session open for that project, so inbound
         # falls back to the bridge's own session (the pre-existing behaviour).
         self.live_routed.append((cwd, text))
         return self.live_route_result
+
+    async def live_send_to(self, session_id, text, spoken=False):
+        # Sessions listed in ``open_sessions`` are "open on this PC".
+        self.live_sent_to.append((session_id, text))
+        return session_id in self.open_sessions
+
+    def project_for_cwd(self, cwd):
+        return self.cwd_projects.get(cwd)
 
     def pending_ask_token_for_message(self, message_id):
         return self._ask_by_message.get(message_id)
@@ -2751,3 +2762,65 @@ async def test_outbound_stays_silent_when_the_question_was_typed():
     spoken_by_project["qwing"] = False
     await outbound(Outbound(project="qwing", text="Krito.", spoken="", alert=True))
     assert telegram.updates[-1][3] == b"VOICE"
+
+
+# --------------------------------------------------------------------------- #
+# Live first: messages go to the conversation that spoke, when it is open.
+# --------------------------------------------------------------------------- #
+def _live_first_setup(**store_kw):
+    from voice_bridge import sent_log
+
+    store = FakeStore(enabled={"qwing": True, "othersapp": True}, **store_kw)
+    sessions = FakeSessions([FakeProject("qwing"), FakeProject("othersapp")])
+    telegram = FakeTelegram()
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+    return sent_log, sessions, telegram, inbound
+
+
+@pytest.mark.asyncio
+async def test_reply_to_a_hook_notification_goes_to_that_open_session():
+    sent_log, sessions, telegram, inbound = _live_first_setup(last_active="othersapp")
+    sent_log.record(500, "ide-qwing", "/p/qwing")  # "Claude finished" from the hook
+    telegram.open_sessions = {"ide-qwing"}
+
+    await inbound(_msg(reply_to=500, text="toliau"))
+
+    assert telegram.live_sent_to == [("ide-qwing", "toliau")]
+    assert sessions.delivered == []  # no bridge session started
+
+
+@pytest.mark.asyncio
+async def test_plain_message_goes_to_the_session_that_spoke_last():
+    sent_log, sessions, telegram, inbound = _live_first_setup(last_active="othersapp")
+    sent_log.record(500, "ide-old", "/p/othersapp")
+    sent_log.record(501, "ide-qwing", "/p/qwing")
+    telegram.open_sessions = {"ide-old", "ide-qwing"}
+
+    await inbound(_msg(text="o dabar"))
+
+    assert telegram.live_sent_to == [("ide-qwing", "o dabar")]
+    assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_closed_session_falls_back_to_its_project_not_last_active():
+    sent_log, sessions, telegram, inbound = _live_first_setup(last_active="othersapp")
+    sent_log.record(500, "ide-gone", "/p/qwing")
+    telegram.cwd_projects = {"/p/qwing": "qwing"}  # editor closed: open_sessions empty
+
+    await inbound(_msg(reply_to=500, text="tęsk"))
+
+    assert telegram.live_routed == [(FakeProject("qwing").cwd, "tęsk")]
+    assert sessions.delivered == [("qwing", "tęsk")]
+
+
+@pytest.mark.asyncio
+async def test_name_prefix_beats_the_last_speaker():
+    sent_log, sessions, telegram, inbound = _live_first_setup()
+    sent_log.record(501, "ide-qwing", "/p/qwing")
+    telegram.open_sessions = {"ide-qwing"}
+
+    await inbound(_msg(text="othersapp: build"))
+
+    assert telegram.live_sent_to == []
+    assert sessions.delivered == [("othersapp", "build")]
