@@ -291,7 +291,7 @@ def other_accounts(samples: list[dict], current: str, now: float) -> list[dict]:
             for key, w in sample.get("w", {}).items()
         }
         worst = max((v[0] for v in limits.values()), default=0.0)
-        out.append({"email": sample.get("email", "?"), "seen": sample["ts"],
+        out.append({"uuid": sample["account"], "email": sample.get("email", "?"), "seen": sample["ts"],
                     "limits": limits, "free": 100 - worst})
     return sorted(out, key=lambda a: -a["free"])
 

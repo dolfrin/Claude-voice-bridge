@@ -53,7 +53,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import live, sent_log, usage
+from . import accounts, live, sent_log, usage
 from .approvals import _TOKEN_RE, _fold
 from .config import AGENT_BACKENDS, Config, set_env_value
 from .i18n import t
@@ -1078,6 +1078,9 @@ class TelegramIO:
             else:
                 await query.edit_message_text(t("answer.failed"))
             return
+        if action in {"acct", "acctgo", "acctno"}:
+            await self._handle_account_callback(query, action, index_str)
+            return
         if action in {"pc", "pcgo", "pcno"}:
             await self._handle_pc_callback(query, action, index_str)
             return
@@ -1610,6 +1613,72 @@ class TelegramIO:
         if self._agent_switched == name:
             self._restart()
 
+    def _vault(self) -> Path:
+        return accounts.vault_path(self.cfg.db_path)
+
+    async def _cmd_account(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/account: the Claude accounts seen on this PC; tap one to switch."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        if not getattr(self.cfg, "claude_account_switching", False):
+            await msg.reply_text(t("account.disabled"))
+            return
+        current = await asyncio.to_thread(accounts.remember, Path.home(), self._vault())
+        saved = await asyncio.to_thread(accounts.known, self._vault())
+        if not saved:
+            await msg.reply_text(t("account.none"))
+            return
+        lines, rows = [t("account.title")], []
+        for acc in saved:
+            if acc["uuid"] == current:
+                lines.append(t("account.line_current", email=acc["email"]))
+                continue
+            state = "" if acc["usable"] else " " + t("account.expired_mark")
+            lines.append(t("account.line", email=acc["email"], state=state))
+            if acc["usable"]:
+                rows.append([InlineKeyboardButton(acc["email"], callback_data=f"acct:{acc['uuid']}")])
+        await msg.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+
+    async def _handle_account_callback(self, query, action: str, uuid: str) -> None:
+        if not getattr(self.cfg, "claude_account_switching", False):
+            await query.edit_message_text(t("account.disabled"))
+            return
+        if action == "acctno":
+            await self._edit_callback_markup(query, InlineKeyboardMarkup([[
+                InlineKeyboardButton(t("account.cancelled"), callback_data="noop:")
+            ]]))
+            return
+        email = next((a["email"] for a in accounts.known(self._vault()) if a["uuid"] == uuid), None)
+        if email is None:
+            await query.edit_message_text(t("account.unknown"))
+            return
+        if action == "acct":
+            # Confirm first: a switch moves every Claude Code session on this PC.
+            await query.message.reply_text(
+                t("account.confirm", email=email),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(t("answer.yes_button"), callback_data=f"acctgo:{uuid}"),
+                    InlineKeyboardButton(t("answer.no_button"), callback_data="acctno:"),
+                ]]),
+            )
+            return
+        try:
+            await asyncio.to_thread(accounts.switch, Path.home(), self._vault(), uuid)
+        except accounts.SwitchError as exc:
+            await query.edit_message_text(t(str(exc), email=email))
+            return
+        except OSError as exc:
+            logger.exception("account: switch failed")
+            await query.edit_message_text(t("account.failed", error=exc))
+            return
+        await query.edit_message_text(t("account.switched", email=email))
+        # The bridge's own sessions hold the old login in their processes;
+        # restarting the bridge starts them on the new one.
+        self._restart()
+
     async def _cmd_pc(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -2060,9 +2129,17 @@ class TelegramIO:
         except Exception:  # noqa: BLE001 - routing memory is best-effort
             logger.exception("could not map message %s to %s", mid, project)
 
-    async def send_notice(self, text: str) -> None:
-        """A plain notice from the bridge itself (e.g. a limit running out)."""
-        await self._send_plain(text)
+    async def send_notice(self, text: str, switch_to: str | None = None) -> None:
+        """A plain notice from the bridge itself (e.g. a limit running out).
+
+        With *switch_to* (an account uuid) and account switching on, it
+        carries a button to switch to that account."""
+        markup = None
+        if switch_to and getattr(self.cfg, "claude_account_switching", False):
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                t("account.switch_button"), callback_data=f"acct:{switch_to}"
+            )]])
+        await self._send_plain(text, markup)
 
     async def _send_plain(self, text: str, reply_markup=None):
         """Plain message to the owner (optionally with buttons); never raises.
@@ -2450,6 +2527,8 @@ class TelegramIO:
             CommandHandler("agent", self._cmd_agent, filters=only_me))
         app.add_handler(
             CommandHandler("pc", self._cmd_pc, filters=only_me))
+        app.add_handler(
+            CommandHandler("account", self._cmd_account, filters=only_me))
         app.add_handler(
             CommandHandler("status", self._cmd_status, filters=only_me))
         app.add_handler(

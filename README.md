@@ -324,6 +324,8 @@ AGENT_BACKEND=claude
 BOT_LANGUAGE=en
 # Let /pc suspend / shut down / restart this machine (off by default)
 PC_POWER_COMMANDS=false
+# Keep each Claude login seen here so /account can switch back (off by default)
+CLAUDE_ACCOUNT_SWITCHING=false
 
 # TTS: choose auto, openai, piper, together, or lithuanian
 # auto uses Piper only for English-looking text and OpenAI for everything else.
@@ -490,6 +492,7 @@ journalctl --user -u voice-bridge -f
 | 🗒 | `/recap` | Show what changed across all projects while you were away |
 | 📊 | `/usage` (or `/cost`) | Claude limits of the logged-in account — 5-hour, weekly, per-model (e.g. Fable) — and this PC's estimated share, per session |
 | 💻 | `/pc` | Suspend, shut down or restart this machine — each confirmed with ✅/❌. Off unless `PC_POWER_COMMANDS=true` |
+| 👤 | `/account` | Claude accounts logged in on this PC; tap one (✅/❌) to switch the whole PC to it. Off unless `CLAUDE_ACCOUNT_SWITCHING=true` |
 | ♾ | `/policies` / `/policies clear [project]` | List, or revoke (all / one project's), the always-allow grants |
 | ⏰ | `/schedule` / `/schedule <project> <HH:MM> <prompt>` / `/schedule remove\|on\|off <id>` | List, add, or toggle/remove a daily recurring prompt delivered to a project at a local time |
 | ❓ | `/help` | Routing rules (name-prefix, last-active, quote-reply, `!` urgent), how to answer approvals/questions from the phone, and the command list |
@@ -799,6 +802,21 @@ in on this machine:
   since the first reading is shown as a ceiling instead. Model-scoped limits count only
   that model's turns. `claude.ai` web/desktop chats are not visible here and count as
   other devices.
+
+**Several accounts.** `/usage` also lists every other account this PC has been logged
+in to, freest first, from its last reading here (a window whose reset time has passed
+counts as empty), and the bridge warns in Telegram when the logged-in account crosses
+80 % or 95 % of a limit, naming the freest other account.
+
+With `CLAUDE_ACCOUNT_SWITCHING=true` (Linux) the bridge also keeps a copy of each login
+it sees — `~/.claude/.credentials.json` plus the account block of `~/.claude.json` — in
+`claude-accounts.json` (0600) next to its database, refreshed every 5 minutes while that
+account is logged in. `/account` (or the button on a limit warning) puts a saved login
+back after a ✅/❌ confirmation, keeping every other setting in those files, and restarts
+the bridge so its sessions use it. Editor windows keep the old login until reloaded
+(**Developer: Reload Window**). A saved login works until its refresh token expires; then
+log in to that account once with `claude /login`. Those copies are live tokens for every
+account, which is why the feature is off unless you turn it on.
 
 ---
 

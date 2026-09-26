@@ -2927,7 +2927,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
             "mode", "effort", "voice", "verbose", "engine", "recap", "usage", "info", "policies", "schedule", "help",
-            "live", "agent", "pc"} == registered_names
+            "live", "agent", "pc", "account"} == registered_names
 
 
 @pytest.mark.asyncio

@@ -74,6 +74,9 @@ class Config:
     # /pc may suspend, power off or reboot this machine. Off unless asked for:
     # switching someone's computer off from a chat must be a deliberate choice.
     pc_power_commands: bool = False
+    # Keep a copy of every Claude login seen here so /account can switch back
+    # to it. Off by default: the copies are live tokens for every account.
+    claude_account_switching: bool = False
 
 
 @dataclass
@@ -205,6 +208,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         codex_app_server_url=(env.get("CODEX_APP_SERVER_URL") or "").strip(),
         bot_language=bot_language,
         pc_power_commands=_optional_bool(env, "PC_POWER_COMMANDS", False),
+        claude_account_switching=_optional_bool(env, "CLAUDE_ACCOUNT_SWITCHING", False),
     )
 
 

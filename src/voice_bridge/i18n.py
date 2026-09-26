@@ -555,3 +555,40 @@ LT.update({
     "pc.doing_reboot": "🔄 Perkraunu…",
     "pc.failed": "⚠️ Nepavyko: {error}",
 })
+
+
+# --- /account ------------------------------------------------------------------------
+EN.update({
+    "cmd.account": "👤 Switch Claude account",
+    "account.disabled": "/account is off. To keep the Claude logins seen on this PC and switch between them from Telegram, set CLAUDE_ACCOUNT_SWITCHING=true in .env and restart the bridge. The saved logins are live tokens, kept 0600 next to the bridge's database.",
+    "account.none": "No saved accounts yet. Each account you log in to on this PC (claude /login) is saved from then on.",
+    "account.title": "👤 Claude accounts on this PC:",
+    "account.line_current": "• ✅ {email} — logged in now",
+    "account.line": "• {email}{state}",
+    "account.expired_mark": "(login expired — log in to it once with claude /login)",
+    "account.switch_button": "👤 Switch to the freest account",
+    "account.confirm": "Switch this PC to {email}?\nEvery Claude Code session here moves to it: the bridge restarts (~10 s); in VS Code run “Developer: Reload Window” so the editor picks it up too.",
+    "account.cancelled": "Cancelled — the account stays.",
+    "account.switched": "✅ Switched to {email}. The bridge is restarting — write again in ~10 s. Reload VS Code windows to move them as well.",
+    "account.unknown": "That account is not saved on this PC.",
+    "account.expired": "The saved login for {email} has expired — log in to it once with claude /login.",
+    "account.not_applied": "⚠️ The switch to {email} did not stick — a running Claude Code wrote its own login back. Close or reload the editor and try again.",
+    "account.failed": "⚠️ Could not switch: {error}",
+})
+LT.update({
+    "cmd.account": "👤 Perjungti Claude paskyrą",
+    "account.disabled": "/account išjungta. Kad tiltas saugotų šiame PC matytus Claude prisijungimus ir leistų juos perjungti iš Telegram, .env nustatyk CLAUDE_ACCOUNT_SWITCHING=true ir perkrauk tiltą. Išsaugoti prisijungimai yra veikiantys raktai, laikomi 0600 šalia tilto duomenų bazės.",
+    "account.none": "Išsaugotų paskyrų dar nėra. Kiekviena paskyra, prie kurios prisijungsi šiame PC (claude /login), nuo tada bus išsaugota.",
+    "account.title": "👤 Claude paskyros šiame PC:",
+    "account.line_current": "• ✅ {email} — prisijungta dabar",
+    "account.line": "• {email}{state}",
+    "account.expired_mark": "(prisijungimas pasibaigęs — prisijunk vieną kartą su claude /login)",
+    "account.switch_button": "👤 Perjungti į laisviausią paskyrą",
+    "account.confirm": "Perjungti šį PC į {email}?\nVisos Claude Code sesijos čia pereis į ją: tiltas persikraus (~10 s); VS Code paleisk „Developer: Reload Window“, kad ir redaktorius ją paimtų.",
+    "account.cancelled": "Atšaukta — paskyra lieka.",
+    "account.switched": "✅ Perjungta į {email}. Tiltas persikrauna — rašyk po ~10 s. VS Code langus perkrauk (Reload Window), kad ir jie pereitų.",
+    "account.unknown": "Ši paskyra šiame PC neišsaugota.",
+    "account.expired": "Išsaugotas {email} prisijungimas pasibaigė — prisijunk vieną kartą su claude /login.",
+    "account.not_applied": "⚠️ Perjungimas į {email} neišsilaikė — veikiantis Claude Code įrašė savo prisijungimą atgal. Uždaryk ar perkrauk redaktorių ir bandyk dar kartą.",
+    "account.failed": "⚠️ Nepavyko perjungti: {error}",
+})

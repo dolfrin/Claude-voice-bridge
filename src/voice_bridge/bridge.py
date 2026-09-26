@@ -54,7 +54,7 @@ from .telegram_io import TelegramIO
 from .tts import get_tts
 from .types import Outbound
 from .i18n import t
-from . import i18n, sent_log, usage
+from . import accounts, i18n, sent_log, usage
 
 logger = logging.getLogger(__name__)
 
@@ -1492,7 +1492,7 @@ async def build() -> Wiring:
 
 
 async def _sample_usage(
-    ledger, stop: asyncio.Event, notify=None, interval: float = 300
+    ledger, stop: asyncio.Event, notify=None, interval: float = 300, vault=None,
 ) -> None:
     """Record the Claude account's limits every *interval* seconds.
 
@@ -1502,9 +1502,13 @@ async def _sample_usage(
     asks."""
     while not stop.is_set():
         try:
+            if vault is not None:
+                # Keep the saved copy of this login fresh for /account.
+                await asyncio.to_thread(accounts.remember, Path.home(), vault)
             sample = await asyncio.to_thread(usage.take_sample, Path.home(), ledger)
+            freest = next((a["uuid"] for a in sample["others"]), None)
             for text in sample["alerts"] if notify is not None else []:
-                await notify(text)
+                await notify(text, switch_to=freest)
         except Exception:  # noqa: BLE001 - a missed sample is not worth dying for
             logger.warning("usage: sample failed", exc_info=True)
         try:
@@ -1541,6 +1545,10 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
         _sample_usage(
             usage.ledger_path(wiring.cfg.db_path), stop,
             notify=getattr(wiring.telegram, "send_notice", None),
+            vault=(
+                accounts.vault_path(wiring.cfg.db_path)
+                if getattr(wiring.cfg, "claude_account_switching", False) else None
+            ),
         )
     )
     try:
