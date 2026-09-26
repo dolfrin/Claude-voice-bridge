@@ -2251,16 +2251,24 @@ async def test_cmd_newproject_calls_create_project_and_replies():
 
 
 @pytest.mark.asyncio
-async def test_cmd_newproject_no_arg_shows_usage():
+async def test_cmd_newproject_without_a_name_asks_for_one_and_takes_the_reply():
     controls = FakeControls()
+    controls.create_project = AsyncMock(return_value="sukurta")
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     upd = make_cmd_update("/newproject")
+    upd.message.reply_text.return_value = MagicMock(message_id=900)
 
     await io._cmd_newproject(upd, make_ctx([]))
 
-    assert controls.calls == []
-    sent = upd.message.reply_text.await_args.args[0]
-    assert "/newproject" in sent
+    controls.create_project.assert_not_awaited()
+    assert "Kaip pavadinti" in upd.message.reply_text.await_args.args[0]
+
+    answer = make_cmd_update("mano-app")
+    answer.message.reply_to_message = MagicMock(message_id=900)
+    io._reply_to = lambda m: 900
+    await io._handle_text(answer, make_ctx([]))
+
+    controls.create_project.assert_awaited_once_with("mano-app")
 
 
 @pytest.mark.asyncio
@@ -2287,14 +2295,17 @@ async def test_cmd_on_with_project_calls_toggle_true():
 
 
 @pytest.mark.asyncio
-async def test_cmd_off_no_arg_is_global():
+async def test_cmd_off_no_arg_offers_projects_instead_of_switching_all_off():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     upd = make_cmd_update("/off")
 
     await io._cmd_off(upd, make_ctx([]))
 
-    assert ("toggle", None, False) in controls.calls
+    assert controls.calls == []  # nothing switched off by a bare /off
+    assert upd.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard
+    await io._cmd_off(make_cmd_update("/off all"), make_ctx(["all"]))
+    assert ("toggle", None, False) in controls.calls  # "all" is explicit
 
 
 @pytest.mark.asyncio
@@ -2467,14 +2478,16 @@ async def test_cmd_verbose_off_all_projects():
 
 
 @pytest.mark.asyncio
-async def test_cmd_verbose_defaults_to_on_when_no_state_arg():
+async def test_cmd_verbose_without_args_offers_buttons_for_the_current_project():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
     upd = make_cmd_update("/verbose")
 
     await io._cmd_verbose(upd, make_ctx([]))
 
-    assert ("set_verbose", None, True) in controls.calls
+    assert controls.calls == []
+    data = [b.callback_data for r in upd.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard for b in r]
+    assert data == ["cm:verbose:0:on", "cm:verbose:0:off"]
 
 
 @pytest.mark.asyncio
@@ -2642,12 +2655,12 @@ async def test_cmd_off_valid_project_notes_dropped_turns():
 
 
 @pytest.mark.asyncio
-async def test_cmd_off_no_arg_also_notes_dropped_turns():
+async def test_cmd_off_all_notes_dropped_turns():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
-    upd = make_cmd_update("/off")
+    upd = make_cmd_update("/off all")
 
-    await io._cmd_off(upd, make_ctx([]))
+    await io._cmd_off(upd, make_ctx(["all"]))
 
     assert ("toggle", None, False) in controls.calls
     sent = upd.message.reply_text.await_args.args[0]
@@ -4293,3 +4306,46 @@ async def test_no_went_to_notice_right_after_joining_a_session(monkeypatch, tmp_
     await io.note_route("cur", "x", session_id="cur", cwd="/p/x", text="labas")
 
     io._send_plain.assert_not_awaited()
+
+
+
+@pytest.mark.asyncio
+async def test_bare_setting_commands_offer_buttons_and_a_tap_applies_it():
+    controls = FakeControls()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    for cmd in ("mode", "effort", "engine"):
+        upd = make_cmd_update(f"/{cmd}")
+        await getattr(io, f"_cmd_{cmd}")(upd, make_ctx([]))
+        assert upd.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard, cmd
+    assert controls.calls == []  # showing choices changes nothing
+
+    query = AsyncMock()
+    query.data = "cm:mode:0:full"
+    query.from_user = MagicMock(id=42)
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+    assert ("set_mode", controls.snapshot()[0]["project"], "full") in controls.calls
+
+
+@pytest.mark.asyncio
+async def test_message_to_a_busy_session_says_it_is_queued(monkeypatch):
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    busy = SimpleNamespace(pid=4, session_id="q", cwd="/p/q", socket_path="/s", status="busy", started_at=0)
+    monkeypatch.setattr(live_mod, "find", lambda pid, d: busy)
+
+    async def fake_send(path, text, from_name="telegram"):
+        return None
+
+    monkeypatch.setattr(live_mod, "send", fake_send)
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._live_session = busy
+    io._send_plain = AsyncMock()
+    io.session_label = lambda s: "Qwing"
+
+    await io.live_send("labas")
+    await io.live_send("dar")  # not repeated within 10 minutes
+
+    io._send_plain.assert_awaited_once()
+    assert "eilėje" in io._send_plain.await_args.args[0]

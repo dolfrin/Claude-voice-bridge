@@ -289,7 +289,7 @@ def test_end_of_reports_the_current_size(tmp_path):
     [
         ("Ar mergint?\n1) Taip\n2) Ne\n3) Palauk", ["Taip", "Ne", "Palauk"]),
         ("What now?\n1. Ship it\n2. Wait", ["Ship it", "Wait"]),
-        ("pick\n1 - a\n2 - b", ["a", "b"]),
+        ("pick:\n1 - a\n2 - b", ["a", "b"]),
     ],
 )
 def test_parse_options_finds_numbered_choices(text, expected):
@@ -456,3 +456,27 @@ def test_background_sdk_sessions_are_never_live(tmp_path):
     found = live.list_sessions(tmp_path, is_alive=lambda pid: True)
 
     assert [s.session_id for s in found] == ["ide"]
+
+
+def test_numbered_explanation_is_not_a_menu():
+    explanation = "Įdėjau dvi apsaugas:\n1. Pirma\n2. Antra\n\nJei vėl pamatysi, parašyk."
+    menu = "Kurį variantą renkiesi?\n1. Greitai\n2. Tvarkingai"
+    assert live.parse_options(explanation) == []
+    assert live.parse_options(menu) == ["Greitai", "Tvarkingai"]
+
+
+def test_current_activity_reports_a_tool_still_running(tmp_path):
+    import json as _json
+
+    path = tmp_path / "s.jsonl"
+    run = {"type": "assistant", "timestamp": "2026-09-26T20:00:00Z",
+           "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                    "input": {"command": "pytest -x tests"}}]}}
+    path.write_text(_json.dumps(run) + "\n")
+    what, since = live.current_activity(path)
+    assert what.startswith("🔧 Bash pytest") and since > 0
+
+    done = {"type": "user", "timestamp": "2026-09-26T20:05:00Z",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}}
+    path.write_text(_json.dumps(run) + "\n" + _json.dumps(done) + "\n")
+    assert live.current_activity(path)[0] == "🤔"  # the tool finished

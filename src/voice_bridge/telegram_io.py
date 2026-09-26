@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Protocol, TypeVar
 
 from telegram import (
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Update,
@@ -540,6 +541,12 @@ class TelegramIO:
         self._move_seq = 0
         # A new Claude tab opened by /open, waiting for its first message.
         self._pending_tab: dict | None = None
+        # "What should the new project be called?" prompts awaiting a reply,
+        # and "add a schedule" prompts.
+        self._name_prompts: set[int] = set()
+        self._schedule_prompts: set[int] = set()
+        # When each busy session was last reported busy (not every message).
+        self._busy_noted: dict[str, float] = {}
         # "Where to start?" questions awaiting a tap, and the project whose
         # background session is the current conversation (if any).
         self._start_pending: dict[str, tuple[str, str | None]] = {}
@@ -603,9 +610,21 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
+        replied = self._reply_to(msg)
+        if replied in self._name_prompts:
+            # The answer to "what should the new project be called?".
+            self._name_prompts.discard(replied)
+            context.args = (msg.text or "").split()[:1]
+            await self._cmd_newproject(update, context)
+            return
+        if replied in self._schedule_prompts:
+            self._schedule_prompts.discard(replied)
+            context.args = (msg.text or "").split()
+            await self._cmd_schedule(update, context)
+            return
         await self.on_user_message({
             "message_id": msg.message_id,
-            "reply_to": self._reply_to(msg),
+            "reply_to": replied,
             "text": msg.text or "",
             "is_voice": False,
             "audio": None,
@@ -1193,6 +1212,27 @@ class TelegramIO:
             else:
                 await query.edit_message_text(t("answer.failed"))
             return
+        if action in {"cm", "cmopen"}:
+            await self._handle_choice(query, action, index_str)
+            return
+        if action == "openp":
+            snap = self.controls.snapshot()
+            if index_str.isdigit() and int(index_str) < len(snap):
+                project = snap[int(index_str)]["project"]
+                await self._edit_callback_markup(query, InlineKeyboardMarkup([[
+                    InlineKeyboardButton(t("open.starting", project=project), callback_data="noop:")
+                ]]))
+                if not snap[int(index_str)].get("enabled"):
+                    await self.controls.toggle(project, True)
+                await self._send_plain(await self.open_on_pc(project))
+            return
+        if action == "sch":
+            await self._handle_schedule_button(query, index_str)
+            return
+        if action == "polclr":
+            await self.controls.clear_policies(None)
+            await query.edit_message_text(t("policies.cleared", scope=t("projects.all")))
+            return
         if action == "start":
             await self._handle_start_callback(query, index_str)
             return
@@ -1526,7 +1566,8 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args:
-            await msg.reply_text(t("newproject.usage"))
+            asked = await msg.reply_text(t("newproject.ask"), reply_markup=ForceReply(selective=True))
+            self._name_prompts.add(asked.message_id)
             return
         name = context.args[0]
         result = await self.controls.create_project(name)
@@ -1542,7 +1583,16 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        arg = context.args[0] if context.args else None
+        if not context.args:
+            # Bare /on used to start EVERY project; pick one instead
+            # ("/on all" still does all).
+            snap = self.controls.snapshot()
+            await msg.reply_text(
+                t("choose.on") + "\n\n" + format_projects(snap, show_all=True, open_projects=self._open_projects()),
+                parse_mode="HTML", reply_markup=build_projects_list_markup(snap, show_all=True),
+            )
+            return
+        arg = None if context.args[0] == "all" else context.args[0]
         project, error = self._resolve_project_arg(arg)
         if error:
             await msg.reply_text(error)
@@ -1558,7 +1608,14 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        arg = context.args[0] if context.args else None
+        if not context.args:
+            snap = self.controls.snapshot()
+            await msg.reply_text(
+                t("choose.off") + "\n\n" + format_projects(snap, open_projects=self._open_projects()),
+                parse_mode="HTML", reply_markup=build_projects_list_markup(snap),
+            )
+            return
+        arg = None if context.args[0] == "all" else context.args[0]
         project, error = self._resolve_project_arg(arg)
         if error:
             await msg.reply_text(error)
@@ -1589,7 +1646,10 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        if not context.args or context.args[0] not in _MODES:
+        if not context.args:
+            await self._reply_choices(msg, "mode")
+            return
+        if context.args[0] not in _MODES:
             await msg.reply_text(t("mode.usage"))
             return
         mode = context.args[0]
@@ -1611,7 +1671,10 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        if not context.args or context.args[0] not in _EFFORTS:
+        if not context.args:
+            await self._reply_choices(msg, "effort")
+            return
+        if context.args[0] not in _EFFORTS:
             await msg.reply_text(t("effort.usage", levels="|".join(_EFFORTS)))
             return
         level = context.args[0]
@@ -1630,7 +1693,17 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        await msg.reply_text(self.controls.info())
+        idx = self._current_idx()
+        rows = [[
+            InlineKeyboardButton(t("choose.btn_mode"), callback_data=f"cmopen:mode:{idx}"),
+            InlineKeyboardButton(t("choose.btn_effort"), callback_data=f"cmopen:effort:{idx}"),
+        ], [
+            InlineKeyboardButton(t("choose.btn_voice"), callback_data=f"cmopen:voice:{idx}"),
+            InlineKeyboardButton(t("choose.btn_verbose"), callback_data=f"cmopen:verbose:{idx}"),
+        ]] if idx is not None else []
+        await msg.reply_text(
+            self.controls.info(), reply_markup=InlineKeyboardMarkup(rows) if rows else None
+        )
 
     async def _cmd_verbose(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1643,6 +1716,10 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         args = list(context.args or [])
+        if not args:
+            # Bare /verbose used to switch it on for EVERY project.
+            await self._reply_choices(msg, "verbose")
+            return
         on = True
         if args and args[0].lower() in {"on", "off"}:
             on = args.pop(0).lower() == "on"
@@ -1662,7 +1739,10 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         args = context.args
-        if not args or args[0] == "list":
+        if not args:
+            await self._reply_choices(msg, "voice")
+            return
+        if args[0] == "list":
             snapshot = self.controls.snapshot()
             current = snapshot[0]["engine"] if snapshot else "openai"
             engine = args[1] if len(args) >= 2 else current
@@ -1698,7 +1778,10 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        if not context.args or context.args[0] not in _ENGINES:
+        if not context.args:
+            await self._reply_choices(msg, "engine")
+            return
+        if context.args[0] not in _ENGINES:
             await msg.reply_text(t("engine.usage", engines="|".join(_ENGINES)))
             return
         name = context.args[0]
@@ -1816,6 +1899,125 @@ class TelegramIO:
         # restarting the bridge starts them on the new one.
         self._restart()
 
+    async def _handle_schedule_button(self, query, arg: str) -> None:
+        what, _, sid_str = arg.partition(":")
+        if what == "add":
+            asked = await query.message.reply_text(t("schedule.ask"), reply_markup=ForceReply(selective=True))
+            self._schedule_prompts.add(asked.message_id)
+            return
+        sid = _parse_schedule_id(sid_str)
+        if sid is None:
+            return
+        if what == "rm":
+            done = await self.controls.remove_schedule(sid)
+            text = t("schedule.removed", id=sid) if done else t("schedule.not_found", id=sid)
+        else:
+            current = next((sc for sc in await self.controls.list_schedules() if sc.get("id") == sid), None)
+            if current is None:
+                text = t("schedule.not_found", id=sid)
+            else:
+                enabled = not current.get("enabled", True)
+                await self.controls.set_schedule_enabled(sid, enabled)
+                state = t("schedule.enabled") if enabled else t("schedule.disabled")
+                text = t("schedule.toggled", id=sid, state=state)
+        await query.message.reply_text(text)
+
+    async def _note_if_busy(self, session) -> None:
+        """Say so when a message reached a session that is mid-task: Claude
+        Code queues it and answers only when the current work is done, which
+        otherwise looks like being ignored. At most every 10 minutes per
+        session."""
+        # The status at attach time is stale; read it as it is now.
+        with contextlib.suppress(Exception):
+            session = live.find(session.pid, Path.home() / ".claude" / "sessions") or session
+        if getattr(session, "status", "") != "busy":
+            return
+        now = time.time()
+        if now - self._busy_noted.get(session.session_id, 0) < 600:
+            return
+        self._busy_noted[session.session_id] = now
+        activity = live.current_activity(
+            live.transcript_of(Path.home() / ".claude" / "projects", session.session_id)
+        )
+        if activity is None:
+            await self._send_plain(t("route.busy", label=self.session_label(session)))
+            return
+        what, since = activity
+        minutes = max(0, int((now - since) // 60))
+        took = t("route.for_minutes", n=minutes) if minutes < 60 else t(
+            "route.for_hours", h=minutes // 60, m=minutes % 60
+        )
+        what = t("route.thinking") if what == "🤔" else what
+        await self._send_plain(t("route.busy_doing", label=self.session_label(session), what=what, took=took))
+
+    def _current_idx(self) -> int | None:
+        """Snapshot index of the current project (⭐), else the first on."""
+        snap = self.controls.snapshot()
+        for key in ("last_active", "enabled"):
+            for idx, row in enumerate(snap):
+                if row.get(key):
+                    return idx
+        return 0 if snap else None
+
+    def _choice_markup(self, kind: str, idx: int) -> InlineKeyboardMarkup:
+        """Buttons for one setting of one project, ✓ on the current value."""
+        row = self.controls.snapshot()[idx]
+        if kind == "mode":
+            values, current = _MODES, row.get("mode")
+        elif kind == "effort":
+            values, current = _EFFORTS, row.get("effort")
+        elif kind == "voice":
+            values, current = self._voice_choices_for_engine(row.get("engine", "openai")), row.get("voice")
+        elif kind == "engine":
+            values, current = _ENGINES, row.get("engine")
+        else:  # verbose
+            values, current = ("on", "off"), "on" if row.get("verbose") else "off"
+        buttons = [
+            InlineKeyboardButton(("✓ " if v == current else "") + t(f"choose.v_{v}") if kind == "verbose"
+                                 else ("✓ " if v == current else "") + v,
+                                 callback_data=f"cm:{kind}:{idx}:{v}")
+            for v in values
+        ]
+        return InlineKeyboardMarkup([buttons[i:i + 3] for i in range(0, len(buttons), 3)])
+
+    async def _reply_choices(self, msg, kind: str) -> None:
+        idx = self._current_idx()
+        if idx is None:
+            await msg.reply_text(t("choose.no_project"))
+            return
+        row = self.controls.snapshot()[idx]
+        label = row.get("display_name") or row["project"]
+        title = t("choose.engine") if kind == "engine" else t(f"choose.{kind}", project=label)
+        await msg.reply_text(title, reply_markup=self._choice_markup(kind, idx))
+
+    async def _handle_choice(self, query, action: str, arg: str) -> None:
+        parts = arg.split(":", 2)
+        snap = self.controls.snapshot()
+        if len(parts) < 2 or not parts[1].isdigit() or int(parts[1]) >= len(snap):
+            return
+        kind, idx = parts[0], int(parts[1])
+        if action == "cmopen":
+            await self._edit_callback_markup(query, self._choice_markup(kind, idx))
+            return
+        value = parts[2] if len(parts) > 2 else ""
+        project = snap[idx]["project"]
+        if kind == "mode" and value in _MODES:
+            await self.controls.set_mode(project, value)
+        elif kind == "effort" and value in _EFFORTS:
+            await self.controls.set_effort(project, value)
+        elif kind == "voice" and value in self._voice_choices_for_engine(snap[idx].get("engine", "openai")):
+            await self.controls.set_voice(project, value)
+        elif kind == "engine" and value in _ENGINES:
+            await self.controls.set_engine(value)
+        elif kind == "verbose" and value in {"on", "off"}:
+            await self.controls.set_verbose(project, value == "on")
+        else:
+            return
+        shown = t(f"choose.v_{value}") if kind == "verbose" else value
+        await self._edit_callback_markup(query, InlineKeyboardMarkup([[
+            InlineKeyboardButton(t("choose.done", value=shown), callback_data="noop:")
+        ]]))
+
     async def _cmd_pc(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1930,7 +2132,10 @@ class TelegramIO:
             await msg.reply_text(t("policies.cleared", scope=target or t("projects.all")))
             return
         policies = await self.controls.list_policies()
-        await msg.reply_text(_format_policies(policies))
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(t("policies.clear_button"), callback_data="polclr:")
+        ]]) if policies else None
+        await msg.reply_text(_format_policies(policies), reply_markup=markup)
 
     async def _cmd_schedule(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1964,7 +2169,15 @@ class TelegramIO:
         if not first_is_add:
             if not args or args[0] == "list":
                 schedules = await self.controls.list_schedules()
-                await msg.reply_text(_format_schedules(schedules))
+                rows = [[
+                    InlineKeyboardButton(
+                        ("⏸ " if sc.get("enabled", True) else "▶ ") + f"{sc.get('id')} {sc.get('project')} {sc.get('hhmm')}",
+                        callback_data=f"sch:toggle:{sc.get('id')}",
+                    ),
+                    InlineKeyboardButton("🗑", callback_data=f"sch:rm:{sc.get('id')}"),
+                ] for sc in schedules[:10]]
+                rows.append([InlineKeyboardButton(t("schedule.add_button"), callback_data="sch:add:0")])
+                await msg.reply_text(_format_schedules(schedules), reply_markup=InlineKeyboardMarkup(rows))
                 return
 
             sub = args[0]
@@ -2066,6 +2279,7 @@ class TelegramIO:
         self._live_spoken = spoken
         try:
             await live.send(session.socket_path, text)
+            await self._note_if_busy(session)
             return True
         except Exception:  # noqa: BLE001 - never crash the inbound path
             logger.exception("live: send failed for pid %s", session.pid)
@@ -2404,8 +2618,9 @@ class TelegramIO:
         rows = []
         for s in sessions:
             title = live.title_of(root, s.session_id) or t("live.untitled")
+            mark = "⏳" if s.status == "busy" else "💤"
             rows.append([InlineKeyboardButton(
-                f"{title[:40]} · {Path(s.cwd).name}", callback_data=f"live:{s.pid}"
+                f"{mark} {title[:38]} · {Path(s.cwd).name}", callback_data=f"live:{s.pid}"
             )])
         await msg.reply_text(
             t("live.pick"),
@@ -2571,7 +2786,11 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args:
-            await msg.reply_text(t("open.usage"))
+            rows = [
+                [InlineKeyboardButton(row.get("display_name") or row["project"], callback_data=f"openp:{idx}")]
+                for idx, row in _project_list_rows(self.controls.snapshot(), show_all=True)[:12]
+            ]
+            await msg.reply_text(t("choose.open"), reply_markup=InlineKeyboardMarkup(rows))
             return
         project, error = self._resolve_project_arg(context.args[0])
         if error or project is None:

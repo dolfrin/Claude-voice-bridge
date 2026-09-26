@@ -687,3 +687,58 @@ LT.update({
     "route.went_to": "➡️ Nuėjo į: {label}",
     "route.move_hint": "Ne ten? Perkelk į:",
 })
+
+
+# --- buttons for commands given without arguments --------------------------------------
+EN.update({
+    "choose.mode": "🛡 Mode for {project}:",
+    "choose.effort": "🧩 Reasoning effort for {project}:",
+    "choose.voice": "🔊 Voice for {project}:",
+    "choose.verbose": "🔧 Show tool activity for {project}?",
+    "choose.engine": "🧠 Speech engine (all projects):",
+    "choose.btn_mode": "🛡 Mode", "choose.btn_effort": "🧩 Effort",
+    "choose.btn_voice": "🔊 Voice", "choose.btn_verbose": "🔧 Activity",
+    "choose.v_on": "on", "choose.v_off": "off",
+    "choose.done": "✓ {value}",
+    "choose.no_project": "No project yet — /projects.",
+    "choose.on": "Which project to switch on? (ON)",
+    "choose.off": "Which project to switch off? (OFF)",
+    "choose.open": "🖥 Open which project in VS Code?",
+    "newproject.ask": "🆕 What should the new project be called? Reply to this message with the name.",
+    "schedule.add_button": "➕ Add",
+    "schedule.ask": "⏰ Reply with: project HH:MM prompt (e.g. qwing 07:30 check the night CI)",
+    "policies.clear_button": "🗑 Clear all",
+    "route.busy": "⏳ {label} is busy with a task — your message is queued; it answers once that is done.",
+})
+LT.update({
+    "choose.mode": "🛡 Režimas {project}:",
+    "choose.effort": "🧩 Mąstymo lygis (effort) {project}:",
+    "choose.voice": "🔊 Balsas {project}:",
+    "choose.verbose": "🔧 Rodyti įrankių veiksmus {project}?",
+    "choose.engine": "🧠 Kalbos variklis (visiems projektams):",
+    "choose.btn_mode": "🛡 Režimas", "choose.btn_effort": "🧩 Effort",
+    "choose.btn_voice": "🔊 Balsas", "choose.btn_verbose": "🔧 Veiksmai",
+    "choose.v_on": "rodyti", "choose.v_off": "nerodyti",
+    "choose.done": "✓ {value}",
+    "choose.no_project": "Projektų dar nėra — /projects.",
+    "choose.on": "Kurį projektą įjungti? (ON)",
+    "choose.off": "Kurį projektą išjungti? (OFF)",
+    "choose.open": "🖥 Kurį projektą atidaryti VS Code?",
+    "newproject.ask": "🆕 Kaip pavadinti naują projektą? Atsakyk į šią žinutę (reply) pavadinimu.",
+    "schedule.add_button": "➕ Pridėti",
+    "schedule.ask": "⏰ Atsakyk: projektas HH:MM užduotis (pvz. qwing 07:30 patikrink naktinį CI)",
+    "policies.clear_button": "🗑 Išvalyti visas",
+    "route.busy": "⏳ {label} dabar dirba — tavo žinutė eilėje, atsakys kai baigs dabartinį darbą.",
+})
+EN.update({
+    "route.busy_doing": "⏳ {label} is busy: {what} — for {took}. Your message is queued; it answers once that is done.",
+    "route.thinking": "🤔 thinking",
+    "route.for_minutes": "{n} min",
+    "route.for_hours": "{h} h {m} min",
+})
+LT.update({
+    "route.busy_doing": "⏳ {label} dabar dirba: {what} — jau {took}. Tavo žinutė eilėje, atsakys kai baigs.",
+    "route.thinking": "🤔 mąsto",
+    "route.for_minutes": "{n} min",
+    "route.for_hours": "{h} val. {m} min",
+})

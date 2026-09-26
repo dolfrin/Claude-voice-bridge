@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 import logging
 import re
 import uuid
@@ -456,11 +457,20 @@ def parse_options(text: str) -> list[str]:
     """
     if not isinstance(text, str) or not text.strip():
         return []
+    # Only a list that ENDS the message and follows a question or a colon is
+    # a menu: a numbered explanation mid-message got buttons, and a tap sent
+    # "1" to a session that had asked nothing.
+    lines = [ln for ln in text.strip().splitlines()]
+    end = len(lines)
+    start = end
+    while start > 0 and _OPTION_RE.match(lines[start - 1]):
+        start -= 1
+    lead = next((ln.strip() for ln in reversed(lines[:start]) if ln.strip()), "")
+    if start == end or not lead.rstrip("*_ ").endswith(("?", ":")):
+        return []
     found: list[tuple[int, str]] = []
-    for line in text.splitlines():
+    for line in lines[start:end]:
         match = _OPTION_RE.match(line)
-        if match is None:
-            continue
         label = match.group(2)
         if len(label) > _OPTION_MAX:
             return []  # prose, not a choice list
@@ -541,3 +551,45 @@ def last_assistant_text(path: Path | None, tail_bytes: int = 256 * 1024) -> str:
             return "\n".join(texts)
         # A thinking-only entry: the text is in an earlier line of this reply.
     return ""
+
+
+def current_activity(path: Path | None, tail_bytes: int = 512 * 1024) -> tuple[str, float] | None:
+    """What a busy session is doing right now, and since when (unix time).
+
+    The newest tool call with no result yet is still running -- a test run
+    stuck for hours shows up exactly like that. Otherwise the time of the last
+    assistant entry, as "thinking". None when nothing can be read.
+    Never raises.
+    """
+    if path is None:
+        return None
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - tail_bytes))
+            lines = fh.read().decode(errors="replace").splitlines()
+    except OSError:
+        return None
+    finished: set[str] = set()
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        content = (entry.get("message") or {}).get("content")
+        blocks = content if isinstance(content, list) else []
+        try:
+            ts = datetime.fromisoformat(str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if entry.get("type") == "user":
+            finished.update(b.get("tool_use_id") for b in blocks
+                            if isinstance(b, dict) and b.get("type") == "tool_result")
+        elif entry.get("type") == "assistant":
+            for block in reversed(blocks):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    if block.get("id") not in finished:
+                        return "🔧 " + _tool_line(block), ts
+                    return "🤔", ts
+            return "🤔", ts
+    return None
