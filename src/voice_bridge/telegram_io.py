@@ -2678,6 +2678,8 @@ class TelegramIO:
                           if x.session_id == session_id), None)
         if match is None:
             label = t("target.gone")
+        elif getattr(self._live_session, "session_id", None) == session_id:
+            label = t("target.now_here")  # already the current one
         else:
             await self._attach_live(str(match.pid))
             label = t("target.now_here")
@@ -3016,10 +3018,13 @@ class TelegramIO:
         await app.updater.start_polling()
         if self._claude_live_enabled:
             self._perm_task = asyncio.create_task(self._watch_permissions())
-            self._hook_buttons_task = asyncio.create_task(self._buttons_for_hook_messages())
             await self._restore_live()
             if self._live_session is None:
                 await self._show_current_bridge_project()
+            # Only once the current session is known again: started earlier,
+            # it took that session's own notices for another session's and
+            # put "🎯 Write here" under them.
+            self._hook_buttons_task = asyncio.create_task(self._buttons_for_hook_messages())
         else:
             self._detach_live()
             try:
