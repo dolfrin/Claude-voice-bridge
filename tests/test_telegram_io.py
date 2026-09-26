@@ -4122,7 +4122,8 @@ async def test_write_here_button_makes_that_session_current(monkeypatch):
 
     await io._handle_callback(MagicMock(callback_query=query), MagicMock())
 
-    io._attach_live.assert_awaited_once_with("9")
+    io._attach_live.assert_awaited_once()
+    assert io._attach_live.await_args.args[0] == "9"
     label = query.edit_message_reply_markup.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text
     assert label == "🎯 Dabar rašai čia"
 
@@ -4144,7 +4145,8 @@ async def test_tapping_a_project_makes_it_the_current_one(monkeypatch):
 
     monkeypatch.setattr(live_mod, "list_sessions", lambda d: [open_qwing])
     await io.focus_project(controls.snapshot()[0]["project"])
-    io._attach_live.assert_awaited_once_with("7")
+    io._attach_live.assert_awaited_once()
+    assert io._attach_live.await_args.args[0] == "7"
 
     monkeypatch.setattr(live_mod, "list_sessions", lambda d: [])
     await io.focus_project(controls.snapshot()[0]["project"])
@@ -4190,7 +4192,8 @@ async def test_open_starts_a_vscode_claude_tab_and_joins_it(monkeypatch):
 
     done = await io.send_to_pending_tab("pradėk nuo testų")
     assert "pokalbis prasidėjo VS Code" in done
-    io._attach_live.assert_awaited_once_with("5")
+    io._attach_live.assert_awaited_once()
+    assert io._attach_live.await_args.args[0] == "5"
     assert io.pending_tab() is None
 
 
