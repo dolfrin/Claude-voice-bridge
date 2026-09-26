@@ -224,7 +224,7 @@ class FakeTelegram:
     def project_for_cwd(self, cwd):
         return self.cwd_projects.get(cwd)
 
-    async def note_route(self, key, label):
+    async def note_route(self, key, label, session_id=None, cwd=""):
         self.routes.append(label)
 
     def pending_ask_token_for_message(self, message_id):
@@ -2862,3 +2862,27 @@ async def test_bridge_session_fallback_says_where_the_message_went():
 
     assert sessions.delivered == [("qwing", "labas")]
     assert telegram.routes == ["qwing · tilto sesija (VS Code jis neatidarytas)"]
+
+
+@pytest.mark.asyncio
+async def test_reply_to_an_unrecorded_message_goes_to_the_attached_live_session():
+    sent_log, sessions, telegram, inbound = _live_first_setup(last_active="othersapp")
+    telegram.live_session = object()  # /live attached
+
+    await inbound(_msg(reply_to=999, text="tęsk"))  # 999: sent before recording existed
+
+    assert telegram.live_sent == ["tęsk"]
+    assert sessions.delivered == []
+
+
+@pytest.mark.asyncio
+async def test_reply_to_another_open_session_beats_the_attached_one():
+    sent_log, sessions, telegram, inbound = _live_first_setup()
+    telegram.live_session = object()
+    sent_log.record(500, "ide-qwing", "/p/qwing")
+    telegram.open_sessions = {"ide-qwing"}
+
+    await inbound(_msg(reply_to=500, text="šitam"))
+
+    assert telegram.live_sent_to == [("ide-qwing", "šitam")]
+    assert telegram.live_sent == []

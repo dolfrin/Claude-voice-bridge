@@ -1015,6 +1015,11 @@ class TelegramIO:
             return
         if action == "live":
             await query.edit_message_text(await self._attach_live(index_str))
+            if self._live_session is not None:
+                # "🔗 Prisijungta" is what one naturally replies to next.
+                await self._remember_sent(
+                    query.message, self._live_session.cwd, self._live_session.session_id
+                )
             return
         if action == "agent":
             await query.edit_message_text(self._switch_agent(index_str))
@@ -1847,7 +1852,10 @@ class TelegramIO:
             await self._attach_live(str(session.pid))
         sent = await self.live_send(text, spoken=spoken)
         if sent:
-            await self.note_route(session.session_id, self.session_label(session))
+            await self.note_route(
+                session.session_id, self.session_label(session),
+                session_id=session.session_id, cwd=session.cwd,
+            )
         return sent
 
     def session_label(self, session) -> str:
@@ -1860,7 +1868,9 @@ class TelegramIO:
             title = title[:40] + "…"
         return f"{name} · {title}" if title else name
 
-    async def note_route(self, key: str, label: str) -> None:
+    async def note_route(
+        self, key: str, label: str, session_id: str | None = None, cwd: str = ""
+    ) -> None:
         """Say where a message went -- once per change of destination.
 
         Every message confirmed would be noise; never confirming left the user
@@ -1869,7 +1879,9 @@ class TelegramIO:
         if key == self._last_route:
             return
         self._last_route = key
-        await self._send_plain(f"➡️ {label}")
+        message = await self._send_plain(f"➡️ {label}")
+        # A reply to the notice itself must reach the same place.
+        await self._remember_sent(message, cwd, session_id)
 
     def _open_projects(self) -> set[str]:
         """Projects that have a session open in the editor right now."""
@@ -1912,7 +1924,7 @@ class TelegramIO:
             return
         try:
             sent_log.record(mid, session_id, cwd)
-        except OSError:
+        except (OSError, TypeError, ValueError):
             logger.exception("could not record message %s", mid)
         if self._on_sent is None:
             return

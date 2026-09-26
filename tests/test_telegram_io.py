@@ -3896,7 +3896,7 @@ def test_project_views_stay_within_telegram_limits_with_many_projects():
 @pytest.mark.asyncio
 async def test_note_route_speaks_only_when_the_destination_changes():
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
-    io._send_plain = AsyncMock()
+    io._send_plain = AsyncMock(return_value=MagicMock(message_id=1))
 
     await io.note_route("s1", "Qwing · testai")
     await io.note_route("s1", "Qwing · testai")

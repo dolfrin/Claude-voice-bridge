@@ -485,8 +485,14 @@ def make_inbound(
                 entry["s"], await _files_into(entry.get("c") or "", text, msg), spoken=spoken
             ):
                 return
-            # Explicitly attached with /live and nothing more specific known.
-            if entry is None and rid is None and telegram.live_target() is not None:
+            # Attached to a live session and nothing more specific is known --
+            # a plain message with no recorded history, or a reply to a message
+            # that belongs to no session (an old one, a status line): the live
+            # session is where the user is working.
+            unknown = entry is None if rid is None else (
+                reply_project is None and not (entry and entry.get("s"))
+            )
+            if unknown and telegram.live_target() is not None:
                 if await telegram.live_send(text, spoken=spoken):
                     return
 
@@ -532,7 +538,8 @@ def make_inbound(
         # in a session of its own.
         label = getattr(proj, "display_name", None) or project
         await telegram.note_route(
-            f"bridge:{project}", f"{label} · tilto sesija (VS Code jis neatidarytas)"
+            f"bridge:{project}", f"{label} · tilto sesija (VS Code jis neatidarytas)",
+            cwd=getattr(proj, "cwd", "") or "",
         )
         await sessions.deliver(project, text)
 
@@ -1377,10 +1384,10 @@ async def build() -> Wiring:
             io = telegram_ref.get("io")
             return await io.live_send_to(session_id, text, spoken) if io is not None else False
 
-        async def note_route(self, key, label):
+        async def note_route(self, key, label, session_id=None, cwd=""):
             io = telegram_ref.get("io")
             if io is not None:
-                await io.note_route(key, label)
+                await io.note_route(key, label, session_id=session_id, cwd=cwd)
 
         def project_for_cwd(self, cwd):
             io = telegram_ref.get("io")
