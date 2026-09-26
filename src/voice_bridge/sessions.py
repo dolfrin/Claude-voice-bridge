@@ -625,13 +625,13 @@ class SessionManager:
         resume = await self._store.get_session_id(name)
         # The CLI refuses to start at all ("No conversation found") when the
         # stored conversation's .jsonl is gone, which left the project dead on
-        # every boot and every message. Start fresh instead, and say so.
+        # every boot and every message. Start fresh instead. Nothing the user
+        # can act on, so it is logged, not sent; the id is forgotten so the
+        # next boot does not trip over it again.
         if resume and not _conversation_exists(resume):
             logger.warning("%s: stored session %s is gone; starting fresh", name, resume)
             resume = None
-            await self._emit_status(
-                name, "Ankstesnio pokalbio failo nebėra — pradedu naują pokalbį."
-            )
+            await self._store.set_session_id(name, None)
         options = self._build_options(project, resume, notify_server)
         # A conversation already open in the editor or a CLI must not be opened
         # a second time: both processes append to the same .jsonl without

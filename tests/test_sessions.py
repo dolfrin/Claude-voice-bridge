@@ -589,7 +589,7 @@ async def test_resume_session_id_passed_to_options():
     await sm.stop_all()
 
 
-async def test_missing_transcript_starts_fresh_and_says_so(monkeypatch):
+async def test_missing_transcript_starts_fresh_quietly(monkeypatch):
     monkeypatch.setattr(sessions_mod, "_conversation_exists", lambda sid: False)
     project = make_project("qwing", autonomy="safe")
     store = FakeStore(enabled={"qwing": True},
@@ -603,7 +603,8 @@ async def test_missing_transcript_starts_fresh_and_says_so(monkeypatch):
     await sm.start_all()
 
     assert FakeClaudeSDKClient.instances[0].options.resume is None
-    assert any("naują pokalbį" in t for t in sent)
+    assert sent == []  # nothing the user can act on
+    assert await store.get_session_id("qwing") is None  # not announced again next boot
 
     await sm.stop_all()
 

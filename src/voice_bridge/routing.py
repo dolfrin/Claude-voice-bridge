@@ -289,7 +289,7 @@ class Store:
     # session_id
     # ------------------------------------------------------------------
 
-    async def set_session_id(self, project: str, session_id: str) -> None:
+    async def set_session_id(self, project: str, session_id: str | None) -> None:
         """Set the Claude Agent session_id for a project.
 
         Creates the project row lazily (enabled defaults to 1) if not yet seeded.
