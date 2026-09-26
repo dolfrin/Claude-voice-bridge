@@ -3,6 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Telegram](https://img.shields.io/badge/telegram-bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)
 ![Claude](https://img.shields.io/badge/claude-agent_sdk-D97757?style=for-the-badge)
+![Codex](https://img.shields.io/badge/codex-app--server-111111?style=for-the-badge)
 ![Tests](https://img.shields.io/badge/tests-1008_passed-2EA043?style=for-the-badge)
 ![License](https://img.shields.io/badge/license-PolyForm_Noncommercial-blue?style=for-the-badge)
 
@@ -33,19 +34,29 @@ Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 |  | Feature | What it gives you |
 |---|---|---|
+| 🤖 | Claude or Codex | Run projects on the Claude Agent SDK or a local `codex app-server`; switch live with `/agent` |
+| 🔗 | Editor sessions | `/live` drives a Claude Code session already open in your IDE; project messages join it automatically |
+| 🔐 | Editor permissions | Answer the IDE's tool-permission prompts from Telegram with ✅/❌ buttons |
 | 💬 | Text control | Send instructions and replies from Telegram |
 | 🎤 | Voice control | Voice messages are transcribed locally with faster-whisper |
-| 🔊 | Spoken replies | Claude replies with text plus a clean voice summary |
-| 🧭 | Project routing | Quote-reply routes to that project; plain messages use last-active |
+| 🔊 | Spoken replies | The agent replies with text plus a clean voice summary |
+| 🧭 | Project routing | Quote-reply, `project: ...` name prefix, or last-active fallback |
+| 🗣 | Hands-free answers | Answer approvals and `ask_user` questions by voice or text, not only by tapping |
 | 🎛 | Inline controls | `/menu`, `/projects`, `/panel`, buttons for mode, voice, on/off, stop |
+| ⏰ | Schedules | `/schedule` delivers a daily prompt to a project at a local time |
+| 🗒 | Recap & cost | `/recap` shows what happened while away; `/cost` shows token/cost usage |
+| 🆕 | New projects | `/newproject <name>` creates `~/Projects/<name>`, runs `git init`, and switches to it |
+| ♾ | Always allow | Approvals can remember narrow per-project grants; review them with `/policies` |
+| 🔁 | Context sync | IDE work is summarized into the next Telegram turn, and vice versa via a hook |
 | 📎 | File input | Photos, docs, archives, audio, video, and video notes go to the project inbox |
 | 🎵 | Audio files | `mp3`, `m4a`, `ogg`, `wav`, etc. are transcribed and attached |
 | 🎬 | Video preview | Video uploads can get a first-frame preview via `ffmpeg` |
 | 🧾 | Handoff | `/handoff` shows the selected project's `.claude/voice-bridge-chat.md` history |
 | ⛔ | Interrupt | `/stop`, menu Stop, or `!` prefix interrupts/restarts the session |
-| 🔘 | Claude buttons | Claude can call `ask_user` to show tappable Telegram choices |
+| 🔘 | Agent buttons | Claude `ask_user` and Codex `request_user_input` show tappable Telegram choices |
 | 📤 | File delivery | Claude can call `send_file` to send project-local files back |
-| 🧠 | Session resume | SDK session IDs persist in SQLite and resume after restart |
+| 🧠 | Session resume | Claude session IDs and Codex thread IDs persist in SQLite and resume after restart |
+| 🇱🇹 | Lithuanian TTS | Optional local `lithuanian` TTS engine (Piper reginute1 voice) |
 | 🛡 | Safe mode | Risky tool calls ask for Telegram approval before running |
 
 ## Telegram UX
@@ -54,7 +65,7 @@ Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 /menu
 ├─ 🟢 Active       active sessions
 ├─ 📚 All          all discovered projects
-├─ 🎛 Panel        mode / voice / engine / on-off controls
+├─ 🎛 Panel        mode / voice / engine / on-off / verbose / cost / recap
 ├─ 🧾 Handoff      last-active project transcript
 ├─ ⛔ Stop         interrupt current work
 └─ 🔎 Refresh      refresh local projects
@@ -66,8 +77,12 @@ Common patterns:
 |---|---|
 | Select project | Tap a project in `/projects` or `/projects_all` |
 | Reply to exact project | Telegram quote-reply any bot message from that project |
+| Address a project by name | Start the message with its name, e.g. `api: run the tests` |
 | Send to current project | Send plain text or voice |
-| Interrupt and replace task | Start a message with `!`, e.g. `! stop, fix tests instead` |
+| Interrupt and replace task | Start a message with `!`, e.g. `! stop, fix tests instead` or `!api: fix tests` |
+| Answer a question/approval | Tap a button, or quote-reply / just say "yes", "no", "2", "the second one" |
+| Switch Claude ⇄ Codex | `/agent` and tap, or `/agent codex` / `/agent claude` |
+| Join the IDE session | `/live` and tap the running session; `/live off` to detach |
 | Resume at PC | Open that project's `.claude/voice-bridge-chat.md` or send `/handoff` |
 
 ---
@@ -88,7 +103,15 @@ Store
   persists routing, enabled flags, Claude session ids, and backend-scoped Codex thread ids
 
 Transcriber + TTS
-  local faster-whisper for inbound voice/audio; OpenAI/Piper/Together for outbound voice
+  local faster-whisper for inbound voice/audio; OpenAI/Piper/Together/Lithuanian for
+  outbound voice
+
+Live editor link (Claude backend only)
+  /live and project auto-routing into Claude Code sessions already running in the IDE,
+  plus the editor permission-prompt relay
+
+Scheduler
+  daily per-project prompts from /schedule
 
 Bridge MCP server
   exposes notify_user, ask_user, and send_file to each Claude project session
@@ -109,14 +132,32 @@ Modules in `src/voice_bridge/`:
 | `codex_app_server.py` | JSON-RPC client for private stdio or shared Unix-socket `codex app-server` |
 | `codex_sessions.py` | `CodexSessionManager`: persistent per-project Codex threads |
 | `backend.py` | Shared lifecycle contract implemented by both backends |
-| `telegram_io.py` | Telegram bot: polling, `/menu`/`/panel` inline buttons, slash commands, file I/O |
+| `telegram_io.py` | Telegram bot: polling, `/menu`/`/panel` inline buttons, slash commands, file I/O, `/live`, permission relay |
+| `telegram_views.py` | Pure view helpers: command menu, `/help`, `/info`, `/cost`, `/policies` text and keyboards |
+| `live.py` | Finds running Claude Code sessions, sends turns over their Unix socket, tails their transcript |
+| `claude_history.py` | Reads `~/.claude/projects` session transcripts (titles, liveness, text blocks) |
+| `catchup.py` | IDE ⇄ Telegram catch-up blocks; `python -m voice_bridge.catchup --hook` for the reverse hook |
+| `scheduler.py` | Daily `/schedule` prompts |
+| `discovery.py` | Finds recent VS Code / Claude Code projects |
+| `transcript.py` | Mirrors turns into `.claude/voice-bridge-chat.md` |
 | `stt.py` | `Transcriber`: faster-whisper speech-to-text |
-| `tts/` | Pluggable TTS: `openai_tts.py`, `piper_tts.py`, `together_tts.py` |
+| `tts/` | Pluggable TTS: `auto_tts.py`, `openai_tts.py`, `piper_tts.py`, `together_tts.py`, `lithuanian_tts.py` |
 | `sanitizer.py` | Strip code/paths/units from spoken text |
-| `approvals.py` | Approval flow for safe/ask autonomy modes |
+| `approvals.py` | Approval flow for safe/ask autonomy modes, always-allow signatures |
 | `attachments.py` | Saves Telegram attachments, extracts archives/video preview frames |
 | `notify_tool.py` | In-process MCP tools: `notify_user`, `ask_user`, `send_file` |
 | `types.py` | `Outbound` dataclass |
+
+Helper files outside the package:
+
+| Path | Role |
+|---|---|
+| `systemd/voice-bridge.service` | The bridge as a systemd user service |
+| `systemd/codex-shared-app-server.service` | Optional shared `codex app-server` on a Unix socket |
+| `bin/codex-shared` | `codex` wrapper for the IDE: `app-server` goes to the shared socket, everything else to real `codex` |
+| `bin/codex-live` | Opens the Codex TUI on the exact thread Telegram is using |
+| `scripts/codex_ws_stdio_proxy.py` | stdio ⇄ Unix WebSocket proxy used by `bin/codex-shared` |
+| `hooks/voice-bridge-reverse-catchup.sh` | Claude Code hook for the reverse catch-up |
 
 ---
 
@@ -225,7 +266,10 @@ pip install -e .
 
 `pip install -e .` installs all runtime dependencies declared in `pyproject.toml`:
 `claude-agent-sdk`, `python-telegram-bot>=21`, `faster-whisper`, `openai`,
-`piper-tts`, `pyyaml`, `aiosqlite`.
+`piper-tts`, `pyyaml`, `aiosqlite`, `websockets` (for the shared Codex endpoint).
+
+For `AGENT_BACKEND=codex`, also install the Codex CLI and log in once as the service
+user (`codex`), so `codex app-server` can run with your existing login.
 
 ---
 
@@ -267,10 +311,12 @@ $EDITOR .env
 TELEGRAM_BOT_TOKEN=123456789:AA...
 TELEGRAM_ALLOWED_USER_ID=11223344
 
-# Agent runtime: claude (default) or codex
+# Agent runtime: claude (default) or codex. /agent in Telegram rewrites this line.
 AGENT_BACKEND=claude
+# Optional shared Codex endpoint (see "Claude or Codex" below)
+# CODEX_APP_SERVER_URL=unix:///run/user/1000/codex-shared/app-server.sock
 
-# TTS: choose auto, openai, piper, or together
+# TTS: choose auto, openai, piper, together, or lithuanian
 # auto uses Piper only for English-looking text and OpenAI for everything else.
 TTS_BACKEND=auto
 TTS_VOICE=alloy
@@ -307,17 +353,20 @@ All keys and their meaning:
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | (required) | BotFather HTTP API token |
 | `TELEGRAM_ALLOWED_USER_ID` | (required) | Your numeric Telegram user id (whitelist) |
-| `AGENT_BACKEND` | `claude` | `claude` for the existing Agent SDK backend; `codex` for local `codex app-server` |
+| `AGENT_BACKEND` | `claude` | `claude` for the Agent SDK backend; `codex` for local `codex app-server`. Changed live by `/agent` |
+| `CODEX_APP_SERVER_URL` | — | Empty = private `codex app-server` stdio child; `unix:///abs/path.sock` = shared endpoint also used by the IDE |
 | `ANTHROPIC_API_KEY` | — | Optional; set only for pay-per-token API billing. Leave unset to use local Claude Code subscription login |
 | `OPENAI_API_KEY` | — | OpenAI key; required only for `TTS_BACKEND=openai` or `auto` |
 | `TOGETHER_API_KEY` | — | Together AI key; required only for `TTS_BACKEND=together` |
 | `TOGETHER_TTS_MODEL` | `cartesia/sonic` | Together TTS model |
 | `TOGETHER_TTS_LANGUAGE` | `auto` | Together TTS language hint; `auto` omits the provider hint |
-| `TTS_BACKEND` | `openai` | `auto`, `openai`, `piper`, or `together` |
+| `TTS_BACKEND` | `openai` | `auto`, `openai`, `piper`, `together`, or `lithuanian` |
 | `TTS_VOICE` | `alloy` | Default voice; for OpenAI one of `alloy/ash/ballad/cedar/coral/echo/marin/sage/shimmer/verse` |
 | `TTS_ALERT_VOICE` | — | Optional distinct voice for approval questions and crash notices (falls back to `TTS_VOICE` if unset) |
 | `PIPER_VOICE_PATH` | — | Absolute path to `.onnx` model; required for `piper` and English auto TTS |
+| `PIPER_LT_DIR` | — | Directory with the Lithuanian `lt_LT-reginute1-medium` voice and its phonemizer files; required for `lithuanian` |
 | `WHISPER_MODEL` | `large-v3` | faster-whisper model name |
+| `WHISPER_LANGUAGE` | — | Force a transcription language (`lt`, `en`, ...); empty = auto-detect, which can misfire on short clips |
 | `AUTONOMY_MODE` | `safe` | `full` (run everything) / `safe` (ask for risky ops) / `ask` (ask for all) |
 | `APPROVAL_TIMEOUT` | `300` | Seconds before an unanswered approval auto-denies |
 | `DB_PATH` | `voice-bridge.db` | SQLite database path |
@@ -415,6 +464,9 @@ journalctl --user -u voice-bridge -f
 | 🟢 | `/projects` | Active/last-active projects with select and on/off buttons |
 | 📚 | `/projects_all` or `/projects all` | All known projects, including disabled ones |
 | 🔎 | `/projects_refresh` | Scan recent VS Code/Claude projects and add new ones disabled |
+| 🆕 | `/newproject <name>` | Create `~/Projects/<name>`, `git init` it, enable it, and make it the active project |
+| 🤖 | `/agent` / `/agent <claude\|codex>` | Show which agent answers (with switch buttons), or switch; the bridge restarts in ~10 s |
+| 🔗 | `/live` / `/live off` | Pick a Claude Code session already running on this machine and drive it; detach (Claude backend only) |
 | 🧾 | `/handoff [project]` | Show the tail of that project's `.claude/voice-bridge-chat.md`; no arg uses last-active |
 | ▶️ | `/on [project]` | Enable one project, or all projects with no arg |
 | ⏸ | `/off [project]` | Disable one project, or all projects with no arg |
@@ -425,7 +477,7 @@ journalctl --user -u voice-bridge -f
 | 🧩 | `/effort <low\|medium\|high\|xhigh\|max> [project]` | Set reasoning effort globally or per project |
 | 🔊 | `/voice list` / `/voice <name> [for <project>]` | List or set TTS voices |
 | 🔧 | `/verbose [on\|off] [project]` | Toggle live tool-activity streaming (default off); omit on/off to enable |
-| 🧠 | `/engine <auto\|openai\|piper\|together>` | Switch TTS backend live |
+| 🧠 | `/engine <auto\|openai\|piper\|together\|lithuanian>` | Switch TTS backend live |
 | 🗒 | `/recap` | Show what changed across all projects while you were away |
 | 💰 | `/cost` | Show per-project and total token and cost usage |
 | ♾ | `/policies` / `/policies clear [project]` | List, or revoke (all / one project's), the always-allow grants |
@@ -473,10 +525,27 @@ project-local path. Paths outside the project directory are denied.
 
 ### Reply routing
 
-- **Swipe-reply (quote-reply)** a specific message → that message's project receives
-  your reply.
-- **Plain reply** (no quote) → goes to the **last-active** project (the one that most
-  recently sent you a message).
+An incoming text or voice message is handled in this order:
+
+1. **Pending approval** — a quote-reply to an approval question answers it ("yes",
+   "no", "taip", "ne", ...).
+2. **Pending question** — a quote-reply to an `ask_user` / Codex question answers that
+   question. If exactly one question is open and the message has no quote and no
+   `project:` prefix, it answers that one. Answers can be the option number, an
+   ordinal ("second", "antras"), the label, a unique part of it, or free text.
+3. **`/live` attachment** — while attached, the message goes into that editor session.
+4. **Project routing:**
+   - **Swipe-reply (quote-reply)** a specific message → that message's project.
+   - **Name prefix** — `api: run the tests` → project `api`.
+   - **Plain message** → the **last-active** project (the one that most recently
+     sent you a message).
+5. If the chosen project has a Claude Code session already open in the IDE on the same
+   directory, the message joins that session instead of starting a second one (Claude
+   backend only; falls back to the bridge's own session if none is open).
+
+A leading `!` is stripped first and marks the turn urgent (interrupts current work), so
+`!api: fix it` interrupts `api`. A disabled project gets a short "project is off" note
+with a button to enable it and send anyway.
 
 ### Voice vs text
 
@@ -490,6 +559,13 @@ project-local path. Paths outside the project directory are denied.
 - With `TTS_BACKEND=auto`, English-looking output uses local Piper when
   `PIPER_VOICE_PATH` is configured; non-English or uncertain output uses OpenAI TTS. Set
   `/engine openai`, `/engine piper`, or `/engine together` to force a backend.
+- `/engine lithuanian` uses the local Lithuanian Piper voice `lt_LT-reginute1-medium`
+  with its own phonemizer (released `piper-tts` cannot phonemize Lithuanian). Put the
+  model, its `phoneme_type: text` config, the `lt_*.tsv` dictionaries and the voice's
+  `phonemize_lithuanian.py`, `skaiciu_pletiklis.py`, `synth_reginute.py` in one
+  directory and set `PIPER_LT_DIR` to it. The voice loads on first use.
+- If Whisper keeps guessing the wrong language on short voice notes, set
+  `WHISPER_LANGUAGE` (for example `lt` or `en`).
 
 ### Agent tools and Telegram questions
 
@@ -538,6 +614,127 @@ restarts; review and revoke them anytime with `/policies` (list) and `/policies 
 If `TTS_ALERT_VOICE` is set, approval questions and crash notices are spoken with that
 distinct voice so they stand out when you are away from your desk. Falls back to
 `TTS_VOICE` when unset.
+
+---
+
+## Claude or Codex
+
+The bridge runs every project on one agent backend at a time, chosen by
+`AGENT_BACKEND` in `.env`:
+
+| | `claude` (default) | `codex` |
+|---|---|---|
+| Runtime | Claude Agent SDK, one client per project | Local `codex app-server`, one thread per project |
+| Login | Local Claude Code login (or `ANTHROPIC_API_KEY`) | Local Codex CLI login (no API key copied from `.env`) |
+| Resume after restart | Claude session ID in SQLite | Codex thread ID in SQLite (stored separately per backend) |
+| Approvals | Bridge approval UI (`safe`/`ask`/`full`) | Codex command, file-change and permission approvals go to the same Telegram UI |
+| Agent questions | `ask_user` MCP tool | Codex `request_user_input` |
+| `notify_user` / `send_file` | ✅ | Not yet — final replies and attachment input work |
+| `/live`, editor permission relay | ✅ | Disabled (and `/live` is hidden from the command menu) |
+| Model / effort | `model:` / `effort:` in `projects.yaml`, `/effort` | Same keys, passed to Codex (use a Codex model name) |
+
+### Switching from Telegram
+
+Send `/agent` to see which agent is answering, with a button per backend, or send
+`/agent codex` / `/agent claude` directly. The bridge rewrites `AGENT_BACKEND` in `.env`
+(atomically, keeping its permissions), then exits so systemd's `Restart=always` brings
+it back on the new backend in about 10 seconds. If `.env` cannot be written it says so
+and does **not** restart. The two backends keep separate conversation histories: the
+other agent does not see what you discussed with this one.
+
+Switching needs the bridge to run under systemd (or another supervisor that restarts
+it). In a foreground run, start it again by hand.
+
+### How autonomy maps onto Codex
+
+| Mode | Codex approval policy | Sandbox |
+|---|---|---|
+| `full` | `never` | full access |
+| `safe` | `on-request` | workspace-write in the project dir, no network |
+| `ask` | `untrusted` | workspace-write in the project dir, no network |
+
+### One Codex thread in Telegram and the IDE (optional)
+
+By default the bridge starts its own private `codex app-server` child over stdio. To
+make Telegram and the VS Code Codex extension share **the same threads**, run one
+shared app-server on a Unix socket:
+
+1. Install `systemd/codex-shared-app-server.service` as a user service (edit the
+   `HOME`, `PATH` and `codex` paths first) and start it before `voice-bridge.service`:
+
+   ```bash
+   cp systemd/codex-shared-app-server.service ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user enable --now codex-shared-app-server.service
+   ```
+
+2. In `.env` set
+   `CODEX_APP_SERVER_URL=unix:///run/user/1000/codex-shared/app-server.sock`
+   (use your own uid) and restart the bridge.
+3. Point the VS Code Codex extension's `chatgpt.cliExecutable` setting at
+   `bin/codex-shared`, then reload the VS Code window once. The wrapper sends
+   `codex app-server` to the shared socket (through `scripts/codex_ws_stdio_proxy.py`)
+   and runs the real `codex` for everything else.
+4. To open the exact thread Telegram is using in a terminal:
+
+   ```bash
+   bin/codex-live            # last-active Telegram project
+   bin/codex-live api        # a specific project
+   ```
+
+`bin/codex-shared`, `bin/codex-live` and the service file contain absolute paths for
+the author's machine (`/home/home/...`); edit them to match your checkout and `codex`
+location.
+
+---
+
+## Editor sessions (Claude backend)
+
+### `/live` — drive a session already open in the IDE
+
+Every Claude Code session (CLI or VS Code extension) registers itself under
+`~/.claude/sessions/` and listens on a Unix socket. `/live` lists the running sessions
+with a button each; tap one to attach. While attached:
+
+- Your Telegram messages (text or voice) are delivered into that session as user turns.
+- The session's own transcript is tailed back into Telegram, batched into one message
+  per poll. Attaching does not replay old history.
+- If you spoke, the reply is spoken back; if you typed, it is text only.
+- When the session asks a question as a numbered list, you get one button per option;
+  a tap sends that number. (Claude Code's own `AskUserQuestion` picker can only be
+  answered in the editor.)
+- `/live off` detaches.
+
+The session's "finished" notification from your own Stop hook would duplicate the
+stream, so the bridge writes the attached session id to `~/.claude/.voice-bridge-live`
+for such a hook to check.
+
+Even without `/live`, a message routed to a project whose directory already has a
+Claude Code session open in the IDE **joins that session** instead of starting a
+second, invisible one. With nothing open, it goes to the bridge's own session as before.
+
+> The socket format is internal to Claude Code and can change without notice. Sessions
+> started before a Claude Code version with this socket cannot be attached; restart them.
+
+### Answering the IDE's permission prompts from Telegram
+
+The bridge can relay tool-permission prompts from IDE sessions to Telegram with
+**✅ Leisti** / **❌ Neleisti** buttons. This needs a Claude Code hook on your machine
+(not included in this repo) that talks to the bridge through files:
+
+| File | Written by | Meaning |
+|---|---|---|
+| `~/.claude/.voice-bridge-alive` | bridge, every second | Heartbeat; a missing or stale (>15 s) file means "bridge down, do not wait" |
+| `~/.claude/.voice-bridge-perm/<id>.req.json` | hook | Request: `{"project", "tool", "detail", "cwd"}` |
+| `~/.claude/.voice-bridge-perm/<id>.ans` | bridge | Answer: `allow` or `deny` |
+
+Use a `PreToolUse` hook rather than `PermissionRequest`: the VS Code extension keeps
+its own dialog open even after a `PermissionRequest` hook answers. The hook should
+only engage for tools that would really prompt, check the heartbeat first, delete its
+request file when it gives up, and fall through to the normal editor prompt on
+timeout or any error. When the request file disappears, the Telegram message is edited
+to "⌛ Per vėlu — atsakyk editoriuje" so a late tap is never mistaken for an answer.
+Request ids must match `[A-Za-z0-9_-]`; anything else is refused.
 
 ---
 
@@ -675,23 +872,6 @@ See [`LICENSE`](LICENSE) and [`COMMERCIAL-LICENSE.md`](COMMERCIAL-LICENSE.md).
 
 ## Troubleshooting
 
-### One Codex thread in Telegram and the IDE
-
-The included `codex-shared-app-server.service` owns one Unix WebSocket endpoint.
-Set `CODEX_APP_SERVER_URL=unix:///run/user/1000/codex-shared/app-server.sock`,
-start that unit before `voice-bridge.service`, and point the VS Code Codex
-extension's `chatgpt.cliExecutable` setting at `bin/codex-shared`. Reload the VS
-Code window once after changing that setting.
-
-To open the exact thread currently selected by Telegram in a terminal, run:
-
-```bash
-/home/home/Projects/claude-voice-bridge/bin/codex-live
-```
-
-An optional project name opens that project's persisted Telegram thread. Both
-clients then send through the same app-server and use the same Codex thread ID.
-
 - **Bot never replies:** check `journalctl --user -u voice-bridge -f`; verify
   `TELEGRAM_BOT_TOKEN` and that you started a chat with the bot first.
 - **Replies ignored:** `TELEGRAM_ALLOWED_USER_ID` must be your **numeric** id (from
@@ -719,7 +899,13 @@ clients then send through the same app-server and use the same Codex thread ID.
   command menu. This installation also uses
   `~/.claude/.telegram-bridge-disabled` to silence older global Claude hooks that
   send directly to the same bot.
-- **Switch back immediately:** set `AGENT_BACKEND=claude` and restart the service.
+- **`/agent` switched but nothing came back:** the bridge exits to apply the switch and
+  relies on systemd to restart it. Check `systemctl --user status voice-bridge`; in a
+  foreground run, start it again by hand.
+- **`/live` finds no sessions:** only Claude Code sessions that registered a socket in
+  `~/.claude/sessions/` are listed; restart older sessions. With `AGENT_BACKEND=codex`
+  `/live` is disabled on purpose.
+- **Switch back immediately:** send `/agent claude`, or set `AGENT_BACKEND=claude` and restart the service.
   Claude session IDs were not overwritten by Codex thread IDs. Remove
   `~/.claude/.telegram-bridge-disabled` only if Claude should again notify this
   Telegram channel.
@@ -781,6 +967,15 @@ deployment good.
   and the agent is told it was skipped. (b) Trigger another risky op and **do not
   reply** for longer than `APPROVAL_TIMEOUT` — confirm it auto-denies and the agent
   moves on.
+- [ ] **Agent switch.** Send `/agent`, tap **Codex**; after ~10 s send a message and
+  confirm Codex answers. Send `/agent claude` and confirm Claude answers again with its
+  earlier conversation intact.
+- [ ] **Live editor session (Claude).** Open a Claude Code session in the IDE, send
+  `/live`, tap it, and send a message; confirm it appears in the IDE session and the
+  reply streams back to Telegram. Send `/live off`.
+- [ ] **Answer by voice.** While an `ask_user` question is open, send a voice note
+  saying the option ("the second one"); confirm it resolves the question instead of
+  starting a new turn.
 - [ ] **Whitelist (§14.7).** From a **different** Telegram account (or ask someone),
   message the bot. Confirm it is **ignored** — no reply, nothing routed, nothing run.
   Confirm your own whitelisted account still works.
