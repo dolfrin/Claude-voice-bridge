@@ -292,9 +292,8 @@ def make_outbound(
 
         for mid in ids:
             await store.map_message(mid, o.project)
-        if not o.transient:
-            await store.set_last_active(o.project)
-            controls.mark_last_active(o.project)
+        # A project answering does NOT become the current one: that is the
+        # user's choice alone (see the pinned "🎯" in telegram_io).
         try:
             if not o.transient:
                 controls.record_recap(o.project, _recap_summary_line(spoken, full_text))
@@ -493,8 +492,6 @@ def make_inbound(
                     logger.info("route: plain message -> current session %s",
                                 getattr(attached, "session_id", "?"))
                     return
-            if rid is None:
-                entry = sent_log.last()
             if entry and entry.get("s") and await telegram.live_send_to(
                 entry["s"], await _files_into(entry.get("c") or "", text, msg), spoken=spoken
             ):
@@ -554,7 +551,10 @@ def make_inbound(
             logger.info("route: -> project %s, its open editor session", project)
             return
         # Nothing open on this project here: only now does the bridge run it
-        # in a session of its own.
+        # in a session of its own, and that becomes the current one.
+        await store.set_last_active(project)
+        controls.mark_last_active(project)
+        await telegram.use_bridge_session(project)
         label = getattr(proj, "display_name", None) or project
         await telegram.note_route(
             f"bridge:{project}", t("route.bridge_session", project=label),
@@ -1393,6 +1393,11 @@ async def build() -> Wiring:
         async def live_send_to(self, session_id, text, spoken: bool = False):
             io = telegram_ref.get("io")
             return await io.live_send_to(session_id, text, spoken) if io is not None else False
+
+        async def use_bridge_session(self, project):
+            io = telegram_ref.get("io")
+            if io is not None:
+                await io.use_bridge_session(project)
 
         async def note_route(self, key, label, session_id=None, cwd=""):
             io = telegram_ref.get("io")

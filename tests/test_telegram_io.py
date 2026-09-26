@@ -4107,3 +4107,27 @@ async def test_write_here_button_makes_that_session_current(monkeypatch):
     io._attach_live.assert_awaited_once_with("9")
     label = query.edit_message_reply_markup.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text
     assert label == "🎯 Dabar rašai čia"
+
+
+@pytest.mark.asyncio
+async def test_tapping_a_project_makes_it_the_current_one(monkeypatch):
+    """/projects → tap: with an editor session open it is attached (and
+    pinned); without one, its bridge session becomes current."""
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    controls = FakeControls()
+    qwing_cwd = controls.snapshot()[0]["cwd"]
+    open_qwing = SimpleNamespace(pid=7, session_id="q", cwd=qwing_cwd, last_active=1)
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    io._attach_live = AsyncMock(return_value="ok")
+    io._show_target = AsyncMock()
+
+    monkeypatch.setattr(live_mod, "list_sessions", lambda d: [open_qwing])
+    await io.focus_project(controls.snapshot()[0]["project"])
+    io._attach_live.assert_awaited_once_with("7")
+
+    monkeypatch.setattr(live_mod, "list_sessions", lambda d: [])
+    await io.focus_project(controls.snapshot()[0]["project"])
+    assert "tilto sesija" in io._show_target.await_args.args[0]

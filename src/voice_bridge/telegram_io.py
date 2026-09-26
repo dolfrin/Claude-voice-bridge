@@ -98,6 +98,25 @@ _T = TypeVar("_T")
 _PC_ACTIONS = ("suspend", "poweroff", "reboot")
 
 
+def _open_session_for(sessions, cwd: str):
+    """The live session working in *cwd* (or below it), the most recently
+    active one when several are; None if there is none."""
+    try:
+        target = Path(cwd).resolve()
+    except (OSError, ValueError):
+        return None
+    best = None
+    for session in sessions:
+        try:
+            path = Path(session.cwd).resolve()
+        except (OSError, ValueError):
+            continue
+        if path == target or target in path.parents:
+            if best is None or session.last_active > best.last_active:
+                best = session
+    return best
+
+
 def _answer_markup(text: str) -> InlineKeyboardMarkup | None:
     """Answer buttons for a message that asks something, or None.
 
@@ -1138,6 +1157,7 @@ class TelegramIO:
                 await self.controls.set_verbose(project, not row.get("verbose", False))
             elif action in {"sel"}:
                 await self.controls.select(project)
+                await self.focus_project(project)
                 snap = self.controls.snapshot()
                 await self._edit_callback_text(
                     query,
@@ -1967,18 +1987,7 @@ class TelegramIO:
         except Exception:  # noqa: BLE001 - never break routing over this
             logger.exception("live: could not list sessions")
             return False
-        target = Path(cwd).resolve()
-        best = None
-        for session in sessions:
-            try:
-                path = Path(session.cwd).resolve()
-            except (OSError, ValueError):
-                continue
-            # The session may sit in a subdirectory of the project. With
-            # several open, the one worked in last is the one being watched.
-            if path == target or target in path.parents:
-                if best is None or session.last_active > best.last_active:
-                    best = session
+        best = _open_session_for(sessions, cwd)
         if best is None:
             return False
         return await self._send_to(best, text, spoken)
@@ -2263,7 +2272,7 @@ class TelegramIO:
         if args and args[0] in {"off", "stop", "detach"}:
             self._detach_live()
             await msg.reply_text(t("live.detached"))
-            await self._show_target(None)
+            await self._show_current_bridge_project()
             return
 
         sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
@@ -2297,6 +2306,10 @@ class TelegramIO:
         self._live_session = session
         self._write_live_marker(session.session_id)
         self._live_task = asyncio.create_task(self._tail_live(session))
+        project = self.project_for_cwd(session.cwd)
+        if project is not None:
+            with contextlib.suppress(Exception):
+                await self.controls.select(project)
         await self._show_target(self.session_label(session))
         title = live.title_of(Path.home() / ".claude" / "projects", session.session_id)
         return t("live.attached", title=title or session.cwd)
@@ -2361,6 +2374,36 @@ class TelegramIO:
             self._pin_file.write_text(json.dumps({"message_id": message.message_id}))
         except Exception:  # noqa: BLE001 - the pin is a courtesy, never a failure
             logger.exception("target: could not update the pinned message")
+
+    async def focus_project(self, project: str) -> None:
+        """Make *project* the current one: its open editor session if there is
+        one (attached, streamed, pinned), otherwise its bridge session."""
+        row = _find_project_row(self.controls.snapshot(), project)
+        session = None
+        if self._claude_live_enabled and row and row.get("cwd"):
+            with contextlib.suppress(Exception):
+                session = _open_session_for(
+                    live.list_sessions(Path.home() / ".claude" / "sessions"), row["cwd"]
+                )
+        if session is not None:
+            await self._attach_live(str(session.pid))
+        else:
+            await self.use_bridge_session(project)
+
+    async def use_bridge_session(self, project: str) -> None:
+        """The current conversation is now *project*'s bridge session."""
+        self._detach_live()
+        row = _find_project_row(self.controls.snapshot(), project)
+        label = (row or {}).get("display_name") or project
+        await self._show_target(t("target.bridge", project=label))
+
+    async def _show_current_bridge_project(self) -> None:
+        """Pin whichever project is current when no editor session is."""
+        row = next((r for r in self.controls.snapshot() if r.get("last_active")), None)
+        if row is None:
+            await self._show_target(None)
+        else:
+            await self._show_target(t("target.bridge", project=row.get("display_name") or row["project"]))
 
     async def _write_here(self, query, session_id: str) -> None:
         """The "🎯 Write here" button: make that session the current one."""
@@ -2708,6 +2751,8 @@ class TelegramIO:
             self._perm_task = asyncio.create_task(self._watch_permissions())
             self._hook_buttons_task = asyncio.create_task(self._buttons_for_hook_messages())
             await self._restore_live()
+            if self._live_session is None:
+                await self._show_current_bridge_project()
         else:
             self._detach_live()
             try:

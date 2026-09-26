@@ -201,6 +201,7 @@ class FakeTelegram:
         self.open_sessions: set[str] = set()
         self.cwd_projects: dict[str, str] = {}
         self.routes: list[str] = []
+        self.bridge_focus: list[str] = []
 
     def live_target(self):
         return self.live_session
@@ -226,6 +227,9 @@ class FakeTelegram:
 
     async def note_route(self, key, label, session_id=None, cwd=""):
         self.routes.append(label)
+
+    async def use_bridge_session(self, project):
+        self.bridge_focus.append(project)
 
     def pending_ask_token_for_message(self, message_id):
         return self._ask_by_message.get(message_id)
@@ -455,9 +459,8 @@ async def test_make_outbound_assistant_split_synth_send_map_active():
     assert tts_holder["backend"].calls == [("Done.", "echo")]
     assert telegram.updates == [("qwing", "echo", "Done.\n---\n`code here`", b"VOICE")]
     assert store.mapped == [(101, "qwing"), (102, "qwing")]
-    assert store.last_active_calls == ["qwing"]
-    # mirror last_active flipped on
-    assert controls._mirror["qwing"]["last_active"] is True
+    assert store.last_active_calls == []  # answering never makes a project current
+    assert not controls._mirror["qwing"].get("last_active")
 
 
 @pytest.mark.asyncio
@@ -678,7 +681,7 @@ async def test_make_outbound_recovers_after_a_previous_send_failure():
 
     assert telegram.updates == [("qwing", "echo", "second", b"VOICE")]
     assert store.mapped == [(101, "qwing")]
-    assert store.last_active_calls == ["qwing"]
+    assert store.last_active_calls == []  # answering never makes a project current
 
 
 # --------------------------------------------------------------------------- #
@@ -1131,7 +1134,7 @@ async def test_make_outbound_transient_does_not_steal_last_active():
 
 
 @pytest.mark.asyncio
-async def test_make_outbound_non_transient_still_sets_last_active():
+async def test_make_outbound_never_makes_a_project_current():
     store = FakeStore()
     tts_holder = {"backend": FakeTTS(out=b"V")}
     telegram = FakeTelegram(ids=[702])
@@ -1145,8 +1148,8 @@ async def test_make_outbound_non_transient_still_sets_last_active():
     outbound = make_outbound(tts_holder, telegram, store, FakeCfg(), sessions, controls)
     await outbound(Outbound(project="qwing", text="Done.", spoken="Done."))
 
-    assert store.last_active_calls == ["qwing"]
-    assert controls._mirror["qwing"]["last_active"] is True
+    assert store.last_active_calls == []
+    assert controls._mirror["qwing"]["last_active"] is False
 
 
 @pytest.mark.asyncio
@@ -2794,16 +2797,17 @@ async def test_reply_to_a_hook_notification_goes_to_that_open_session():
 
 
 @pytest.mark.asyncio
-async def test_plain_message_goes_to_the_session_that_spoke_last():
+async def test_plain_message_ignores_who_spoke_last():
+    """Without a current editor session, a plain message goes to the current
+    project -- not to whichever session happened to write last."""
     sent_log, sessions, telegram, inbound = _live_first_setup(last_active="othersapp")
-    sent_log.record(500, "ide-old", "/p/othersapp")
     sent_log.record(501, "ide-qwing", "/p/qwing")
-    telegram.open_sessions = {"ide-old", "ide-qwing"}
+    telegram.open_sessions = {"ide-qwing"}
 
     await inbound(_msg(text="o dabar"))
 
-    assert telegram.live_sent_to == [("ide-qwing", "o dabar")]
-    assert sessions.delivered == []
+    assert telegram.live_sent_to == []
+    assert sessions.delivered == [("othersapp", "o dabar")]
 
 
 @pytest.mark.asyncio
