@@ -2436,8 +2436,11 @@ class TelegramIO:
                             entry["m"], entry["s"], current, marked or "-")
                 # Another session spoke: one tap makes it the current one.
                 rows = list(markup.inline_keyboard) if markup is not None else []
+                # Name the target: a bare "write here" read like an instruction,
+                # not like the offer to switch that it is.
                 rows.append([InlineKeyboardButton(
-                    t("target.write_here"), callback_data=f"tgt:{entry['s']}"
+                    t("target.write_here", name=Path(entry.get("c") or "").name or "?"),
+                    callback_data=f"tgt:{entry['s']}",
                 )])
                 markup = InlineKeyboardMarkup(rows)
             if markup is not None and self.app is not None:
