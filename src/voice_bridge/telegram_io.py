@@ -2485,19 +2485,17 @@ class TelegramIO:
 
     def session_label(self, session) -> str:
         """``Project · conversation title`` for a live session."""
-        project = self.project_for_cwd(session.cwd)
-        row = _find_project_row(self.controls.snapshot(), project) if project else None
-        name = (row or {}).get("display_name") or project or Path(session.cwd).name
+        # Named by the CONVERSATION, then its folder: a project's label can
+        # equal one of its conversations' titles, and two sessions of one
+        # project then looked like one conversation that changed under you.
+        folder = Path(session.cwd).name
         title = live.title_of(Path.home() / ".claude" / "projects", session.session_id)
         if not title:
-            # Two untitled sessions of one project must still be told apart.
             started = time.strftime("%H:%M", time.localtime((session.started_at or 0) / 1000))
             title = t("target.untitled", time=started)
-        if title.strip().lower() == name.strip().lower():
-            return name
         if len(title) > 40:
             title = title[:40] + "…"
-        return f"{name} · {title}"
+        return f"„{title}“ · {folder}"
 
     async def note_route(
         self, key: str, label: str, session_id: str | None = None, cwd: str = "",

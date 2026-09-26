@@ -4240,20 +4240,21 @@ async def test_typing_is_refused_unless_the_claude_tab_is_in_front(monkeypatch):
     assert not any(a[1] == "type" for a in typed)  # nothing typed into a code editor
 
 
-def test_session_label_never_repeats_the_same_name():
+def test_session_label_names_the_conversation_then_the_folder():
+    """Two sessions of one project must never look alike: the label is the
+    conversation's own title (or "naujas pokalbis" + its start time)."""
     from types import SimpleNamespace
 
-    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
-    io.project_for_cwd = lambda cwd: None
     import voice_bridge.live as live_mod
 
-    same = SimpleNamespace(cwd="/p/Qwing", session_id="a", started_at=0)
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    session = SimpleNamespace(cwd="/p/claude-voice-bridge", session_id="a", started_at=0)
     orig = live_mod.title_of
     try:
-        live_mod.title_of = lambda root, sid: "Qwing"
-        assert io.session_label(same) == "Qwing"
+        live_mod.title_of = lambda root, sid: "Valdyti Claude balsui"
+        assert io.session_label(session) == "„Valdyti Claude balsui“ · claude-voice-bridge"
         live_mod.title_of = lambda root, sid: ""
-        assert io.session_label(same).startswith("Qwing · naujas pokalbis, ")
+        assert io.session_label(session).startswith("„naujas pokalbis, ")
     finally:
         live_mod.title_of = orig
 
