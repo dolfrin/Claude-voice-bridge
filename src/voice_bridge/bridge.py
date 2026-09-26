@@ -75,6 +75,9 @@ _RECAP_MAX_LINES = 20
 # name is stripped off (see parse_name_prefix), so it never needs to know
 # what a "name" character is.
 _NAME_PREFIX_SEP_RE = re.compile(r"^\s*(?:[:\-,]\s*|\s+)(.*)$", re.DOTALL)
+# Strict form: the name must be followed by ":", "," or "-", so an ordinary
+# sentence that merely starts with a word like "docs" is not taken as one.
+_NAME_PREFIX_STRICT_RE = re.compile(r"^\s*[:\-,]\s*(.*)$", re.DOTALL)
 
 
 # --------------------------------------------------------------------------- #
@@ -106,7 +109,9 @@ async def resolve_target(msg: dict, store: Store) -> tuple[str | None, str]:
     return project, "ok"
 
 
-def parse_name_prefix(text: str | None, names: list[str]) -> tuple[str | None, str]:
+def parse_name_prefix(
+    text: str | None, names: list[str], loose: bool = True
+) -> tuple[str | None, str]:
     """Parse a leading ``"<project>: ..."`` / ``"<project> ..."`` token.
 
     Case-insensitive EXACT match against a project in *names*: the first
@@ -123,7 +128,8 @@ def parse_name_prefix(text: str | None, names: list[str]) -> tuple[str | None, s
     ``(None, text)`` UNCHANGED — including when *text* merely contains a
     colon later on (``"just a colon: here"`` does not match unless "just"
     is itself a known project name). ``text=None`` is treated as ``""`` (so
-    the call cannot raise) and returns ``(None, "")``.
+    the call cannot raise) and returns ``(None, "")``. ``loose=False`` drops
+    the whitespace-only form and requires a ``:``/``,``/``-`` separator.
     """
     text = text or ""
     stripped = text.lstrip()
@@ -132,7 +138,7 @@ def parse_name_prefix(text: str | None, names: list[str]) -> tuple[str | None, s
         if not lower.startswith(name.lower()):
             continue
         rest = stripped[len(name):]
-        m = _NAME_PREFIX_SEP_RE.match(rest)
+        m = (_NAME_PREFIX_SEP_RE if loose else _NAME_PREFIX_STRICT_RE).match(rest)
         if m:
             return name, m.group(1)
     return None, text
@@ -464,8 +470,7 @@ def make_inbound(
         if reply_project is None and entry is None:
             # A quote-reply is unambiguous and wins; only without one does a
             # leading "<project>:" pick the target.
-            names = sessions.names() if hasattr(sessions, "names") else []
-            prefix_project, prefix_text = parse_name_prefix(text, names)
+            prefix_project, prefix_text = _match_project(text, sessions, controls)
 
         # Live first. Without a "<project>:" prefix, the message is for the
         # conversation that sent the message being replied to, or -- no reply
@@ -525,6 +530,10 @@ def make_inbound(
             return
         # Nothing open on this project here: only now does the bridge run it
         # in a session of its own.
+        label = getattr(proj, "display_name", None) or project
+        await telegram.note_route(
+            f"bridge:{project}", f"{label} · tilto sesija (VS Code jis neatidarytas)"
+        )
         await sessions.deliver(project, text)
 
     return inbound
@@ -570,6 +579,39 @@ async def _append_attachment_transcripts(
         lines.append("Audio transkripcija:")
         lines.extend(transcripts)
     return "\n".join(lines).strip()
+
+
+def _match_project(text: str, sessions, controls) -> tuple[str | None, str]:
+    """``(project, rest)`` for a leading project name, else ``(None, text)``.
+
+    A project answers to its name, its Telegram label and its folder name, so
+    "Valdyti Claude balsui: ..." and "claude-voice-bridge: ..." both work, not
+    only the internal "bridge". Any of them followed by ":", "," or "-" picks
+    the project. The bare "qwing do x" form (no separator, which is how speech
+    comes out) is honoured only for projects that are switched on: dozens of
+    discovered folders are named "docs", "web", "music"..., and a sentence
+    starting with such a word must not be sent there.
+    """
+    names = sessions.names() if hasattr(sessions, "names") else []
+    snapshot = controls.snapshot() if hasattr(controls, "snapshot") else []
+    aliases: dict[str, str] = {n.lower(): n for n in names}
+    enabled = set()
+    for row in snapshot:
+        name = row.get("project")
+        if name not in names:
+            continue
+        for alias in (row.get("display_name"), Path(row.get("cwd") or "").name):
+            if alias:
+                aliases.setdefault(alias.lower(), name)
+        if row.get("enabled"):
+            enabled.add(name)
+    found, rest = parse_name_prefix(text, list(aliases), loose=False)
+    if found is None:
+        loose = [a for a, n in aliases.items() if n in enabled or not snapshot]
+        found, rest = parse_name_prefix(text, loose)
+    if found is None:
+        return None, text
+    return aliases[found.lower()], rest
 
 
 def _consume_urgent_prefix(text: str) -> tuple[bool, str]:
@@ -1334,6 +1376,11 @@ async def build() -> Wiring:
         async def live_send_to(self, session_id, text, spoken: bool = False):
             io = telegram_ref.get("io")
             return await io.live_send_to(session_id, text, spoken) if io is not None else False
+
+        async def note_route(self, key, label):
+            io = telegram_ref.get("io")
+            if io is not None:
+                await io.note_route(key, label)
 
         def project_for_cwd(self, cwd):
             io = telegram_ref.get("io")

@@ -85,9 +85,13 @@ def _paged(rows: list, page: int) -> tuple[list, int, int]:
 
 
 def format_projects(
-    snapshot: list[dict], show_all: bool = False, page: int = 0
+    snapshot: list[dict], show_all: bool = False, page: int = 0,
+    open_projects: set[str] | None = None,
 ) -> str:
-    """Render /projects as a scannable HTML summary."""
+    """Render /projects as a scannable HTML summary.
+
+    Each project shows what to type to reach it and whether a session for it
+    is open in the editor right now (then messages go straight in there)."""
     rows = _project_list_rows(snapshot, show_all=show_all)
     if not rows:
         return "no active projects\nUse /projects_all to show every project."
@@ -103,8 +107,13 @@ def format_projects(
         settings = html.escape(
             f"{row['mode']} · {row['voice']} · {row['engine']}"
         )
+        where = (
+            "🖥 atidaryta VS Code" if row["project"] in (open_projects or set())
+            else "tilto sesija"
+        )
         lines.extend([
-            f"{status} <b>{project}</b>{active}",
+            f"{status} <b>{project}</b>{active} — {where}",
+            f"  ✍️ <code>{html.escape(row['project'])}:</code> tekstas",
             f"  \U0001F4C1 {path_part} · {settings}",
             "",
         ])
@@ -220,10 +229,18 @@ def _format_help() -> str:
     return "\n".join([
         "❓ Kaip veikia tiltas",
         "",
-        "Adresavimas (į kurį projektą eina žinutė):",
-        "• „projektas: tekstas“ — vardo prefiksas nurodo projektą.",
-        "• vien tekstas — eina paskutiniam aktyviam projektui.",
-        "• atsakymas (reply) į projekto žinutę — eina tam projektui.",
+        "Kur nueina žinutė:",
+        "• reply į žinutę — į tą sesiją, iš kurios ji atėjo.",
+        "• vien tekstas — į sesiją, kuri paskutinė rašė čia.",
+        "• „projektas: tekstas“ — į tą projektą. Tinka vidinis vardas, "
+        "rodomas pavadinimas ar aplanko vardas (žr. /projects).",
+        "• Jei projekto sesija atidaryta VS Code — rašoma tiesiai į ją; "
+        "tilto sesija paleidžiama tik jei neatidaryta.",
+        "",
+        "Kaip žinoti, kas vyksta:",
+        "• ➡️ — kur nuėjo tavo žinutė (rodoma, kai adresatas pasikeičia).",
+        "• 💬 Projektas · pokalbis — iš kurios sesijos atsakymas.",
+        "• /projects — 🖥 prie projekto reiškia, kad sesija atidaryta VS Code.",
         "",
         "Skubu:",
         "• „!“ žinutės pradžioje — nutraukia dabartinį projekto darbą ir "

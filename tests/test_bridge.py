@@ -200,6 +200,7 @@ class FakeTelegram:
         self.live_sent_to: list[tuple[str, str]] = []
         self.open_sessions: set[str] = set()
         self.cwd_projects: dict[str, str] = {}
+        self.routes: list[str] = []
 
     def live_target(self):
         return self.live_session
@@ -222,6 +223,9 @@ class FakeTelegram:
 
     def project_for_cwd(self, cwd):
         return self.cwd_projects.get(cwd)
+
+    async def note_route(self, key, label):
+        self.routes.append(label)
 
     def pending_ask_token_for_message(self, message_id):
         return self._ask_by_message.get(message_id)
@@ -2824,3 +2828,37 @@ async def test_name_prefix_beats_the_last_speaker():
 
     assert telegram.live_sent_to == []
     assert sessions.delivered == [("othersapp", "build")]
+
+
+def test_match_project_by_any_name_and_strict_for_switched_off():
+    from types import SimpleNamespace
+
+    from voice_bridge.bridge import _match_project
+
+    sessions = SimpleNamespace(names=lambda: ["bridge", "docs", "qwing"])
+    controls = SimpleNamespace(snapshot=lambda: [
+        {"project": "bridge", "display_name": "Valdyti Claude balsui",
+         "cwd": "/p/claude-voice-bridge", "enabled": True},
+        {"project": "docs", "cwd": "/p/docs", "enabled": False},
+        {"project": "qwing", "cwd": "/p/Qwing", "enabled": True},
+    ])
+    match = lambda text: _match_project(text, sessions, controls)  # noqa: E731
+
+    assert match("Valdyti Claude balsui: pataisyk") == ("bridge", "pataisyk")
+    assert match("claude-voice-bridge, pataisyk") == ("bridge", "pataisyk")
+    assert match("Qwing daryk testus") == ("qwing", "daryk testus")  # on: bare form ok
+    assert match("docs reikia atnaujinti") == (None, "docs reikia atnaujinti")  # off: no
+    assert match("docs: atnaujink") == ("docs", "atnaujink")  # off, but explicit
+
+
+@pytest.mark.asyncio
+async def test_bridge_session_fallback_says_where_the_message_went():
+    store = FakeStore(last_active="qwing", enabled={"qwing": True})
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+
+    await inbound(_msg(text="labas"))
+
+    assert sessions.delivered == [("qwing", "labas")]
+    assert telegram.routes == ["qwing · tilto sesija (VS Code jis neatidarytas)"]

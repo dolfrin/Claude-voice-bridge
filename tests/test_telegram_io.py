@@ -3891,3 +3891,16 @@ def test_project_views_stay_within_telegram_limits_with_many_projects():
     assert len(seen) == 70  # every project reachable through the pages
     last = build_projects_list_markup(snap, show_all=True, page=0).inline_keyboard[-1]
     assert last[-1].callback_data == "menu:projects_all:1"
+
+
+@pytest.mark.asyncio
+async def test_note_route_speaks_only_when_the_destination_changes():
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._send_plain = AsyncMock()
+
+    await io.note_route("s1", "Qwing · testai")
+    await io.note_route("s1", "Qwing · testai")
+    await io.note_route("s2", "bridge · README")
+
+    sent = [c.args[0] for c in io._send_plain.await_args_list]
+    assert sent == ["➡️ Qwing · testai", "➡️ bridge · README"]

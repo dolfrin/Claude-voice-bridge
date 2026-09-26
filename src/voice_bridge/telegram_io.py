@@ -406,6 +406,8 @@ class TelegramIO:
         self._env_path = ".env"
         self._restart = lambda: os.kill(os.getpid(), signal.SIGTERM)
         self._agent_switched: str | None = None
+        # Where the last message was delivered (see note_route).
+        self._last_route: str | None = None
         # Which Claude account was logged in when, and its limits over time:
         # what /usage needs to tell this PC's part from the account's total.
         self.usage_ledger = usage.ledger_path(cfg.db_path)
@@ -1089,7 +1091,7 @@ class TelegramIO:
                 snap = self.controls.snapshot()
                 await self._edit_callback_text(
                     query,
-                    format_projects(snap),
+                    format_projects(snap, open_projects=self._open_projects()),
                     build_projects_list_markup(snap),
                 )
                 return
@@ -1097,7 +1099,7 @@ class TelegramIO:
                 turning_off = row["enabled"]
                 await self.controls.toggle(project, not row["enabled"])
                 snap = self.controls.snapshot()
-                text = format_projects(snap)
+                text = format_projects(snap, open_projects=self._open_projects())
                 if turning_off:
                     # Disabling drops this project's queued turns; note it
                     # instead of a silent redraw (audit finding #2).
@@ -1198,7 +1200,7 @@ class TelegramIO:
         if action == "projects":
             await self._edit_callback_text(
                 query,
-                format_projects(snapshot),
+                format_projects(snapshot, open_projects=self._open_projects()),
                 build_projects_list_markup(snapshot),
             )
         elif action.startswith("projects_all"):
@@ -1206,7 +1208,7 @@ class TelegramIO:
             page = int(page_str) if page_str.isdigit() else 0
             await self._edit_callback_text(
                 query,
-                format_projects(snapshot, show_all=True, page=page),
+                format_projects(snapshot, show_all=True, page=page, open_projects=self._open_projects()),
                 build_projects_list_markup(snapshot, show_all=True, page=page),
             )
         elif action == "panel":
@@ -1217,7 +1219,7 @@ class TelegramIO:
             await self._edit_callback_text(
                 query,
                 f"New projects added: {added}\n\n"
-                + format_projects(snapshot, show_all=True),
+                + format_projects(snapshot, show_all=True, open_projects=self._open_projects()),
                 build_projects_list_markup(snapshot, show_all=True),
             )
         elif action == "stop":
@@ -1317,7 +1319,7 @@ class TelegramIO:
         show_all = bool(context.args and context.args[0] == "all")
         snapshot = self.controls.snapshot()
         await msg.reply_text(
-            format_projects(snapshot, show_all=show_all),
+            format_projects(snapshot, show_all=show_all, open_projects=self._open_projects()),
             parse_mode="HTML",
             reply_markup=build_projects_list_markup(snapshot, show_all=show_all),
         )
@@ -1330,7 +1332,7 @@ class TelegramIO:
             return
         snapshot = self.controls.snapshot()
         await msg.reply_text(
-            format_projects(snapshot, show_all=True),
+            format_projects(snapshot, show_all=True, open_projects=self._open_projects()),
             parse_mode="HTML",
             reply_markup=build_projects_list_markup(snapshot, show_all=True),
         )
@@ -1345,7 +1347,7 @@ class TelegramIO:
         snapshot = self.controls.snapshot()
         await msg.reply_text(
             f"New projects added: {added}\n\n"
-            + format_projects(snapshot, show_all=True),
+            + format_projects(snapshot, show_all=True, open_projects=self._open_projects()),
             parse_mode="HTML",
             reply_markup=build_projects_list_markup(snapshot, show_all=True),
         )
@@ -1843,7 +1845,41 @@ class TelegramIO:
         """Attach to *session* (so its answer streams back) and send *text*."""
         if self._live_session is None or self._live_session.pid != session.pid:
             await self._attach_live(str(session.pid))
-        return await self.live_send(text, spoken=spoken)
+        sent = await self.live_send(text, spoken=spoken)
+        if sent:
+            await self.note_route(session.session_id, self.session_label(session))
+        return sent
+
+    def session_label(self, session) -> str:
+        """``Project · conversation title`` for a live session."""
+        project = self.project_for_cwd(session.cwd)
+        row = _find_project_row(self.controls.snapshot(), project) if project else None
+        name = (row or {}).get("display_name") or project or Path(session.cwd).name
+        title = live.title_of(Path.home() / ".claude" / "projects", session.session_id)
+        if title and len(title) > 40:
+            title = title[:40] + "…"
+        return f"{name} · {title}" if title else name
+
+    async def note_route(self, key: str, label: str) -> None:
+        """Say where a message went -- once per change of destination.
+
+        Every message confirmed would be noise; never confirming left the user
+        guessing which project a message reached. Saying it when the target
+        changes answers exactly that."""
+        if key == self._last_route:
+            return
+        self._last_route = key
+        await self._send_plain(f"➡️ {label}")
+
+    def _open_projects(self) -> set[str]:
+        """Projects that have a session open in the editor right now."""
+        if not self._claude_live_enabled:
+            return set()
+        try:
+            sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
+        except Exception:  # noqa: BLE001 - a listing must not break /projects
+            return set()
+        return {p for p in (self.project_for_cwd(x.cwd) for x in sessions) if p}
 
     def project_for_cwd(self, cwd: str) -> str | None:
         """The bridge project whose directory contains *cwd*, if any."""
@@ -2057,7 +2093,10 @@ class TelegramIO:
                         )]
                         for i, label in enumerate(options, 1)
                     ])
-                chunks = _chunk_text(body)
+                # Every message says which conversation it is from: with more
+                # than one session working, an unlabeled "🔧 Bash ..." could be
+                # any of them.
+                chunks = _chunk_text(f"💬 {self.session_label(session)}\n{body}")
                 for i, chunk in enumerate(chunks):
                     # Buttons ride the LAST chunk, right under the options.
                     message = await self._send_plain(
