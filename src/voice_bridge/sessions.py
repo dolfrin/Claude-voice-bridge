@@ -31,6 +31,7 @@ import asyncio
 import logging
 import shutil
 import time
+import warnings
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -42,6 +43,8 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
 )
+
+from claude_agent_sdk.types import CanUseToolShadowedWarning
 
 from . import claude_history
 from .approvals import ApprovalManager, make_can_use_tool
@@ -64,6 +67,11 @@ from .transcript import append_transcript
 from .types import Outbound
 
 logger = logging.getLogger(__name__)
+
+# The bridge's own MCP tools (notify, send_file, ask_user) are listed in
+# allowed_tools on purpose so they never wait for an approval; the SDK warns
+# that this bypasses can_use_tool for them on every session start.
+warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
 # Appended to the agent's system prompt so its user-facing messages are
 # voice-friendly and split cleanly into a spoken line + technical detail. This
