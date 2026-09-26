@@ -231,6 +231,9 @@ class FakeTelegram:
     async def use_bridge_session(self, project):
         self.bridge_focus.append(project)
 
+    def pending_tab(self):
+        return None
+
     def pending_ask_token_for_message(self, message_id):
         return self._ask_by_message.get(message_id)
 

@@ -476,6 +476,11 @@ def make_inbound(
         # it. The hooks record their notifications too (sent_log), so this
         # covers "finished"/question messages the bridge did not send itself.
         tried_attached = False
+        if rid is None and prefix_project is None and telegram.pending_tab() is not None:
+            # A Claude tab just opened in VS Code (/open, ON) is the current
+            # conversation: this message starts it.
+            await telegram.send_notice(await telegram.send_to_pending_tab(text))
+            return
         if prefix_project is None:
             # No rule reads minds: guessing ("whoever spoke last") sent real
             # messages to the wrong session. So the target is shown instead of
@@ -1393,6 +1398,18 @@ async def build() -> Wiring:
         async def live_send_to(self, session_id, text, spoken: bool = False):
             io = telegram_ref.get("io")
             return await io.live_send_to(session_id, text, spoken) if io is not None else False
+
+        def pending_tab(self):
+            io = telegram_ref.get("io")
+            return io.pending_tab() if io is not None else None
+
+        async def send_to_pending_tab(self, text):
+            return await telegram_ref["io"].send_to_pending_tab(text)
+
+        async def send_notice(self, text, switch_to=None):
+            io = telegram_ref.get("io")
+            if io is not None:
+                await io.send_notice(text, switch_to=switch_to)
 
         async def use_bridge_session(self, project):
             io = telegram_ref.get("io")

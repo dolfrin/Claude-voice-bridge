@@ -326,6 +326,8 @@ BOT_LANGUAGE=en
 PC_POWER_COMMANDS=false
 # Keep each Claude login seen here so /account can switch back (off by default)
 CLAUDE_ACCOUNT_SWITCHING=false
+# ON / /newproject also open VS Code with a new Claude tab (needs xdotool, X11)
+OPEN_CLAUDE_TAB_ON_ENABLE=false
 
 # TTS: choose auto, openai, piper, together, or lithuanian
 # auto uses Piper only for English-looking text and OpenAI for everything else.
@@ -493,6 +495,7 @@ journalctl --user -u voice-bridge -f
 | 📊 | `/usage` (or `/cost`) | Claude limits of the logged-in account — 5-hour, weekly, per-model (e.g. Fable) — and this PC's estimated share, per session |
 | 💻 | `/pc` | Suspend, shut down or restart this machine — each confirmed with ✅/❌. Off unless `PC_POWER_COMMANDS=true` |
 | 👤 | `/account` | Claude accounts logged in on this PC; tap one (✅/❌) to switch the whole PC to it. Off unless `CLAUDE_ACCOUNT_SWITCHING=true` |
+| 🖥 | `/open <project> [message]` | Open the project in VS Code on this PC with a new Claude tab; the message (or your next one) starts the conversation there, and Telegram writes into it |
 | ♾ | `/policies` / `/policies clear [project]` | List, or revoke (all / one project's), the always-allow grants |
 | ⏰ | `/schedule` / `/schedule <project> <HH:MM> <prompt>` / `/schedule remove\|on\|off <id>` | List, add, or toggle/remove a daily recurring prompt delivered to a project at a local time |
 | ❓ | `/help` | Routing rules (name-prefix, last-active, quote-reply, `!` urgent), how to answer approvals/questions from the phone, and the command list |
@@ -739,6 +742,18 @@ You rarely need `/live` by hand: routing attaches to the right open session by i
 own session. If the conversation the bridge would resume is open in another process,
 it is **forked** (full history, new id) rather than opened a second time, which would
 lose messages; if its transcript is gone, a fresh one is started.
+
+### Opening a project in VS Code from the phone
+
+`/open <project> [message]` (and, with `OPEN_CLAUDE_TAB_ON_ENABLE=true`, turning a
+project on or `/newproject`) opens the project's VS Code window with a **new Claude
+tab**. The Claude extension cannot be told from outside to start a conversation — its
+`vscode://anthropic.claude-code/open` link only pre-fills the tab in front — so the tab
+is opened through the command palette with simulated keystrokes (`xdotool`, X11), and
+the first message is typed in and sent. Every step first checks that the project's VS
+Code window, and then its new Claude tab, is the active one; if not, nothing is typed
+and the bot says so. The new session is joined and pinned as the current one. A project
+that already has a Claude conversation open is simply joined.
 
 ### Telegram notifications from IDE hooks
 

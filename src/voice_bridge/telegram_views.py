@@ -50,6 +50,7 @@ _COMMAND_NAMES = (
     "schedule",
     "help",
     "live",
+    "open",
     "account",
     "pc",
 )

@@ -77,6 +77,9 @@ class Config:
     # Keep a copy of every Claude login seen here so /account can switch back
     # to it. Off by default: the copies are live tokens for every account.
     claude_account_switching: bool = False
+    # Turning a project on (and /newproject) also opens it in VS Code on this
+    # PC with a new Claude tab, which the next Telegram message starts.
+    open_claude_tab_on_enable: bool = False
 
 
 @dataclass
@@ -209,6 +212,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         bot_language=bot_language,
         pc_power_commands=_optional_bool(env, "PC_POWER_COMMANDS", False),
         claude_account_switching=_optional_bool(env, "CLAUDE_ACCOUNT_SWITCHING", False),
+        open_claude_tab_on_enable=_optional_bool(env, "OPEN_CLAUDE_TAB_ON_ENABLE", False),
     )
 
 

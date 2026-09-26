@@ -2928,7 +2928,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
             "mode", "effort", "voice", "verbose", "engine", "recap", "usage", "info", "policies", "schedule", "help",
-            "live", "agent", "pc", "account"} == registered_names
+            "live", "agent", "pc", "account", "open"} == registered_names
 
 
 @pytest.mark.asyncio
@@ -4131,3 +4131,71 @@ async def test_tapping_a_project_makes_it_the_current_one(monkeypatch):
     monkeypatch.setattr(live_mod, "list_sessions", lambda d: [])
     await io.focus_project(controls.snapshot()[0]["project"])
     assert "tilto sesija" in io._show_target.await_args.args[0]
+
+
+# --------------------------------------------------------------------------
+# /open and ON: the project in VS Code with a new Claude tab
+# --------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_open_starts_a_vscode_claude_tab_and_joins_it(monkeypatch):
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+    import voice_bridge.telegram_io as tio
+
+    controls = FakeControls()
+    row = controls.snapshot()[0]
+    registry = []
+    monkeypatch.setattr(live_mod, "list_sessions", lambda d: list(registry))
+    monkeypatch.setattr(tio.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(tio.accounts, "trust_folder", lambda home, cwd: None)
+    monkeypatch.setattr(tio, "_run_quiet", AsyncMock(return_value=0))
+    desktop = MagicMock()
+    desktop.wait_window = AsyncMock(return_value="42")
+    desktop.new_claude_tab = AsyncMock(return_value=True)
+
+    async def typed(window, folder, text):
+        registry.append(SimpleNamespace(pid=5, session_id="new", cwd=row["cwd"],
+                                        started_at=10**13, last_active=1))
+        return True
+
+    desktop.type_into_claude_tab = typed
+    monkeypatch.setattr(tio, "_desktop", desktop)
+    monkeypatch.setattr(tio.asyncio, "sleep", AsyncMock())
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    io._attach_live = AsyncMock(return_value="ok")
+    io._show_target = AsyncMock()
+
+    first = await io.open_on_pc(row["project"])
+    assert "Claude skirtukas" in first and io.pending_tab() is not None
+    assert "naujas VS Code Claude skirtukas" in io._show_target.await_args.args[0]
+
+    done = await io.send_to_pending_tab("pradėk nuo testų")
+    assert "pokalbis prasidėjo VS Code" in done
+    io._attach_live.assert_awaited_once_with("5")
+    assert io.pending_tab() is None
+
+
+@pytest.mark.asyncio
+async def test_typing_is_refused_unless_the_claude_tab_is_in_front(monkeypatch):
+    import voice_bridge.telegram_io as tio
+
+    outputs = {"getactivewindow": "42", "getwindowname": "main.py - Qwing - Visual Studio Code"}
+
+    async def fake_output(*args):
+        return outputs.get(args[1], "")
+
+    typed = []
+
+    async def fake_run(*args):
+        typed.append(args)
+        return 0
+
+    monkeypatch.setattr(tio, "_output", fake_output)
+    monkeypatch.setattr(tio, "_run_quiet", fake_run)
+    monkeypatch.setattr(tio.asyncio, "sleep", AsyncMock())
+
+    ok = await tio._Desktop().type_into_claude_tab("42", "Qwing", "labas")
+
+    assert ok is False
+    assert not any(a[1] == "type" for a in typed)  # nothing typed into a code editor

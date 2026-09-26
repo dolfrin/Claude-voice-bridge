@@ -631,3 +631,34 @@ EN["menu.help"] = "❓ Help"
 LT["menu.help"] = "❓ Pagalba"
 EN["target.bridge"] = "{project} · bridge session (not open in VS Code)"
 LT["target.bridge"] = "{project} · tilto sesija (VS Code neatidarytas)"
+
+
+# --- /open: a project in VS Code with a new Claude tab ---------------------------------
+EN.update({
+    "cmd.open": "🖥 Open a project in VS Code",
+    "open.usage": "Usage: /open <project> [first message]",
+    "open.starting": "🖥 Opening {project} on the PC…",
+    "open.no_tools": "⚠️ Needs VS Code (code) and xdotool on this PC (X11).",
+    "open.no_window": "⚠️ The VS Code window for {project} did not appear.",
+    "open.focus_lost": "⚠️ {project}: the VS Code window or its Claude tab was not in front, so nothing was typed. Try again, or finish at the PC.",
+    "open.tab_ready": "🖥 {project}: a new Claude tab is open in VS Code. Your next message starts the conversation there.",
+    "open.no_tab": "No new Claude tab is waiting.",
+    "open.ready": "✅ {project}: the conversation started in VS Code — 🎯 you are writing there.",
+    "open.already": "🖥 {project} already has a Claude conversation open in VS Code — 🎯 writing there.",
+    "open.timeout": "⚠️ {project}: the message was typed, but no session appeared within 30 s — look at the PC.",
+    "target.new_tab": "{project} · new VS Code Claude tab (your next message starts it)",
+})
+LT.update({
+    "cmd.open": "🖥 Atidaryti projektą VS Code",
+    "open.usage": "Naudojimas: /open <projektas> [pirma žinutė]",
+    "open.starting": "🖥 Atidarau {project} PC…",
+    "open.no_tools": "⚠️ Reikia VS Code (code) ir xdotool šiame PC (X11).",
+    "open.no_window": "⚠️ {project} VS Code langas neatsirado.",
+    "open.focus_lost": "⚠️ {project}: VS Code langas ar jo Claude skirtukas nebuvo priekyje, todėl nieko nerašiau. Bandyk dar kartą arba užbaik prie PC.",
+    "open.tab_ready": "🖥 {project}: VS Code atidarytas naujas Claude skirtukas. Tavo kita žinutė pradės pokalbį jame.",
+    "open.no_tab": "Naujo Claude skirtuko, laukiančio žinutės, nėra.",
+    "open.ready": "✅ {project}: pokalbis prasidėjo VS Code — 🎯 rašai ten.",
+    "open.already": "🖥 {project} jau turi atidarytą Claude pokalbį VS Code — 🎯 rašai ten.",
+    "open.timeout": "⚠️ {project}: žinutė įrašyta, bet per 30 s sesija neatsirado — pažiūrėk PC.",
+    "target.new_tab": "{project} · naujas VS Code Claude skirtukas (tavo kita žinutė jį pradės)",
+})

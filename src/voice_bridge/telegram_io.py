@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import time
 import random
@@ -96,6 +97,87 @@ _T = TypeVar("_T")
 
 # /pc actions, as systemctl verbs; logind lets the logged-in user run them.
 _PC_ACTIONS = ("suspend", "poweroff", "reboot")
+
+
+async def _run_quiet(*args: str) -> int:
+    """Run a desktop helper, output discarded; its exit status (-1 if missing)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await proc.wait()
+    except OSError:
+        return -1
+
+
+async def _output(*args: str) -> str:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        return out.decode(errors="replace").strip()
+    except OSError:
+        return ""
+
+
+class _Desktop:
+    """Keystrokes into a VS Code window, guarded so they land nowhere else.
+
+    ponytail: xdotool on X11 and the palette title "Claude Code: Open in New
+    Tab"; a Claude extension release that renames it breaks this (the steps
+    then fail their checks and report, they do not type blindly).
+    """
+
+    async def wait_window(self, folder: str, timeout: float = 20) -> str | None:
+        """The id of the VS Code window with *folder* open."""
+        for _ in range(int(timeout * 2)):
+            ids = (await _output("xdotool", "search", "--name", f" - {folder} - Visual Studio Code")).split()
+            if ids:
+                return ids[0]
+            await asyncio.sleep(0.5)
+        return None
+
+    async def _focus(self, window: str) -> bool:
+        await _run_quiet("xdotool", "windowactivate", "--sync", window)
+        await asyncio.sleep(0.4)
+        return await _output("xdotool", "getactivewindow") == window
+
+    async def new_claude_tab(self, window: str) -> bool:
+        if not await self._focus(window):
+            return False
+        await _run_quiet("xdotool", "key", "--clearmodifiers", "ctrl+shift+p")
+        await asyncio.sleep(0.8)
+        if await _output("xdotool", "getactivewindow") != window:
+            return False
+        await _run_quiet("xdotool", "type", "--delay", "20", "Claude Code: Open in New Tab")
+        await asyncio.sleep(1)
+        await _run_quiet("xdotool", "key", "Return")
+        await asyncio.sleep(3)
+        title = await _output("xdotool", "getwindowname", window)
+        return title.startswith("Claude Code")
+
+    async def type_into_claude_tab(self, window: str, folder: str, text: str) -> bool:
+        """Type *text* (newlines as Shift+Enter) and send it, only if the
+        window is still showing the new Claude tab."""
+        if not await self._focus(window):
+            return False
+        title = await _output("xdotool", "getwindowname", window)
+        if not title.startswith(f"Claude Code - {folder}"):
+            return False
+        for i, line in enumerate(text.split("\n")):
+            if i:
+                await _run_quiet("xdotool", "key", "shift+Return")
+            if line:
+                await _run_quiet("xdotool", "type", "--delay", "12", line)
+        await asyncio.sleep(0.3)
+        if await _output("xdotool", "getactivewindow") != window:
+            return False
+        await _run_quiet("xdotool", "key", "Return")
+        return True
+
+
+_desktop = _Desktop()
 
 
 def _open_session_for(sessions, cwd: str):
@@ -456,6 +538,8 @@ class TelegramIO:
         self._target_label: str | None = None
         self._pin_file = Path(cfg.db_path).parent / "telegram-pinned-target.json"
         self._move_seq = 0
+        # A new Claude tab opened by /open, waiting for its first message.
+        self._pending_tab: dict | None = None
         # Message ids this process sent: the hook-button watcher skips them.
         self._own_sent: set = set()
         self._hook_buttons_task: asyncio.Task | None = None
@@ -1153,6 +1237,8 @@ class TelegramIO:
 
             if action == "tog":
                 await self.controls.toggle(project, not row["enabled"])
+                if not row["enabled"]:
+                    await self._opened_on_enable(project)
             elif action == "verb":
                 await self.controls.set_verbose(project, not row.get("verbose", False))
             elif action in {"sel"}:
@@ -1179,6 +1265,8 @@ class TelegramIO:
                     text,
                     build_projects_list_markup(snap),
                 )
+                if not turning_off:
+                    await self._opened_on_enable(project)
                 return
             elif action == "mode":
                 await self._edit_callback_markup(query, build_mode_markup(snap_list, idx))
@@ -1435,6 +1523,10 @@ class TelegramIO:
         name = context.args[0]
         result = await self.controls.create_project(name)
         await msg.reply_text(result)
+        # create_project selects the project it made (or found).
+        created = next((r["project"] for r in self.controls.snapshot() if r.get("last_active")), None)
+        if created:
+            await self._opened_on_enable(created)
 
     async def _cmd_on(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1449,6 +1541,8 @@ class TelegramIO:
             return
         await self.controls.toggle(project, True)
         await msg.reply_text(t("projects.on", project=project or t("projects.all")))
+        if project:
+            await self._opened_on_enable(project)
 
     async def _cmd_off(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2375,6 +2469,99 @@ class TelegramIO:
         except Exception:  # noqa: BLE001 - the pin is a courtesy, never a failure
             logger.exception("target: could not update the pinned message")
 
+    async def open_on_pc(self, project: str, text: str | None = None) -> str:
+        """Open *project* in VS Code on this PC with a new Claude tab.
+
+        The Claude extension cannot be told from outside to start a
+        conversation (its /open link only pre-fills the current tab), so the
+        tab is opened through the command palette by simulated keystrokes --
+        each step only after checking that the project's VS Code window is the
+        active one, so nothing is ever typed into another window. The first
+        message (*text* now, or the next plain Telegram message) is typed in
+        and sent; that starts the session, which is then joined and pinned.
+        Returns the text to show."""
+        row = _find_project_row(self.controls.snapshot(), project)
+        if row is None or not row.get("cwd"):
+            return t("projects.unknown", name=project, known="/projects")
+        cwd, label = row["cwd"], row.get("display_name") or project
+        if not self._claude_live_enabled:
+            return t("codex.no_live")
+        existing = _open_session_for(
+            live.list_sessions(Path.home() / ".claude" / "sessions"), cwd
+        )
+        if existing is not None:
+            # Already open in the editor: join that conversation instead.
+            await self._attach_live(str(existing.pid))
+            if text:
+                await self.live_send(text)
+            return t("open.already", project=label)
+        if not shutil.which("code") or not shutil.which("xdotool"):
+            return t("open.no_tools")
+        await asyncio.to_thread(accounts.trust_folder, Path.home(), cwd)
+        await _run_quiet("code", cwd)
+        window = await _desktop.wait_window(Path(cwd).name)
+        if window is None:
+            return t("open.no_window", project=label)
+        if not await _desktop.new_claude_tab(window):
+            return t("open.focus_lost", project=label)
+        self._pending_tab = {"project": project, "cwd": cwd, "window": window, "label": label}
+        self._detach_live()
+        await self._show_target(t("target.new_tab", project=label))
+        if text:
+            return await self.send_to_pending_tab(text)
+        return t("open.tab_ready", project=label)
+
+    def pending_tab(self) -> dict | None:
+        return self._pending_tab
+
+    async def send_to_pending_tab(self, text: str) -> str:
+        """Type *text* into the new Claude tab and start its session."""
+        tab, self._pending_tab = self._pending_tab, None
+        if tab is None:
+            return t("open.no_tab")
+        started_ms = int(time.time() * 1000) - 2000
+        if not await _desktop.type_into_claude_tab(tab["window"], Path(tab["cwd"]).name, text):
+            return t("open.focus_lost", project=tab["label"])
+        sessions_dir = Path.home() / ".claude" / "sessions"
+        for _ in range(30):
+            await asyncio.sleep(1)
+            fresh = [x for x in live.list_sessions(sessions_dir) if x.started_at >= started_ms]
+            session = _open_session_for(fresh, tab["cwd"])
+            if session is not None:
+                await self._attach_live(str(session.pid))
+                return t("open.ready", project=tab["label"])
+        return t("open.timeout", project=tab["label"])
+
+    async def _cmd_open(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/open <project>: open it on this PC and write into it from here."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        if not context.args:
+            await msg.reply_text(t("open.usage"))
+            return
+        project, error = self._resolve_project_arg(context.args[0])
+        if error or project is None:
+            await msg.reply_text(error or t("open.usage"))
+            return
+        await msg.reply_text(t("open.starting", project=project))
+        if not await self._is_enabled(project):
+            await self.controls.toggle(project, True)
+        text = " ".join(context.args[1:]).strip() or None
+        await msg.reply_text(await self.open_on_pc(project, text))
+
+    async def _is_enabled(self, project: str) -> bool:
+        row = _find_project_row(self.controls.snapshot(), project)
+        return bool(row and row.get("enabled"))
+
+    async def _opened_on_enable(self, project: str) -> None:
+        """After a project is switched on: open it on the PC when configured."""
+        if getattr(self.cfg, "open_claude_tab_on_enable", False):
+            await self._send_plain(t("open.starting", project=project))
+            await self._send_plain(await self.open_on_pc(project))
+
     async def focus_project(self, project: str) -> None:
         """Make *project* the current one: its open editor session if there is
         one (attached, streamed, pinned), otherwise its bridge session."""
@@ -2705,6 +2892,8 @@ class TelegramIO:
             CommandHandler("agent", self._cmd_agent, filters=only_me))
         app.add_handler(
             CommandHandler("pc", self._cmd_pc, filters=only_me))
+        app.add_handler(
+            CommandHandler("open", self._cmd_open, filters=only_me))
         app.add_handler(
             CommandHandler("account", self._cmd_account, filters=only_me))
         app.add_handler(

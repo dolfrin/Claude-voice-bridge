@@ -70,6 +70,20 @@ def _current(home: Path) -> tuple[str, dict] | None:
     }
 
 
+def trust_folder(home: Path, cwd: str) -> None:
+    """Mark *cwd* trusted in ``~/.claude.json`` so a fresh ``claude`` there
+    does not stop at the "Do you trust this folder?" prompt nobody is at
+    the PC to answer. Called only for a project the user opens from the
+    bridge, which is that trust given."""
+    config_path = home / ".claude.json"
+    config = _read(config_path)
+    entry = config.setdefault("projects", {}).setdefault(cwd, {})
+    if entry.get("hasTrustDialogAccepted") is True:
+        return
+    entry["hasTrustDialogAccepted"] = True
+    _write(config_path, config, _mode(config_path, 0o644))
+
+
 def remember(home: Path, vault: Path) -> str | None:
     """Save the current login into the vault; its account uuid, or None."""
     current = _current(home)
