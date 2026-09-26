@@ -3674,7 +3674,7 @@ async def test_restore_live_reattaches_to_a_session_that_is_still_up(monkeypatch
     )
     attached: list[str] = []
 
-    async def fake_attach(pid_str):
+    async def fake_attach(pid_str, why="?"):
         attached.append(pid_str)
         return "ok"
 
@@ -3723,7 +3723,8 @@ async def test_restore_live_survives_a_registry_caught_mid_write(monkeypatch, tm
 
     await io._restore_live()
 
-    io._attach_live.assert_awaited_once_with("8")
+    io._attach_live.assert_awaited_once()
+    assert io._attach_live.await_args.args[0] == "8"
     assert marker.exists()
 
 

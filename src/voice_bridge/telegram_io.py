@@ -1181,7 +1181,7 @@ class TelegramIO:
             await query.edit_message_text(t("ask.selected", choice=choice))
             return
         if action == "live":
-            await query.edit_message_text(await self._attach_live(index_str))
+            await query.edit_message_text(await self._attach_live(index_str, why="/live pick"))
             if self._live_session is not None:
                 # "🔗 Prisijungta" is what one naturally replies to next.
                 await self._remember_sent(
@@ -2419,7 +2419,7 @@ class TelegramIO:
     async def _send_to(self, session, text: str, spoken: bool) -> bool:
         """Attach to *session* (so its answer streams back) and send *text*."""
         if self._live_session is None or self._live_session.pid != session.pid:
-            await self._attach_live(str(session.pid))
+            await self._attach_live(str(session.pid), why="message routed there")
         sent = await self.live_send(text, spoken=spoken)
         if sent:
             await self.note_route(
@@ -2724,7 +2724,7 @@ class TelegramIO:
             reply_markup=InlineKeyboardMarkup(rows),
         )
 
-    async def _attach_live(self, pid_str: str) -> str:
+    async def _attach_live(self, pid_str: str, why: str = "?") -> str:
         """Attach to the session with this pid; returns the reply text."""
         if not self._claude_live_enabled:
             return t("codex.no_live")
@@ -2740,6 +2740,10 @@ class TelegramIO:
         self._write_live_marker(session.session_id)
         self._live_task = asyncio.create_task(self._tail_live(session))
         self._bridge_project = None
+        # Every change of the current session, with its cause: once it moved
+        # to another session with no tap the user remembered, and nothing
+        # recorded why.
+        logger.info("current session -> %s (%s)", session.session_id, why)
         # Joined deliberately (or restored after a restart) and pinned below:
         # the next message there is not a change of destination to announce.
         self._last_route = session.session_id
@@ -2834,7 +2838,7 @@ class TelegramIO:
         )
         if existing is not None:
             # Already open in the editor: join that conversation instead.
-            await self._attach_live(str(existing.pid))
+            await self._attach_live(str(existing.pid), why="/open: already open")
             if text:
                 await self.live_send(text)
             return t("open.already", project=label)
@@ -2871,7 +2875,7 @@ class TelegramIO:
             fresh = [x for x in live.list_sessions(sessions_dir) if x.started_at >= started_ms]
             session = _open_session_for(fresh, tab["cwd"])
             if session is not None:
-                await self._attach_live(str(session.pid))
+                await self._attach_live(str(session.pid), why="new VS Code tab started")
                 return t("open.ready", project=tab["label"])
         return t("open.timeout", project=tab["label"])
 
@@ -2974,7 +2978,7 @@ class TelegramIO:
                     live.list_sessions(Path.home() / ".claude" / "sessions"), row["cwd"]
                 )
         if session is not None:
-            await self._attach_live(str(session.pid))
+            await self._attach_live(str(session.pid), why="project chosen (/projects, settings)")
         else:
             await self.use_bridge_session(project)
 
@@ -3005,7 +3009,7 @@ class TelegramIO:
         elif getattr(self._live_session, "session_id", None) == session_id:
             label = t("target.now_here")  # already the current one
         else:
-            await self._attach_live(str(match.pid))
+            await self._attach_live(str(match.pid), why="🎯 switch button")
             label = t("target.now_here")
         await self._edit_callback_markup(query, InlineKeyboardMarkup([[
             InlineKeyboardButton(label, callback_data="noop:")
@@ -3387,7 +3391,7 @@ class TelegramIO:
             for attempt in range(6):
                 for session in live.list_sessions():
                     if session.session_id == session_id:
-                        await self._attach_live(str(session.pid))
+                        await self._attach_live(str(session.pid), why="restore after restart")
                         logger.info("live: re-joined %s after start", session_id)
                         return
                 await asyncio.sleep(2)
