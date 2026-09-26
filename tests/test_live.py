@@ -480,3 +480,19 @@ def test_current_activity_reports_a_tool_still_running(tmp_path):
             "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}}
     path.write_text(_json.dumps(run) + "\n" + _json.dumps(done) + "\n")
     assert live.current_activity(path)[0] == "🤔"  # the tool finished
+
+
+def test_stop_commands_hits_only_the_bash_tool_tree():
+    tree = {100: [200, 300, 400], 400: [401], 401: [402]}
+    cmd = {200: "npm exec @playwright/mcp", 300: "node server.js",
+           400: "/bin/bash -c source /home/u/.claude/shell-snapshots/snapshot-bash-1.sh && pytest",
+           401: "timeout 300 pytest", 402: "python -m pytest"}
+    killed = []
+
+    stopped = live.stop_commands(
+        100, children=lambda p: tree.get(p, []), cmdline=lambda p: cmd.get(p, ""),
+        kill=lambda pid, sig: killed.append(pid), sleep=lambda s: None,
+    )
+
+    assert stopped == 1
+    assert set(killed) == {400, 401, 402}  # MCP servers 200/300 untouched

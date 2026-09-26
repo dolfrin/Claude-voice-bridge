@@ -1212,6 +1212,9 @@ class TelegramIO:
             else:
                 await query.edit_message_text(t("answer.failed"))
             return
+        if action == "intr":
+            await self._handle_interrupt(query, index_str)
+            return
         if action in {"cm", "cmopen"}:
             await self._handle_choice(query, action, index_str)
             return
@@ -1940,7 +1943,8 @@ class TelegramIO:
             live.transcript_of(Path.home() / ".claude" / "projects", session.session_id)
         )
         if activity is None:
-            await self._send_plain(t("route.busy", label=self.session_label(session)))
+            await self._send_plain(t("route.busy", label=self.session_label(session)),
+                                   self._interrupt_markup(session))
             return
         what, since = activity
         minutes = max(0, int((now - since) // 60))
@@ -1948,7 +1952,45 @@ class TelegramIO:
             "route.for_hours", h=minutes // 60, m=minutes % 60
         )
         what = t("route.thinking") if what == "🤔" else what
-        await self._send_plain(t("route.busy_doing", label=self.session_label(session), what=what, took=took))
+        await self._send_plain(
+            t("route.busy_doing", label=self.session_label(session), what=what, took=took),
+            self._interrupt_markup(session),
+        )
+
+    def _interrupt_markup(self, session) -> InlineKeyboardMarkup | None:
+        """"⛔ Stop" while the session runs a command (the thing that hangs)."""
+        if not live.running_commands(session.pid):
+            return None
+        return InlineKeyboardMarkup([[InlineKeyboardButton(
+            t("interrupt.button"), callback_data=f"intr:ask:{session.session_id}"
+        )]])
+
+    async def _handle_interrupt(self, query, arg: str) -> None:
+        step, _, session_id = arg.partition(":")
+        if step == "no":
+            await self._edit_callback_markup(query, InlineKeyboardMarkup([[
+                InlineKeyboardButton(t("interrupt.cancelled"), callback_data="noop:")
+            ]]))
+            return
+        session = next((x for x in live.list_sessions(Path.home() / ".claude" / "sessions")
+                        if x.session_id == session_id), None)
+        if session is None:
+            await query.message.reply_text(t("target.gone"))
+            return
+        label = self.session_label(session)
+        if step == "ask":
+            await query.message.reply_text(t("interrupt.confirm", label=label), reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(t("answer.yes_button"), callback_data=f"intr:go:{session_id}"),
+                InlineKeyboardButton(t("answer.no_button"), callback_data=f"intr:no:{session_id}"),
+            ]]))
+            return
+        await self._edit_callback_markup(query, InlineKeyboardMarkup([[
+            InlineKeyboardButton(t("interrupt.doing"), callback_data="noop:")
+        ]]))
+        stopped = await asyncio.to_thread(live.stop_commands, session.pid)
+        await self._send_plain(
+            t("interrupt.done", label=label) if stopped else t("interrupt.nothing", label=label)
+        )
 
     def _current_idx(self) -> int | None:
         """Snapshot index of the current project (⭐), else the first on."""

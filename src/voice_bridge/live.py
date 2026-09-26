@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
+import time
 from datetime import datetime
 import logging
 import re
@@ -593,3 +596,67 @@ def current_activity(path: Path | None, tail_bytes: int = 512 * 1024) -> tuple[s
                     return "🤔", ts
             return "🤔", ts
     return None
+
+
+def _children_from_proc(pid: int) -> list[int]:
+    """Child pids of *pid*, read from /proc (Linux)."""
+    out: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text()
+        except OSError:
+            continue
+        # "pid (comm) state ppid ..." -- comm may contain spaces/parens.
+        fields = stat.rsplit(")", 1)[-1].split()
+        if len(fields) > 1 and fields[1] == str(pid):
+            out.append(int(entry.name))
+    return out
+
+
+def _cmdline(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except OSError:
+        return ""
+
+
+# The Bash tool runs each command as `bash -c source <shell snapshot> ...`;
+# MCP servers and the session itself look nothing like it.
+_BASH_TOOL_MARK = "/.claude/shell-snapshots/"
+
+
+def running_commands(session_pid: int, children=_children_from_proc, cmdline=_cmdline) -> list[int]:
+    """Pids of the Bash-tool commands a session is running right now."""
+    return [c for c in children(session_pid) if _BASH_TOOL_MARK in cmdline(c)]
+
+
+def stop_commands(session_pid: int, children=_children_from_proc, cmdline=_cmdline,
+                  kill=os.kill, sleep=time.sleep) -> int:
+    """Stop the session's running Bash-tool commands -- nothing else.
+
+    The session gets "command terminated" back as the tool's result and
+    carries on, which is what a step stuck for hours needs. Every descendant
+    of each command gets SIGTERM, survivors SIGKILL two seconds later.
+    Returns how many commands were stopped. Never raises.
+    """
+    def tree(pid: int) -> list[int]:
+        found = []
+        for c in children(pid):
+            found += tree(c)
+        return found + [pid]
+
+    commands = running_commands(session_pid, children, cmdline)
+    targets = []
+    for command in commands:
+        targets += tree(command)
+    for signal_number in (signal.SIGTERM, signal.SIGKILL):
+        for pid in targets:
+            try:
+                kill(pid, signal_number)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if signal_number == signal.SIGTERM and targets:
+            sleep(2)
+    return len(commands)

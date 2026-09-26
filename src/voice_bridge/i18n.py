@@ -742,3 +742,19 @@ LT.update({
     "route.for_minutes": "{n} min",
     "route.for_hours": "{h} val. {m} min",
 })
+EN.update({
+    "interrupt.button": "⛔ Stop it",
+    "interrupt.confirm": "Stop the command {label} is running? It gets \u201ccommand terminated\u201d back and carries on (and sees your message).",
+    "interrupt.cancelled": "Cancelled — it keeps working.",
+    "interrupt.doing": "⛔ Stopping…",
+    "interrupt.done": "⛔ {label}: the command was stopped; it carries on from there.",
+    "interrupt.nothing": "{label} is not running a command right now (it is thinking) — nothing to stop.",
+})
+LT.update({
+    "interrupt.button": "⛔ Nutraukti",
+    "interrupt.confirm": "Sustabdyti komandą, kurią vykdo {label}? Ji gaus „komanda nutraukta“ ir tęs toliau (pamatys ir tavo žinutę).",
+    "interrupt.cancelled": "Atšaukta — dirba toliau.",
+    "interrupt.doing": "⛔ Nutraukiu…",
+    "interrupt.done": "⛔ {label}: komanda sustabdyta, sesija tęsia nuo ten.",
+    "interrupt.nothing": "{label} dabar nevykdo komandos (mąsto) — nėra ko stabdyti.",
+})
