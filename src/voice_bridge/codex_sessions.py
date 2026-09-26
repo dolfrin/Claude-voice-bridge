@@ -28,12 +28,12 @@ from .config import (
 from .routing import Store
 from .transcript import append_transcript
 from .types import Outbound
+from .i18n import t
 
 logger = logging.getLogger(__name__)
 
 _SHUTDOWN = object()
 _SILENT_SPOKEN = " "
-_TURN_ERROR_SPOKEN = "Turas baigėsi klaida."
 _VOICE_INSTRUCTION = (
     "When you send a user-facing final answer, make the first line a short, "
     "spoken-friendly summary with no code, paths, or commands. Then put a "
@@ -158,8 +158,8 @@ class CodexSessionManager:
                 await self._safe_outbound(
                     Outbound(
                         project=name,
-                        text=f"{name}: nepavyko paleisti Codex — {exc}",
-                        spoken="nepavyko paleisti Codex",
+                        text=t("codex.start_failed", project=name, error=exc),
+                        spoken=t("codex.start_failed_spoken"),
                         alert=True,
                     )
                 )
@@ -172,8 +172,8 @@ class CodexSessionManager:
                 await self._safe_outbound(
                     Outbound(
                         project=name,
-                        text=f"{name}: nepavyko atidaryti Codex gijos — {exc}",
-                        spoken="nepavyko atidaryti Codex gijos",
+                        text=t("codex.thread_failed", project=name, error=exc),
+                        spoken=t("codex.thread_failed_spoken"),
                         alert=True,
                     )
                 )
@@ -276,8 +276,8 @@ class CodexSessionManager:
                 await self._safe_outbound(
                     Outbound(
                         project=project,
-                        text=f"{project}: Codex nepasiekiamas — {exc}",
-                        spoken="Codex nepasiekiamas",
+                        text=t("codex.unreachable", project=project, error=exc),
+                        spoken=t("codex.unreachable_spoken"),
                         alert=True,
                     )
                 )
@@ -289,7 +289,7 @@ class CodexSessionManager:
         await session.queue.put(text)
         if position > 1:
             await self._safe_outbound(
-                Outbound(project=project, text=f"Queued: {position}.", spoken=" ", transient=True)
+                Outbound(project=project, text=t("status.queued", n=position), spoken=" ", transient=True)
             )
 
     async def _run_loop(self, session: _CodexSession) -> None:
@@ -306,8 +306,8 @@ class CodexSessionManager:
                 await self._safe_outbound(
                     Outbound(
                         project=session.project.name,
-                        text=f"Codex turas nutrūko: {exc}",
-                        spoken=_TURN_ERROR_SPOKEN,
+                        text=t("codex.turn_broke", error=exc),
+                        spoken=t("session.turn_error"),
                         alert=True,
                     )
                 )
@@ -321,7 +321,7 @@ class CodexSessionManager:
             logger.warning("reconnecting Codex app-server before turn for %s", name)
         await self._ensure_client()
         await self._safe_outbound(
-            Outbound(project=name, text="Working.", spoken=_SILENT_SPOKEN, transient=True)
+            Outbound(project=name, text=t("status.working"), spoken=_SILENT_SPOKEN, transient=True)
         )
         await append_transcript(session.project.cwd, "user", text)
         params: dict[str, Any] = {
@@ -369,8 +369,8 @@ class CodexSessionManager:
             await self._safe_outbound(
                 Outbound(
                     project=name,
-                    text=detail or "Codex turas baigėsi klaida.",
-                    spoken=_TURN_ERROR_SPOKEN,
+                    text=detail or t("codex.turn_error"),
+                    spoken=t("session.turn_error"),
                     alert=True,
                 )
             )
@@ -578,7 +578,7 @@ class CodexSessionManager:
             except asyncio.QueueEmpty:
                 break
         await self._safe_outbound(
-            Outbound(project=project, text="Interrupted.", spoken=_SILENT_SPOKEN, transient=True)
+            Outbound(project=project, text=t("status.interrupted"), spoken=_SILENT_SPOKEN, transient=True)
         )
         return was_active
 

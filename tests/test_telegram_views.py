@@ -25,7 +25,7 @@ _REEXPORTED = [
     "_clean_choices",
     "_MODES",
     "_ENGINES",
-    "_BOT_COMMANDS",
+    "bot_commands",
 ]
 
 

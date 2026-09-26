@@ -16,6 +16,8 @@ import yaml
 # sets are derived below so accepted values stay in sync automatically.
 AUTONOMY_MODES = ("safe", "full", "ask")
 AGENT_BACKENDS = ("claude", "codex")
+# Language the bot speaks to the user; English unless BOT_LANGUAGE says lt.
+BOT_LANGUAGES = ("en", "lt")
 TTS_BACKENDS = ("auto", "openai", "piper", "together", "lithuanian")
 # Canonical, ORDERED source of truth for the per-project reasoning effort. The
 # SDK's ClaudeAgentOptions.effort accepts exactly these levels; passing None
@@ -68,6 +70,7 @@ class Config:
     # Optional shared Codex endpoint. Empty keeps the private stdio child for
     # backwards compatibility; unix:///... lets Telegram and IDE share it.
     codex_app_server_url: str = ""
+    bot_language: str = "en"
 
 
 @dataclass
@@ -160,6 +163,13 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             f"{sorted(_VALID_AGENT_BACKENDS)}, got: {agent_backend!r}"
         )
 
+    bot_language = (env.get("BOT_LANGUAGE") or "en").strip().lower()
+    if bot_language not in BOT_LANGUAGES:
+        raise ValueError(
+            f"Config key BOT_LANGUAGE must be one of {list(BOT_LANGUAGES)}, "
+            f"got: {bot_language!r}"
+        )
+
     return Config(
         telegram_bot_token=_require(env, "TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_id=_require_int(env, "TELEGRAM_ALLOWED_USER_ID"),
@@ -190,6 +200,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         catchup_idle_minutes=_optional_int(env, "CATCHUP_IDLE_MINUTES", 10),
         agent_backend=agent_backend,
         codex_app_server_url=(env.get("CODEX_APP_SERVER_URL") or "").strip(),
+        bot_language=bot_language,
     )
 
 

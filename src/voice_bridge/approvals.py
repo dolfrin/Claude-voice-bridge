@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from voice_bridge.config import Config, ProjectConfig, effective_autonomy
+from voice_bridge.i18n import t
 from voice_bridge.notify_tool import SEND_FILE_TOOL_NAME
 
 logger = logging.getLogger(__name__)
@@ -562,12 +563,12 @@ _TRUNCATE_MARKER = "…"
 # command or path (that would leak code into voice); it stays a short action so
 # a walking user hears *what kind* of thing is being asked, then reads the text.
 _SPOKEN_ACTIONS = {
-    "Bash": "paleisti komandą",
-    "Write": "įrašyti failą",
-    "Edit": "redaguoti failą",
-    "MultiEdit": "redaguoti failą",
-    "Read": "perskaityti failą",
-    "NotebookEdit": "redaguoti užrašinę",
+    "Bash": "approval.act_run",
+    "Write": "approval.act_write",
+    "Edit": "approval.act_edit",
+    "MultiEdit": "approval.act_edit",
+    "Read": "approval.act_read",
+    "NotebookEdit": "approval.act_notebook",
 }
 # Tool-input keys worth surfacing (in order) for tools without a bespoke branch.
 _OTHER_PREVIEW_KEYS = (
@@ -644,13 +645,13 @@ def format_approval_preview(tool_name: str, tool_input: dict) -> str:
 
 def format_approval_spoken(project: str, tool_name: str, tool_input: dict) -> str:
     """Return the code-free spoken approval line (no command/path leaks)."""
-    action = _SPOKEN_ACTIONS.get(tool_name, "atlikti veiksmą")
-    return f"{project} nori {action} — leidžiu?"
+    action = t(_SPOKEN_ACTIONS.get(tool_name, "approval.act_other"))
+    return t("approval.spoken", project=project, action=action)
 
 
 def _format_question(project: str, preview: str) -> str:
     """Build the approval message TEXT (carries the preview for the user)."""
-    return f"{project} — approval reikalingas:\n\n{preview}"
+    return t("approval.question", project=project, preview=preview)
 
 
 class ApprovalManager:
@@ -738,8 +739,7 @@ class ApprovalManager:
                 try:
                     await self._notify(
                         project,
-                        f"⏱ Neatsakyta per {self._timeout}s — atmesta: {tool_name}. "
-                        "Agentas tęsė be jo.",
+                        t("approval.timed_out", seconds=self._timeout, tool=tool_name),
                     )
                 except Exception:  # noqa: BLE001 - the denial stands either way
                     logger.exception(

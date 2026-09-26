@@ -393,3 +393,15 @@ def test_set_env_value_appends_missing_key_and_drops_duplicates(tmp_path):
     set_env_value(str(env), "AGENT_BACKEND", "claude")
 
     assert env.read_text() == "# AGENT_BACKEND=codex\nA=3\nAGENT_BACKEND=claude\n"
+
+
+def test_bot_language_defaults_to_english_and_accepts_lt_only():
+    import pytest
+
+    assert load_config(_full_env()).bot_language == "en"
+    env = _full_env()
+    env["BOT_LANGUAGE"] = "LT"
+    assert load_config(env).bot_language == "lt"
+    env["BOT_LANGUAGE"] = "de"
+    with pytest.raises(ValueError, match="BOT_LANGUAGE"):
+        load_config(env)

@@ -1058,9 +1058,9 @@ async def test_cmd_help_non_owner_ignored():
 
 
 def test_help_command_registered_in_bot_commands():
-    from voice_bridge.telegram_io import _BOT_COMMANDS
+    from voice_bridge.telegram_io import bot_commands
 
-    assert "help" in {c.command for c in _BOT_COMMANDS}
+    assert "help" in {c.command for c in bot_commands()}
 
 
 @pytest.mark.asyncio
@@ -1092,7 +1092,7 @@ async def test_ask_user_sends_buttons_and_returns_selected_choice():
     await io._handle_callback(update, MagicMock())
 
     assert await task == "B"
-    query.edit_message_text.assert_awaited_once_with("Selected: B")
+    query.edit_message_text.assert_awaited_once_with("Pasirinkta: B")
 
 
 # --------------------------------------------------------------------------
@@ -1611,7 +1611,7 @@ def test_build_mode_markup_lists_explicit_modes():
     texts = [b.text for row in markup.inline_keyboard for b in row]
     data = [b.callback_data for row in markup.inline_keyboard for b in row]
 
-    assert "qwing mode" in texts
+    assert "qwing režimas" in texts
     assert "✓ safe" in texts
     assert "full" in texts
     assert "ask" in texts
@@ -1625,7 +1625,7 @@ def test_build_voice_markup_lists_explicit_voices():
     texts = [b.text for row in markup.inline_keyboard for b in row]
     data = [b.callback_data for row in markup.inline_keyboard for b in row]
 
-    assert "qwing voice" in texts
+    assert "qwing balsas" in texts
     assert "✓ alloy" in texts
     assert "ash" in texts
     assert "echo" in texts
@@ -1894,7 +1894,7 @@ async def test_callback_disabled_project_prompt_enables_and_sends():
 
     assert ("enable_and_deliver", "othersapp", "go") in controls.calls
     query.edit_message_text.assert_awaited_once_with(
-        "Enabled and sent to othersapp."
+        "Įjungta ir nusiųsta į othersapp."
     )
     assert io._pending_off_sends == {}
 
@@ -1915,7 +1915,7 @@ async def test_callback_disabled_project_prompt_can_cancel():
     await io._handle_callback(update, MagicMock())
 
     assert controls.calls == []
-    query.edit_message_text.assert_awaited_once_with("Cancelled: othersapp")
+    query.edit_message_text.assert_awaited_once_with("Atšaukta: othersapp")
     assert io._pending_off_sends == {}
 
 
@@ -2075,13 +2075,15 @@ async def test_cmd_panel_replies_with_markup():
 async def test_cmd_menu_replies_with_main_menu():
     controls = FakeControls()
     io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    io.app = MagicMock()
+    io.app.bot.first_name = "Alex for Claude"  # the menu is titled with the bot's own name
     upd = make_cmd_update("/menu")
 
     await io._cmd_menu(upd, MagicMock())
 
     sent = upd.message.reply_text.await_args.args[0]
     markup = upd.message.reply_text.await_args.kwargs["reply_markup"]
-    assert "Alex for Claude" in sent
+    assert sent == "🏠 Alex for Claude"
     assert markup.inline_keyboard[0][0].callback_data == "menu:projects"
 
 
@@ -2226,7 +2228,7 @@ async def test_cmd_projects_refresh_scans_and_lists_all_projects():
     assert ("refresh_projects",) in controls.calls
     sent = upd.message.reply_text.await_args.args[0]
     kwargs = upd.message.reply_text.await_args.kwargs
-    assert "New projects added: 1" in sent
+    assert "Rasta naujų projektų: 1" in sent
     assert "<b>fresh</b>" in sent
     assert kwargs["reply_markup"].inline_keyboard[2][0].callback_data == "sel:2"
 
@@ -2765,7 +2767,7 @@ async def test_cmd_handoff_replies_with_active_project_transcript(tmp_path):
     await io._cmd_handoff(upd, make_ctx([]))
 
     sent = upd.message.reply_text.await_args.args[0]
-    assert "qwing handoff" in sent
+    assert "qwing santrauka" in sent
     assert "voice-bridge-chat.md" in sent
     assert "labas" in sent
     assert "padariau" in sent
@@ -2780,7 +2782,7 @@ async def test_cmd_handoff_unknown_project_replies_help():
     await io._cmd_handoff(upd, make_ctx(["nope"]))
 
     sent = upd.message.reply_text.await_args.args[0]
-    assert "Project not found" in sent
+    assert "Projektas nerastas" in sent
 
 
 @pytest.mark.asyncio
@@ -3117,7 +3119,7 @@ async def test_resolve_ask_numeric_picks_choice_by_index():
     assert future.result() == "Rollback"
     await asyncio.sleep(0)
     bot.edit_message_text.assert_awaited_once()
-    assert bot.edit_message_text.await_args.kwargs["text"] == "Answered: Rollback"
+    assert bot.edit_message_text.await_args.kwargs["text"] == "Atsakyta: Rollback"
 
 
 @pytest.mark.asyncio

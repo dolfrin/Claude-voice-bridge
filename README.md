@@ -56,6 +56,7 @@ Design notes: [`docs/DESIGN.md`](docs/DESIGN.md).
 | 🔘 | Agent buttons | Claude `ask_user` and Codex `request_user_input` show tappable Telegram choices |
 | 📤 | File delivery | Claude can call `send_file` to send project-local files back |
 | 🧠 | Session resume | Claude session IDs and Codex thread IDs persist in SQLite and resume after restart; a conversation open elsewhere is forked, never opened twice |
+| 🌐 | Two languages | The bot speaks English or Lithuanian (`BOT_LANGUAGE=en\|lt`) |
 | 🇱🇹 | Lithuanian TTS | Optional local `lithuanian` TTS engine (Piper reginute1 voice) |
 | 🛡 | Safe mode | Risky tool calls ask for Telegram approval before running |
 
@@ -318,6 +319,9 @@ TELEGRAM_ALLOWED_USER_ID=11223344
 AGENT_BACKEND=claude
 # Optional shared Codex endpoint (see "Claude or Codex" below)
 # CODEX_APP_SERVER_URL=unix:///run/user/1000/codex-shared/app-server.sock
+
+# Language the bot speaks to you: en (default) or lt (Lithuanian)
+BOT_LANGUAGE=en
 
 # TTS: choose auto, openai, piper, together, or lithuanian
 # auto uses Piper only for English-looking text and OpenAI for everything else.

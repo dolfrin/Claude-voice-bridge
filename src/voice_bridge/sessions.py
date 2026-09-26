@@ -65,6 +65,7 @@ from .notify_tool import (
 from .routing import Store
 from .transcript import append_transcript
 from .types import Outbound
+from .i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +88,7 @@ _VOICE_SPLIT_INSTRUCTION = (
 # Sentinel pushed onto a session queue to ask its loop to exit cleanly.
 _SHUTDOWN = None
 
-_ERROR_SPOKEN = "The session crashed. Check the text."
 _SILENT_SPOKEN = " "
-_TURN_ERROR_SPOKEN = "Turas baigėsi klaida."
-_GIVEUP_SPOKEN = "Sesija nekyla, ją išjungiau."
 
 # Per-turn "still working" heartbeat. A multi-minute tool-running turn emits no
 # user-facing text until it finishes, which reads as total silence to a walking
@@ -98,8 +96,6 @@ _GIVEUP_SPOKEN = "Sesija nekyla, ją išjungiau."
 # silence (reset whenever the loop receives assistant text), so it never fires
 # on a fast turn and stays non-spammy on a slow one.
 _HEARTBEAT_INTERVAL = 60.0
-_HEARTBEAT_TEXT = "Vis dar dirbu…"
-_HEARTBEAT_SPOKEN = "Vis dar dirbu…"
 
 # Supervised auto-restart policy. Backoff grows exponentially from *base*
 # seconds, doubling per attempt, capped at *cap*. After *max* consecutive
@@ -306,8 +302,8 @@ class SessionManager:
                     await self._on_outbound(
                         Outbound(
                             project=name,
-                            text=f"{name}: nepavyko paleisti — {err}",
-                            spoken="nepavyko paleisti",
+                            text=t("session.start_failed", project=name, error=err),
+                            spoken=t("session.start_failed_spoken"),
                         )
                     )
                 except Exception:  # pragma: no cover - defensive
@@ -355,7 +351,7 @@ class SessionManager:
         position = sess.queue.qsize() + 1
         await sess.queue.put((text, mirror_text))
         if position > 1:
-            await self._emit_status(project, f"Queued: {position}.")
+            await self._emit_status(project, t("status.queued", n=position))
 
     async def _maybe_catchup(self, project: str) -> str:
         """Build the IDE catch-up block for *project*, guarded so a failure
@@ -411,8 +407,8 @@ class SessionManager:
                     await self._on_outbound(
                         Outbound(
                             project=name,
-                            text=f"{name}: nepavyko paleisti — {err}",
-                            spoken="nepavyko paleisti",
+                            text=t("session.start_failed", project=name, error=err),
+                            spoken=t("session.start_failed_spoken"),
                             alert=True,
                         )
                     )
@@ -433,7 +429,7 @@ class SessionManager:
         await self._stop(project)
         if await self._store.is_enabled(project):
             await self._start(project)
-        await self._emit_status(project, "Interrupted.")
+        await self._emit_status(project, t("status.interrupted"))
         return was_running
 
     async def set_enabled(self, project: str, enabled: bool) -> None:
@@ -783,7 +779,7 @@ class SessionManager:
             # latter (Task C — do not echo our own catch-up back into the IDE).
             text, mirror_text = item
             try:
-                await self._emit_status(name, "Working.", transient=True)
+                await self._emit_status(name, t("status.working"), transient=True)
                 await append_transcript(sess.project.cwd, "user", mirror_text)
                 await client.query(text)
                 parts: list[str] = []
@@ -853,9 +849,9 @@ class SessionManager:
                 elif result_error:
                     # The SDK ended the turn in error with no assistant text;
                     # surface something so the user is not left in silence.
-                    detail = result_detail or f"Turas baigėsi klaida: {result_subtype}"
+                    detail = result_detail or t("session.turn_error_detail", detail=result_subtype)
                     await self._on_outbound(
-                        Outbound(project=name, text=detail, spoken=_TURN_ERROR_SPOKEN)
+                        Outbound(project=name, text=detail, spoken=t("session.turn_error"))
                     )
                 # A turn completed without raising: the session is healthy,
                 # so reset the consecutive-restart counter.
@@ -964,8 +960,8 @@ class SessionManager:
                 await self._on_outbound(
                     Outbound(
                         project=name,
-                        text=_HEARTBEAT_TEXT,
-                        spoken=_HEARTBEAT_SPOKEN,
+                        text=t("session.still_working"),
+                        spoken=t("session.still_working"),
                         transient=True,
                     )
                 )
@@ -986,13 +982,13 @@ class SessionManager:
                 await sess.client.disconnect()
             except Exception:  # pragma: no cover - defensive
                 logger.exception("session %s disconnect after crash failed", name)
-        await append_transcript(sess.project.cwd, "system", f"Sesija krito: {err}")
+        await append_transcript(sess.project.cwd, "system", t("session.crashed", error=err))
         try:
             await self._on_outbound(
                 Outbound(
                     project=name,
-                    text=f"Sesija krito: {err}",
-                    spoken=_ERROR_SPOKEN,
+                    text=t("session.crashed", error=err),
+                    spoken=t("session.crashed_spoken"),
                     alert=True,
                 )
             )
@@ -1074,11 +1070,8 @@ class SessionManager:
             await self._on_outbound(
                 Outbound(
                     project=name,
-                    text=(
-                        f"po {n} bandymų sesija nekyla, išjungiau — "
-                        f"/on {name} kai pataisysi"
-                    ),
-                    spoken=_GIVEUP_SPOKEN,
+                    text=t("session.gave_up", n=n, project=name),
+                    spoken=t("session.gave_up_spoken"),
                 )
             )
         except Exception:  # pragma: no cover - defensive

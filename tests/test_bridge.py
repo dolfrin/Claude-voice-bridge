@@ -751,7 +751,7 @@ async def test_make_inbound_empty_transcript_asks_repeat_no_deliver():
 
     assert sessions.delivered == []
     assert len(telegram.questions) == 1
-    assert "did not understand" in telegram.questions[0][1]
+    assert "Nesupratau" in telegram.questions[0][1]
 
 
 @pytest.mark.asyncio
@@ -768,7 +768,7 @@ async def test_make_inbound_voice_without_audio_asks_repeat_no_transcribe():
     assert transcriber.calls == []
     assert sessions.delivered == []
     assert len(telegram.questions) == 1
-    assert "did not understand" in telegram.questions[0][1]
+    assert "Nesupratau" in telegram.questions[0][1]
 
 
 @pytest.mark.asyncio
@@ -815,7 +815,7 @@ async def test_make_inbound_pending_approval_unparseable_asks_again():
     assert approvals.resolved == []
     assert sessions.delivered == []
     assert len(telegram.questions) == 1
-    assert "yes" in telegram.questions[0][1].lower()
+    assert "taip" in telegram.questions[0][1].lower()
 
 
 @pytest.mark.asyncio

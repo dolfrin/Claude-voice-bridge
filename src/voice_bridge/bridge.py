@@ -53,13 +53,11 @@ from .stt import Transcriber
 from .telegram_io import TelegramIO
 from .tts import get_tts
 from .types import Outbound
-from . import sent_log, usage
+from .i18n import t
+from . import i18n, sent_log, usage
 
 logger = logging.getLogger(__name__)
 
-# User-facing micro-copy.
-_MSG_NOT_UNDERSTOOD = "I did not understand. Please repeat."
-_MSG_YES_OR_NO = "Answer yes or no."
 
 # Recap (B3b): bounded per-project buffer of outbound status lines kept in
 # _Controls, rendered synchronously by /recap with no LLM call.
@@ -181,8 +179,8 @@ def _format_elapsed(seconds: float) -> str:
         return f"{minutes} min"
     hours, rem_minutes = divmod(minutes, 60)
     if rem_minutes:
-        return f"{hours} val {rem_minutes} min"
-    return f"{hours} val"
+        return t("duration.hours_minutes", h=hours, m=rem_minutes)
+    return t("duration.hours", h=hours)
 
 
 async def _synthesize(tts_holder: dict, spoken: str, voice: str, project: str) -> bytes | None:
@@ -284,7 +282,7 @@ def make_outbound(
             )
             try:
                 await telegram.send_question(
-                    o.project, "(pranešimo išsiųsti nepavyko — žr. logus)"
+                    o.project, t("outbound.send_failed")
                 )
             except Exception:  # noqa: BLE001 - best effort only, swallow
                 logger.exception(
@@ -403,11 +401,11 @@ def make_inbound(
         if msg.get("is_voice"):
             audio = msg.get("audio")
             if audio is None:
-                await telegram.send_question("bridge", _MSG_NOT_UNDERSTOOD)
+                await telegram.send_question("bridge", t("inbound.not_understood"))
                 return
             text = await transcriber.transcribe(audio)
             if not text.strip():
-                await telegram.send_question("bridge", _MSG_NOT_UNDERSTOOD)
+                await telegram.send_question("bridge", t("inbound.not_understood"))
                 return
         else:
             text = msg.get("text") or ""
@@ -416,7 +414,7 @@ def make_inbound(
         if rid is not None and approvals.has_pending(rid):
             ans = parse_yes_no(text)
             if ans is None:
-                await telegram.send_question("bridge", _MSG_YES_OR_NO)
+                await telegram.send_question("bridge", t("inbound.yes_or_no"))
                 return
             approvals.resolve(rid, ans)
             return
@@ -513,7 +511,7 @@ def make_inbound(
 
         if reason == "none":
             names = ", ".join(sessions.names()) if hasattr(sessions, "names") else ""
-            await telegram.send_question("bridge", f"Which project? {names}".strip())
+            await telegram.send_question("bridge", t("inbound.which_project", names=names).strip())
             return
         text = await _attach_files_to_prompt(project, text, msg, sessions)
         if reason == "off":
@@ -538,7 +536,7 @@ def make_inbound(
         # in a session of its own.
         label = getattr(proj, "display_name", None) or project
         await telegram.note_route(
-            f"bridge:{project}", f"{label} · tilto sesija (VS Code jis neatidarytas)",
+            f"bridge:{project}", t("route.bridge_session", project=label),
             cwd=getattr(proj, "cwd", "") or "",
         )
         await sessions.deliver(project, text)
@@ -583,7 +581,7 @@ async def _append_attachment_transcripts(
             name = item.get("file_name") or "audio"
             transcripts.append(f"- {name}: {transcript.strip()}")
     if transcripts:
-        lines.append("Audio transkripcija:")
+        lines.append(t("inbound.audio_transcript"))
         lines.extend(transcripts)
     return "\n".join(lines).strip()
 
@@ -732,10 +730,8 @@ class _Controls:
             if not lines:
                 continue
             display = self._mirror.get(name, {}).get("display_name", name)
-            parts.append(
-                f"{display} — {len(lines)} atnaujinimai per {elapsed}: {lines[-1]}"
-            )
-        return "\n".join(parts) if parts else "Nieko naujo."
+            parts.append(t("recap.line", project=display, n=len(lines), elapsed=elapsed, last=lines[-1]))
+        return "\n".join(parts) if parts else t("recap.nothing")
 
     # -- Cost / token usage (B3c) -------------------------------------------
 
@@ -850,7 +846,7 @@ class _Controls:
                     target = name
                     break
         if target is None or target not in self._mirror:
-            return "No active project found."
+            return t("stop.no_active")
         stopped = await self._sessions.interrupt(target)
         await self._store.set_last_active(target)
         self.mark_last_active(target)
@@ -899,12 +895,8 @@ class _Controls:
         # Forwarded from Task 8: a live set_mode restarts the session and drops
         # any in-flight turn silently. Tell the user so they can re-issue it.
         if self._telegram is not None:
-            label = project or "visi"
-            await self._telegram.send_question(
-                "bridge",
-                f"Mode changed to {mode} ({label}). "
-                "If a task was running, send it again.",
-            )
+            label = project or t("projects.all")
+            await self._telegram.send_question("bridge", t("mode.changed", mode=mode, project=label))
             # SECURITY: autonomy is the one override whose failed persist is
             # dangerous — a demotion that isn't saved silently re-escalates to
             # the yaml default on the next restart. Surface it so the user knows
@@ -912,8 +904,7 @@ class _Controls:
             if persist_failed:
                 await self._telegram.send_question(
                     "bridge",
-                    "⚠️ Režimo nepavyko išsaugoti — po perkrovimo grįš prie "
-                    "projects.yaml numatytojo. Patikrink diską / DB.",
+                    t("mode.persist_failed"),
                 )
 
     async def set_voice(self, project: str | None, voice: str) -> None:
@@ -984,7 +975,7 @@ class _Controls:
                 f"verbose={verbose}"
             )
         if hidden:
-            lines.append(f"(+{hidden} išjungti — /projects_all)")
+            lines.append(t("info.hidden", n=hidden))
         lines.append(f"engine: {self._cfg.tts_backend}")
         return "\n".join(lines)
 
@@ -1081,11 +1072,7 @@ class _Controls:
         try:
             safe = _sanitize_project_name(name)
             if not safe:
-                return (
-                    f"Netinkamas projekto pavadinimas: {name!r}. Leidžiama tik "
-                    "raidės, skaičiai, taškas, brūkšnys ir apatinis brūkšnys "
-                    "(be tarpų ir kelio simbolių)."
-                )
+                return t("newproject.bad_name", name=repr(name))
 
             target = Path.home() / "Projects" / safe
 
@@ -1097,7 +1084,7 @@ class _Controls:
             if safe in self._mirror:
                 await self.toggle(safe, True)
                 await self.select(safe)
-                return f"Projektas {safe} jau užregistruotas — perjungiau į jį."
+                return t("newproject.exists", project=safe)
 
             if target.exists():
                 project = ProjectConfig(name=safe, cwd=str(target), enabled=True)
@@ -1107,7 +1094,7 @@ class _Controls:
                 await self._persist_created(safe, str(target))
                 await self.toggle(safe, True)
                 await self.select(safe)
-                return f"Projektas {safe} rastas diske ({target}) — užregistravau ir perjungiau į jį."
+                return t("newproject.found", project=safe, path=target)
 
             target.mkdir(parents=True)
             await self._git_init(target)
@@ -1118,10 +1105,10 @@ class _Controls:
             await self._persist_created(safe, str(target))
             await self.toggle(safe, True)
             await self.select(safe)
-            return f"Sukurtas projektas {safe} ({target}). Siųsk užduotį — dirbsiu jame."
+            return t("newproject.created", project=safe, path=target)
         except Exception as err:  # noqa: BLE001 - /newproject must never crash the bot
             logger.exception("create_project failed for %r", name)
-            return f"Nepavyko sukurti projekto {name}: {err}"
+            return t("newproject.failed", project=name, error=err)
 
     async def set_engine(self, name: str) -> None:
         # C4: rebuild the live TTS backend so subsequent sends use it.
@@ -1199,7 +1186,7 @@ def _make_schedule_notify(
             else prompt[:_SCHEDULE_NOTICE_MAX] + "…"
         )
         await telegram.send_question(
-            project, f"⏰ Suplanuota užduotis paleista: {short}"
+            project, t("schedule.fired", prompt=short)
         )
 
     return notify
@@ -1230,6 +1217,7 @@ async def build() -> Wiring:
     Split from :func:`main` so the wiring is testable without signal handling.
     """
     cfg = load_config()
+    i18n.set_language(getattr(cfg, "bot_language", i18n.language()))
     projects = load_projects()
     if cfg.auto_discover_projects:
         explicit_cwds = {p.cwd for p in projects}

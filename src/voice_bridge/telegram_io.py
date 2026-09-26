@@ -56,6 +56,7 @@ from telegram.ext import (
 from . import live, sent_log, usage
 from .approvals import _TOKEN_RE, _fold
 from .config import AGENT_BACKENDS, Config, set_env_value
+from .i18n import t
 from .scheduler import parse_hhmm
 from .transcript import transcript_path
 from .tts import available_voices
@@ -66,7 +67,7 @@ from .tts import available_voices
 # surface stay identical after the split. telegram_views must NOT import this
 # module (would create a cycle).
 from .telegram_views import (
-    _BOT_COMMANDS,
+    bot_commands,
     _EFFORTS,
     _ENGINES,
     _MODES,
@@ -105,8 +106,8 @@ def _answer_markup(text: str) -> InlineKeyboardMarkup | None:
         ])
     if live.is_yes_no_question(text):
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Taip", callback_data="ans:taip"),
-            InlineKeyboardButton("❌ Ne", callback_data="ans:ne"),
+            InlineKeyboardButton(t("answer.yes_button"), callback_data=f"ans:{t('answer.yes')}"),
+            InlineKeyboardButton(t("answer.no_button"), callback_data=f"ans:{t('answer.no')}"),
         ]])
     return None
 
@@ -181,9 +182,7 @@ _APPROVAL_TRUNCATED_MARKER = "…[truncated]"
 # payload can never walk out of the spool directory.
 _SAFE_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,80}")
 
-_FILE_TOO_LARGE_MSG = (
-    "Failas per didelis (Telegram botų riba ~20 MB) — atsiųsk mažesnį arba per git."
-)
+
 
 
 def _parse_schedule_id(raw: str | None) -> int | None:
@@ -348,8 +347,8 @@ def _match_choice(answer_text: str, choices: list[str]) -> str | None:
         return choices[idx] if 0 <= idx < len(choices) else None
 
     # 2. ordinal word(s) — only an unambiguous single ordinal counts.
-    folded_tokens = [_fold(t) for t in _TOKEN_RE.findall(lowered)]
-    ordinals = {_ORDINAL_WORDS[t] for t in folded_tokens if t in _ORDINAL_WORDS}
+    folded_tokens = [_fold(tok) for tok in _TOKEN_RE.findall(lowered)]
+    ordinals = {_ORDINAL_WORDS[tok] for tok in folded_tokens if tok in _ORDINAL_WORDS}
     if len(ordinals) == 1:
         idx = next(iter(ordinals)) - 1
         if 0 <= idx < len(choices):
@@ -519,7 +518,7 @@ class TelegramIO:
                 "voice download failed (likely >20MB Telegram cap), message %s",
                 msg.message_id,
             )
-            await msg.reply_text(_FILE_TOO_LARGE_MSG)
+            await msg.reply_text(t("file.too_large"))
             return
         await self.on_user_message({
             "message_id": msg.message_id,
@@ -554,7 +553,7 @@ class TelegramIO:
                 "attachment download failed (likely >20MB Telegram cap), message %s",
                 msg.message_id,
             )
-            await msg.reply_text(_FILE_TOO_LARGE_MSG)
+            await msg.reply_text(t("file.too_large"))
             return
         if attachment is None:
             return
@@ -648,13 +647,13 @@ class TelegramIO:
             reply_markup = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "✅ Leisti", callback_data=f"apv:{approval_token}:1"),
+                        t("approval.allow"), callback_data=f"apv:{approval_token}:1"),
                     InlineKeyboardButton(
-                        "❌ Neleisti", callback_data=f"apv:{approval_token}:0"),
+                        t("approval.deny"), callback_data=f"apv:{approval_token}:0"),
                 ],
                 [
                     InlineKeyboardButton(
-                        "✅♾ Visada leisti", callback_data=f"apv:{approval_token}:2"),
+                        t("approval.always"), callback_data=f"apv:{approval_token}:2"),
                 ],
             ])
         text = _truncate_approval_preview(text)
@@ -819,7 +818,7 @@ class TelegramIO:
             await self.app.bot.edit_message_text(
                 chat_id=self._chat_id,
                 message_id=message_id,
-                text=f"Answered: {resolved}",
+                text=t("ask.answered", answer=resolved),
             )
         except TelegramError:
             # Cosmetic only (mark the question answered); the agent already has
@@ -929,20 +928,17 @@ class TelegramIO:
         markup = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "Enable and send", callback_data=f"offsend:{token}"
+                    t("off.enable_and_send"), callback_data=f"offsend:{token}"
                 )
             ],
-            [InlineKeyboardButton("Cancel", callback_data=f"offcancel:{token}")],
+            [InlineKeyboardButton(t("off.cancel"), callback_data=f"offcancel:{token}")],
         ])
         bot = self.app.bot
         try:
             msg = await _send_with_retry(
                 lambda: bot.send_message(
                     chat_id=self._chat_id,
-                    text=(
-                        f"[bridge] {project} is disabled.\n"
-                        "Enable the project and send the last message?"
-                    ),
+                    text=t("off.prompt", project=project),
                     reply_markup=markup,
                 )
             )
@@ -964,7 +960,7 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         markup = build_panel_markup(self.controls.snapshot())
-        await msg.reply_text("Control panel", reply_markup=markup)
+        await msg.reply_text(t("panel.title"), reply_markup=markup)
 
     async def _cmd_menu(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -972,7 +968,10 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        await msg.reply_text("🏠 Alex for Claude", reply_markup=build_menu_markup())
+        # The bot's own Telegram name, so every install shows its own.
+        name = getattr(getattr(self.app, "bot", None), "first_name", None)
+        title = f"🏠 {name}" if isinstance(name, str) and name else t("menu.title")
+        await msg.reply_text(title, reply_markup=build_menu_markup())
 
     async def _handle_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1005,14 +1004,14 @@ class TelegramIO:
         if action in {"offsend", "offcancel"}:
             pending = self._pending_off_sends.pop(index_str, None)
             if pending is None:
-                await query.edit_message_text("This request has expired.")
+                await query.edit_message_text(t("off.expired"))
                 return
             project, text = pending
             if action == "offcancel":
-                await query.edit_message_text(f"Cancelled: {project}")
+                await query.edit_message_text(t("off.cancelled", project=project))
                 return
             await self.controls.enable_and_deliver(project, text)
-            await query.edit_message_text(f"Enabled and sent to {project}.")
+            await query.edit_message_text(t("off.sent", project=project))
             return
         if action == "menu":
             await self._handle_menu_callback(query, index_str)
@@ -1025,7 +1024,7 @@ class TelegramIO:
                 return
             pending = self._pending_asks.get(token)
             if pending is None:
-                await query.edit_message_text("This choice has expired.")
+                await query.edit_message_text(t("ask.expired"))
                 return
             future, choices = pending
             if idx < 0 or idx >= len(choices):
@@ -1033,7 +1032,7 @@ class TelegramIO:
             choice = choices[idx]
             if not future.done():
                 future.set_result(choice)
-            await query.edit_message_text(f"Selected: {choice}")
+            await query.edit_message_text(t("ask.selected", choice=choice))
             return
         if action == "live":
             await query.edit_message_text(await self._attach_live(index_str))
@@ -1049,19 +1048,17 @@ class TelegramIO:
             return
         if action == "perm":
             if not self._claude_live_enabled:
-                await query.edit_message_text(
-                    "Claude leidimai šiame kanale išjungti — kanalas skirtas Codex."
-                )
+                await query.edit_message_text(t("codex.no_claude_permissions"))
                 return
             ident, _, code = index_str.rpartition(":")
             allow = code == "1"
             if self.answer_permission(ident, allow):
                 await query.edit_message_text(
-                    "✅ Leista." if allow else "❌ Neleista.")
+                    t("approval.allowed") if allow else t("approval.denied"))
             else:
                 # Almost always: the editor session stopped waiting before the
                 # tap landed, so it is already asking there instead.
-                await query.edit_message_text("⌛ Per vėlu — atsakyk editoriuje.")
+                await query.edit_message_text(t("approval.too_late"))
             return
         if action == "ans":
             await self._answer_from_button(query, index_str)
@@ -1070,12 +1067,12 @@ class TelegramIO:
             # Answer a live session's plain-text question by sending the chosen
             # number, exactly as typing it would.
             if self.live_target() is None:
-                await query.edit_message_text("Nebeprisijungta prie sesijos.")
+                await query.edit_message_text(t("live.not_attached"))
                 return
             if await self.live_send(index_str):
-                await query.edit_message_text(f"➡️ Atsakyta: {index_str}")
+                await query.edit_message_text(t("answer.sent", answer=index_str))
             else:
-                await query.edit_message_text("⚠️ Nepavyko nusiųsti atsakymo.")
+                await query.edit_message_text(t("answer.failed"))
             return
         if action == "cost":
             # Info action: reply with a fresh message, do not touch the panel.
@@ -1133,10 +1130,7 @@ class TelegramIO:
                 if turning_off:
                     # Disabling drops this project's queued turns; note it
                     # instead of a silent redraw (audit finding #2).
-                    text = (
-                        f"{html.escape(project)} off — laukusios užduotys atmestos.\n\n"
-                        + text
-                    )
+                    text = t("projects.off_dropped", project=html.escape(project)) + "\n\n" + text
                 await self._edit_callback_text(
                     query,
                     text,
@@ -1204,13 +1198,13 @@ class TelegramIO:
                 logger.exception("always-allow persist failed for token %s", token)
         await self._answer_quietly(query)
         if always and persisted:
-            label = "✅♾ Visada leista"
+            label = t("approval.always_done")
         elif always:
-            label = "✅ Leista (šįkart — nuolatinis šiam veiksmui negalimas)"
+            label = t("approval.once_only")
         elif approved:
-            label = "✅ Leista"
+            label = t("approval.allowed_label")
         else:
-            label = "❌ Neleista"
+            label = t("approval.denied_label")
         try:
             await query.edit_message_text(label)
         except BadRequest as exc:
@@ -1242,13 +1236,13 @@ class TelegramIO:
                 build_projects_list_markup(snapshot, show_all=True, page=page),
             )
         elif action == "panel":
-            await self._edit_callback_text(query, "Control panel", build_panel_markup(snapshot))
+            await self._edit_callback_text(query, t("panel.title"), build_panel_markup(snapshot))
         elif action == "refresh":
             added = await self.controls.refresh_projects()
             snapshot = self.controls.snapshot()
             await self._edit_callback_text(
                 query,
-                f"New projects added: {added}\n\n"
+                t("projects.added", n=added) + "\n\n"
                 + format_projects(snapshot, show_all=True, open_projects=self._open_projects()),
                 build_projects_list_markup(snapshot, show_all=True),
             )
@@ -1318,7 +1312,7 @@ class TelegramIO:
             return None, None
         known = self._known_projects()
         if name not in known:
-            return None, f"Nežinomas projektas: {name}. Yra: {', '.join(known)}"
+            return None, t("projects.unknown", name=name, known=", ".join(known))
         return name, None
 
     def _voice_choices_for_engine(self, engine: str) -> list[str]:
@@ -1376,7 +1370,7 @@ class TelegramIO:
         added = await self.controls.refresh_projects()
         snapshot = self.controls.snapshot()
         await msg.reply_text(
-            f"New projects added: {added}\n\n"
+            t("projects.added", n=added) + "\n\n"
             + format_projects(snapshot, show_all=True, open_projects=self._open_projects()),
             parse_mode="HTML",
             reply_markup=build_projects_list_markup(snapshot, show_all=True),
@@ -1391,7 +1385,7 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args:
-            await msg.reply_text("Naudojimas: /newproject <vardas>")
+            await msg.reply_text(t("newproject.usage"))
             return
         name = context.args[0]
         result = await self.controls.create_project(name)
@@ -1409,7 +1403,7 @@ class TelegramIO:
             await msg.reply_text(error)
             return
         await self.controls.toggle(project, True)
-        await msg.reply_text(f"{project or 'all'} on")
+        await msg.reply_text(t("projects.on", project=project or t("projects.all")))
 
     async def _cmd_off(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1426,9 +1420,7 @@ class TelegramIO:
         # Disabling drops that project's queued turns; say so instead of a
         # bare "x off" that hides the fact that pending work was discarded
         # (audit finding #2).
-        await msg.reply_text(
-            f"{project or 'all'} off — laukusios užduotys atmestos."
-        )
+        await msg.reply_text(t("projects.off_dropped", project=project or t("projects.all")))
 
     async def _cmd_stop(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1451,7 +1443,7 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args or context.args[0] not in _MODES:
-            await msg.reply_text("usage: /mode <full|safe|ask> [project]")
+            await msg.reply_text(t("mode.usage"))
             return
         mode = context.args[0]
         arg = context.args[1] if len(context.args) > 1 else None
@@ -1460,7 +1452,7 @@ class TelegramIO:
             await msg.reply_text(error)
             return
         await self.controls.set_mode(project, mode)
-        await msg.reply_text(f"mode {mode} for {project or 'all'}")
+        await msg.reply_text(t("mode.set", mode=mode, project=project or t("projects.all")))
 
     async def _cmd_effort(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1473,9 +1465,7 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args or context.args[0] not in _EFFORTS:
-            await msg.reply_text(
-                "usage: /effort <" + "|".join(_EFFORTS) + "> [project]"
-            )
+            await msg.reply_text(t("effort.usage", levels="|".join(_EFFORTS)))
             return
         level = context.args[0]
         arg = context.args[1] if len(context.args) > 1 else None
@@ -1484,7 +1474,7 @@ class TelegramIO:
             await msg.reply_text(error)
             return
         await self.controls.set_effort(project, level)
-        await msg.reply_text(f"effort {level} for {project or 'all'}")
+        await msg.reply_text(t("effort.set", level=level, project=project or t("projects.all")))
 
     async def _cmd_info(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1516,7 +1506,7 @@ class TelegramIO:
             return
         await self.controls.set_verbose(project, on)
         state = "on" if on else "off"
-        await msg.reply_text(f"verbose {state} for {project or 'all'}")
+        await msg.reply_text(t("verbose.set", state=state, project=project or t("projects.all")))
 
     async def _cmd_voice(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1529,7 +1519,7 @@ class TelegramIO:
             snapshot = self.controls.snapshot()
             current = snapshot[0]["engine"] if snapshot else "openai"
             engine = args[1] if len(args) >= 2 else current
-            await msg.reply_text("voices: " + ", ".join(available_voices(engine)))
+            await msg.reply_text(t("voice.list", voices=", ".join(available_voices(engine))))
             return
         voice = args[0]
         arg = None
@@ -1550,12 +1540,10 @@ class TelegramIO:
         engine = row.get("engine", "openai") if row else "openai"
         valid_voices = self._voice_choices_for_engine(engine)
         if voice not in valid_voices:
-            await msg.reply_text(
-                f"Nežinomas balsas: {voice}. Yra: " + ", ".join(valid_voices)
-            )
+            await msg.reply_text(t("voice.unknown", voice=voice, known=", ".join(valid_voices)))
             return
         await self.controls.set_voice(project, voice)
-        await msg.reply_text(f"voice {voice} for {project or 'all'}")
+        await msg.reply_text(t("voice.set", voice=voice, project=project or t("projects.all")))
 
     async def _cmd_engine(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1564,13 +1552,11 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not context.args or context.args[0] not in _ENGINES:
-            await msg.reply_text(
-                "usage: /engine <auto|openai|piper|together|lithuanian>"
-            )
+            await msg.reply_text(t("engine.usage", engines="|".join(_ENGINES)))
             return
         name = context.args[0]
         await self.controls.set_engine(name)
-        await msg.reply_text(f"engine {name}")
+        await msg.reply_text(t("engine.set", engine=name))
 
     async def _cmd_agent(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1593,25 +1579,23 @@ class TelegramIO:
             for name in AGENT_BACKENDS
         ]
         await msg.reply_text(
-            f"Dabar atsako: {current.capitalize()}.\n"
-            "Perjungus tiltas persikrauna (~10 s). Pokalbių istorijos atskiros — "
-            "kitas agentas nematys, ką kalbėjai su šituo.",
+            t("agent.current", agent=current.capitalize()),
             reply_markup=InlineKeyboardMarkup([buttons]),
         )
 
     def _switch_agent(self, name: str) -> str:
         """Persist AGENT_BACKEND=*name*; return the text to show the user."""
         if name not in AGENT_BACKENDS:
-            return "naudojimas: /agent " + "|".join(AGENT_BACKENDS)
+            return t("agent.usage", agents="|".join(AGENT_BACKENDS))
         if name == self.cfg.agent_backend:
-            return f"Jau veikia {name.capitalize()}."
+            return t("agent.already", agent=name.capitalize())
         try:
             set_env_value(self._env_path, "AGENT_BACKEND", name)
         except OSError:
             logger.exception("agent: could not rewrite %s", self._env_path)
-            return "⚠️ Nepavyko pakeisti .env — agentas nepakeistas."
+            return t("agent.write_failed")
         self._agent_switched = name
-        return f"🔄 Perjungiu į {name.capitalize()} — tiltas persikrauna, po ~10 s rašyk."
+        return t("agent.switching", agent=name.capitalize())
 
     def _restart_if_switched(self, name: str) -> None:
         # Only after the reply is out, and only if .env really changed: a failed
@@ -1674,8 +1658,7 @@ class TelegramIO:
         if args and args[0] == "clear":
             target = args[1] if len(args) > 1 else None
             await self.controls.clear_policies(target)
-            scope = target or "visi projektai"
-            await msg.reply_text(f"Visada-leisti politikos išvalytos: {scope}")
+            await msg.reply_text(t("policies.cleared", scope=target or t("projects.all")))
             return
         policies = await self.controls.list_policies()
         await msg.reply_text(_format_policies(policies))
@@ -1719,33 +1702,32 @@ class TelegramIO:
             if sub in {"remove", "rm", "del"}:
                 sid = _parse_schedule_id(args[1] if len(args) > 1 else None)
                 if sid is None:
-                    await msg.reply_text("Naudojimas: /schedule remove <id>")
+                    await msg.reply_text(t("schedule.usage_remove"))
                     return
                 removed = await self.controls.remove_schedule(sid)
                 await msg.reply_text(
-                    f"Pašalinta suplanuota užduotis {sid}." if removed
-                    else f"Nerasta suplanuota užduotis su id {sid}."
+                    t("schedule.removed", id=sid) if removed else t("schedule.not_found", id=sid)
                 )
                 return
 
             if sub in {"on", "off"}:
                 sid = _parse_schedule_id(args[1] if len(args) > 1 else None)
                 if sid is None:
-                    await msg.reply_text(f"Naudojimas: /schedule {sub} <id>")
+                    await msg.reply_text(t("schedule.usage_toggle", sub=sub))
                     return
                 enabled = sub == "on"
                 ok = await self.controls.set_schedule_enabled(sid, enabled)
-                state = "įjungta" if enabled else "išjungta"
+                state = t("schedule.enabled") if enabled else t("schedule.disabled")
                 await msg.reply_text(
-                    f"Suplanuota užduotis {sid} {state}." if ok
-                    else f"Nerasta suplanuota užduotis su id {sid}."
+                    t("schedule.toggled", id=sid, state=state) if ok
+                    else t("schedule.not_found", id=sid)
                 )
                 return
 
         # Otherwise: add. Needs <project> <HH:MM> <prompt...>.
-        usage = "Naudojimas: /schedule <projektas> <HH:MM> <užduotis>"
+        usage_text = t("schedule.usage_add")
         if len(args) < 3:
-            await msg.reply_text(usage)
+            await msg.reply_text(usage_text)
             return
         project, error = self._resolve_project_arg(args[0])
         if error:
@@ -1753,11 +1735,11 @@ class TelegramIO:
             return
         hhmm = parse_hhmm(args[1])
         if hhmm is None:
-            await msg.reply_text(f"Netinkamas laikas: {args[1]}. {usage}")
+            await msg.reply_text(t("schedule.bad_time", time=args[1], usage=usage_text))
             return
         prompt = " ".join(args[2:]).strip()
         if not prompt:
-            await msg.reply_text(usage)
+            await msg.reply_text(usage_text)
             return
         # If the time has already passed for today (local), seed last_run=today
         # so a morning schedule added in the afternoon first fires TOMORROW,
@@ -1766,8 +1748,8 @@ class TelegramIO:
         first_tomorrow = hhmm <= now.strftime("%H:%M")
         last_run = now.date().isoformat() if first_tomorrow else None
         await self.controls.add_schedule(project, hhmm, prompt, last_run=last_run)
-        suffix = " (pirmą kartą rytoj)" if first_tomorrow else ""
-        await msg.reply_text(f"⏰ Suplanuota: {project} kasdien {hhmm}{suffix}")
+        suffix = t("schedule.first_tomorrow") if first_tomorrow else ""
+        await msg.reply_text(t("schedule.added", project=project, time=hhmm, suffix=suffix))
 
     async def _cmd_help(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1818,7 +1800,7 @@ class TelegramIO:
             return True
         except Exception:  # noqa: BLE001 - never crash the inbound path
             logger.exception("live: send failed for pid %s", session.pid)
-            await self._send_plain(f"⚠️ Nepavyko pasiekti sesijos {session.pid}.")
+            await self._send_plain(t("live.unreachable", pid=session.pid))
             return False
 
     async def live_route(self, cwd: str, text: str, spoken: bool = False) -> bool:
@@ -1894,9 +1876,9 @@ class TelegramIO:
             sent = await self.live_send_to(entry["s"], value)
         else:
             sent = self.live_target() is not None and await self.live_send(value)
-        label = {"taip": "✅ Atsakyta: taip", "ne": "❌ Atsakyta: ne"}.get(
-            value, f"➡️ Atsakyta: {value}"
-        ) if sent else "⚠️ Sesija neatidaryta — atsakyk VS Code"
+        label = {
+            t("answer.yes"): t("answer.sent_yes"), t("answer.no"): t("answer.sent_no"),
+        }.get(value, t("answer.sent", answer=value)) if sent else t("answer.session_closed")
         await self._edit_callback_markup(
             query, InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="noop:")]])
         )
@@ -2057,55 +2039,47 @@ class TelegramIO:
         if msg is None or not self._allowed(msg.from_user.id):
             return
         if not self._claude_live_enabled:
-            await msg.reply_text(
-                "Claude /live šiame kanale išjungtas — kanalas skirtas Codex."
-            )
+            await msg.reply_text(t("codex.no_live"))
             return
         args = list(context.args or [])
         if args and args[0] in {"off", "stop", "detach"}:
             self._detach_live()
-            await msg.reply_text("🔌 Atsijungta nuo gyvos sesijos.")
+            await msg.reply_text(t("live.detached"))
             return
 
         sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
         if not sessions:
-            await msg.reply_text(
-                "Gyvų Claude Code sesijų nerasta. (Senesnės sesijos be socket'o "
-                "prisijungimo nepalaiko — jas reikia paleisti iš naujo.)"
-            )
+            await msg.reply_text(t("live.none"))
             return
         root = Path.home() / ".claude" / "projects"
         rows = []
         for s in sessions:
-            title = live.title_of(root, s.session_id) or "(be pavadinimo)"
+            title = live.title_of(root, s.session_id) or t("live.untitled")
             rows.append([InlineKeyboardButton(
                 f"{title[:40]} · {Path(s.cwd).name}", callback_data=f"live:{s.pid}"
             )])
         await msg.reply_text(
-            "Prisijungti prie gyvos sesijos:",
+            t("live.pick"),
             reply_markup=InlineKeyboardMarkup(rows),
         )
 
     async def _attach_live(self, pid_str: str) -> str:
         """Attach to the session with this pid; returns the reply text."""
         if not self._claude_live_enabled:
-            return "Claude /live šiame kanale išjungtas — kanalas skirtas Codex."
+            return t("codex.no_live")
         try:
             pid = int(pid_str)
         except (TypeError, ValueError):
-            return "Netinkamas sesijos id."
+            return t("live.bad_id")
         session = live.find(pid, Path.home() / ".claude" / "sessions")
         if session is None:
-            return f"Sesija {pid_str} nebegyva — paleisk /live iš naujo."
+            return t("live.gone", pid=pid_str)
         self._detach_live()
         self._live_session = session
         self._write_live_marker(session.session_id)
         self._live_task = asyncio.create_task(self._tail_live(session))
         title = live.title_of(Path.home() / ".claude" / "projects", session.session_id)
-        return (
-            f"🔗 Prisijungta: {title or session.cwd}\n"
-            "Rašyk čia — nukeliaus į tą sesiją. /live off atjungti."
-        )
+        return t("live.attached", title=title or session.cwd)
 
     @staticmethod
     def live_marker() -> Path:
@@ -2279,12 +2253,12 @@ class TelegramIO:
         project = str(data.get("project") or "IDE")
         tool = str(data.get("tool") or "?")
         detail = str(data.get("detail") or "").strip()
-        body = f"🔐 [{project}] leidimas: {tool}"
+        body = t("approval.editor_prompt", project=project, tool=tool)
         if detail:
             body += f"\n{_truncate_approval_preview(detail)}"
         markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Leisti", callback_data=f"perm:{ident}:1"),
-            InlineKeyboardButton("❌ Neleisti", callback_data=f"perm:{ident}:0"),
+            InlineKeyboardButton(t("approval.allow"), callback_data=f"perm:{ident}:1"),
+            InlineKeyboardButton(t("approval.deny"), callback_data=f"perm:{ident}:0"),
         ]])
         message = await self._send_plain(body, markup)
         if message is not None:
@@ -2306,7 +2280,7 @@ class TelegramIO:
                 continue
             self._perm_pending.pop(ident, None)
             try:
-                await message.edit_text("⌛ Per vėlu — atsakyk editoriuje.")
+                await message.edit_text(t("approval.too_late"))
             except Exception:  # noqa: BLE001 - a failed edit must not stop the watcher
                 logger.exception("perm: could not mark %s expired", ident)
 
@@ -2353,17 +2327,17 @@ class TelegramIO:
         # nothing. The static structure has no HTML metacharacters.
         row = _find_project_row(self.controls.snapshot(), project)
         if row is None:
-            return "Project not found. Use /projects_all."
+            return t("handoff.not_found")
         path = transcript_path(row.get("cwd") or "")
         label = html.escape(row.get("display_name") or row["project"])
         if not path.exists():
-            return f"{label}: no handoff history yet."
+            return t("handoff.none", project=label)
         text = path.read_text(encoding="utf-8", errors="replace").strip()
         if not text:
-            return f"{label}: handoff history is empty."
+            return t("handoff.empty", project=label)
         tail = html.escape(_tail_for_telegram(text))
         friendly = html.escape(_friendly_path(str(path)))
-        return f"{label} handoff\n{friendly}\n\n{tail}"
+        return t("handoff.text", project=label, path=friendly, tail=tail)
 
     # --- lifecycle -------------------------------------------------------
     async def run(self) -> None:
@@ -2444,9 +2418,9 @@ class TelegramIO:
 
         await app.initialize()
         commands = (
-            _BOT_COMMANDS
+            bot_commands()
             if self._claude_live_enabled
-            else [command for command in _BOT_COMMANDS if command.command != "live"]
+            else [command for command in bot_commands() if command.command != "live"]
         )
         await app.bot.set_my_commands(commands)
         await app.start()

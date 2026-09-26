@@ -17,6 +17,7 @@ from pathlib import Path
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 
 from .config import AUTONOMY_MODES, EFFORT_LEVELS, TTS_BACKENDS
+from .i18n import t
 from .tts import available_voices
 
 # Local aliases (list, not tuple) kept for minimal churn at call sites below;
@@ -24,32 +25,37 @@ from .tts import available_voices
 _MODES = list(AUTONOMY_MODES)
 _ENGINES = list(TTS_BACKENDS)
 _EFFORTS = list(EFFORT_LEVELS)
-_BOT_COMMANDS = [
-    BotCommand("menu", "🏠 Main menu"),
-    BotCommand("panel", "🎛 Control panel"),
-    BotCommand("projects", "🟢 Active projects"),
-    BotCommand("projects_all", "📚 All projects"),
-    BotCommand("projects_refresh", "🔎 Discover new projects"),
-    BotCommand("newproject", "🆕 Create a new project"),
-    BotCommand("handoff", "🧾 Latest project handoff"),
-    BotCommand("status", "📡 Ask project status"),
-    BotCommand("info", "ℹ️ Model, effort & settings"),
-    BotCommand("on", "▶️ Enable one project or all"),
-    BotCommand("off", "⏸ Disable one project or all"),
-    BotCommand("stop", "⛔ Interrupt current work"),
-    BotCommand("mode", "🛡 Change safe/full/ask mode"),
-    BotCommand("effort", "🧩 Change reasoning effort"),
-    BotCommand("voice", "🔊 List or set TTS voice"),
-    BotCommand("verbose", "🔧 Toggle live tool activity"),
-    BotCommand("engine", "🧠 Change TTS backend"),
-    BotCommand("agent", "🤖 Switch Claude / Codex"),
-    BotCommand("recap", "🗒 What happened while away"),
-    BotCommand("usage", "📊 Limits: 5h / week %"),
-    BotCommand("policies", "♾ Always-allow grants"),
-    BotCommand("schedule", "⏰ Daily scheduled prompts"),
-    BotCommand("help", "❓ Routing rules & commands"),
-    BotCommand("live", "🔗 Drive a running editor session"),
-]
+_COMMAND_NAMES = (
+    "menu",
+    "panel",
+    "projects",
+    "projects_all",
+    "projects_refresh",
+    "newproject",
+    "handoff",
+    "status",
+    "info",
+    "on",
+    "off",
+    "stop",
+    "mode",
+    "effort",
+    "voice",
+    "verbose",
+    "engine",
+    "agent",
+    "recap",
+    "usage",
+    "policies",
+    "schedule",
+    "help",
+    "live",
+)
+
+
+def bot_commands() -> list[BotCommand]:
+    """The command menu, described in the bot's language."""
+    return [BotCommand(name, t(f"cmd.{name}")) for name in _COMMAND_NAMES]
 
 # A scheduled prompt can be arbitrarily long; the plain-text listing truncates
 # it so one runaway schedule cannot blow past Telegram's message limit.
@@ -94,10 +100,10 @@ def format_projects(
     is open in the editor right now (then messages go straight in there)."""
     rows = _project_list_rows(snapshot, show_all=show_all)
     if not rows:
-        return "no active projects\nUse /projects_all to show every project."
+        return t("projects.none_active")
     rows, page, pages = _paged(rows, page)
 
-    lines: list[str] = [f"Puslapis {page + 1}/{pages}", ""] if pages > 1 else []
+    lines: list[str] = [t("projects.page", page=page + 1, pages=pages), ""] if pages > 1 else []
     for _idx, row in rows:
         status = "\U0001F7E2" if row["enabled"] else "\u26AA"
         active = " \u2B50" if row.get("last_active") else ""
@@ -108,12 +114,12 @@ def format_projects(
             f"{row['mode']} · {row['voice']} · {row['engine']}"
         )
         where = (
-            "🖥 atidaryta VS Code" if row["project"] in (open_projects or set())
-            else "tilto sesija"
+            t("projects.open_in_editor") if row["project"] in (open_projects or set())
+            else t("projects.bridge_session")
         )
         lines.extend([
             f"{status} <b>{project}</b>{active} — {where}",
-            f"  ✍️ <code>{html.escape(row['project'])}:</code> tekstas",
+            "  " + t("projects.address", name=html.escape(row["project"])),
             f"  \U0001F4C1 {path_part} · {settings}",
             "",
         ])
@@ -152,19 +158,19 @@ def build_projects_list_markup(
 def build_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🟢 Active", callback_data="menu:projects"),
-            InlineKeyboardButton("📚 All", callback_data="menu:projects_all"),
+            InlineKeyboardButton(t("menu.active"), callback_data="menu:projects"),
+            InlineKeyboardButton(t("menu.all"), callback_data="menu:projects_all"),
         ],
         [
-            InlineKeyboardButton("🎛 Panel", callback_data="menu:panel"),
-            InlineKeyboardButton("🧾 Handoff", callback_data="menu:handoff"),
+            InlineKeyboardButton(t("menu.panel"), callback_data="menu:panel"),
+            InlineKeyboardButton(t("menu.handoff"), callback_data="menu:handoff"),
         ],
         [
-            InlineKeyboardButton("⛔ Stop", callback_data="menu:stop"),
-            InlineKeyboardButton("🔎 Refresh", callback_data="menu:refresh"),
+            InlineKeyboardButton(t("menu.stop"), callback_data="menu:stop"),
+            InlineKeyboardButton(t("menu.refresh"), callback_data="menu:refresh"),
         ],
         [
-            InlineKeyboardButton("♾ Policies", callback_data="menu:policies"),
+            InlineKeyboardButton(t("menu.policies"), callback_data="menu:policies"),
         ],
     ])
 
@@ -178,14 +184,13 @@ def _format_policies(policies: list[tuple[str, str]]) -> str:
     """
     if not policies:
         return (
-            "Nėra išsaugotų „visada leisti“ politikų.\n"
-            "Jos atsiranda paspaudus „✅♾ Visada leisti“ ties patvirtinimu."
+            t("policies.none")
         )
-    lines = ["♾ Visada-leisti politikos:"]
+    lines = [t("policies.title")]
     for project, signature in policies:
         lines.append(f"• {project}: {signature}")
     lines.append("")
-    lines.append("Atšaukti: /policies clear [projektas]")
+    lines.append(t("policies.revoke_hint"))
     return "\n".join(lines)
 
 
@@ -199,10 +204,9 @@ def _format_schedules(schedules: list[dict]) -> str:
     """
     if not schedules:
         return (
-            "Nėra suplanuotų užduočių.\n"
-            "Pridėti: /schedule <projektas> <HH:MM> <užduotis>"
+            t("schedule.none")
         )
-    lines = ["⏰ Suplanuotos užduotys:"]
+    lines = [t("schedule.title")]
     for s in schedules:
         prompt = str(s.get("prompt") or "")
         if len(prompt) > _SCHEDULE_PROMPT_MAX:
@@ -212,7 +216,7 @@ def _format_schedules(schedules: list[dict]) -> str:
             f"{s.get('id')}  {s.get('project')}  {s.get('hhmm')}{off}  {prompt}"
         )
     lines.append("")
-    lines.append("Šalinti: /schedule remove <id> · Perjungti: /schedule on|off <id>")
+    lines.append(t("schedule.hint"))
     return "\n".join(lines)
 
 
@@ -226,44 +230,7 @@ def _format_help() -> str:
     approval or question. The command list mirrors the registered commands, one
     line each.
     """
-    return "\n".join([
-        "❓ Kaip veikia tiltas",
-        "",
-        "Kur nueina žinutė:",
-        "• reply į žinutę — į tą sesiją, iš kurios ji atėjo.",
-        "• vien tekstas — į sesiją, kuri paskutinė rašė čia.",
-        "• „projektas: tekstas“ — į tą projektą. Tinka vidinis vardas, "
-        "rodomas pavadinimas ar aplanko vardas (žr. /projects).",
-        "• Jei projekto sesija atidaryta VS Code — rašoma tiesiai į ją; "
-        "tilto sesija paleidžiama tik jei neatidaryta.",
-        "",
-        "Kaip žinoti, kas vyksta:",
-        "• ➡️ — kur nuėjo tavo žinutė (rodoma, kai adresatas pasikeičia).",
-        "• 💬 Projektas · pokalbis — iš kurios sesijos atsakymas.",
-        "• /projects — 🖥 prie projekto reiškia, kad sesija atidaryta VS Code.",
-        "",
-        "Skubu:",
-        "• „!“ žinutės pradžioje — nutraukia dabartinį projekto darbą ir "
-        "pristato iš karto (pvz. „!qwing: stok“).",
-        "",
-        "Atsakymai iš telefono:",
-        "• Į patvirtinimo (leidimo) klausimą atsakyk „taip“/„ne“ — reply arba, "
-        "jei laukiamas tik vienas, paprastu atsakymu.",
-        "• Į „ask_user“ klausimą atsakyk numeriu, „first“, etikete ar laisvu "
-        "tekstu.",
-        "",
-        "Komandos:",
-        "/panel — valdymo skydelis (įjungti/išjungti, režimas, balsas).",
-        "/projects — aktyvūs projektai (visi: /projects_all).",
-        "/recap — kas nutiko, kol nebuvai.",
-        "/usage — Claude limitai (5 val., savaitė) ir šio PC sesijos.",
-        "/info — modelis, effort ir nustatymai.",
-        "/voice — parodyti ar nustatyti TTS balsą.",
-        "/agent — kas atsako: Claude ar Codex (perjungti: /agent codex).",
-        "/policies — „visada leisti“ politikos (išvalyti: /policies clear).",
-        "/schedule — kasdienės suplanuotos užduotys.",
-        "/help — ši pagalba.",
-    ])
+    return t("help.text")
 
 
 def _project_list_rows(
@@ -356,14 +323,14 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
         ])
     engine = snapshot[0]["engine"] if snapshot else "openai"
     rows.append([
-        InlineKeyboardButton("▶ ALL ON", callback_data="allon"),
-        InlineKeyboardButton("⏸ ALL OFF", callback_data="alloff"),
+        InlineKeyboardButton(t("panel.all_on"), callback_data="allon"),
+        InlineKeyboardButton(t("panel.all_off"), callback_data="alloff"),
         InlineKeyboardButton(
-            f"engine: {engine} ▾", callback_data="engine"),
+            t("panel.engine", engine=engine), callback_data="engine"),
     ])
     rows.append([
-        InlineKeyboardButton("📊 Limitai", callback_data="cost"),
-        InlineKeyboardButton("🗒 Recap", callback_data="recap"),
+        InlineKeyboardButton(t("panel.limits"), callback_data="cost"),
+        InlineKeyboardButton(t("panel.recap"), callback_data="recap"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -379,9 +346,9 @@ def build_mode_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
         for mode in _MODES
     ]
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{row.get('display_name') or row['project']} mode", callback_data=f"noop:{idx}")],
+        [InlineKeyboardButton(t("panel.mode_of", project=row.get("display_name") or row["project"]), callback_data=f"noop:{idx}")],
         buttons,
-        [InlineKeyboardButton("back", callback_data="back")],
+        [InlineKeyboardButton(t("panel.back"), callback_data="back")],
     ])
 
 
@@ -390,7 +357,7 @@ def build_voice_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
     row = snapshot[idx]
     voices = available_voices(row.get("engine", "openai"))
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(f"{row.get('display_name') or row['project']} voice", callback_data=f"noop:{idx}")]
+        [InlineKeyboardButton(t("panel.voice_of", project=row.get("display_name") or row["project"]), callback_data=f"noop:{idx}")]
     ]
     for start in range(0, len(voices), 2):
         pair = voices[start:start + 2]
@@ -401,5 +368,5 @@ def build_voice_markup(snapshot: list[dict], idx: int) -> InlineKeyboardMarkup:
             )
             for voice in pair
         ])
-    rows.append([InlineKeyboardButton("back", callback_data="back")])
+    rows.append([InlineKeyboardButton(t("panel.back"), callback_data="back")])
     return InlineKeyboardMarkup(rows)

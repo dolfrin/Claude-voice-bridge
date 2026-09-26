@@ -36,3 +36,14 @@ def _private_sent_log(monkeypatch, tmp_path):
 
     target = tmp_path / "sent.jsonl"
     monkeypatch.setattr(sent_log, "_path", lambda path=None: path or target)
+
+
+@pytest.fixture(autouse=True)
+def _lithuanian_texts():
+    """The suite asserts the Lithuanian texts; the English ones are covered by
+    test_i18n (same keys, same fields)."""
+    from voice_bridge import i18n
+
+    i18n.set_language("lt")
+    yield
+    i18n.set_language("lt")

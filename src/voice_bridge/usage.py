@@ -33,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import claude_history
+from .i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -266,10 +267,10 @@ def take_sample(home: Path, ledger: Path, now: float | None = None, full: bool =
 def _title(key: str) -> str:
     """Lithuanian name of a limit, for sentences."""
     if key == "session":
-        return "5 val."
+        return t("usage.limit_session")
     if key.startswith("weekly_scoped:"):
-        return f"savaitės ({key.split(':', 1)[1].capitalize()})"
-    return "savaitės"
+        return t("usage.limit_week_model", model=key.split(":", 1)[1].capitalize())
+    return t("usage.limit_week")
 
 
 def other_accounts(samples: list[dict], current: str, now: float) -> list[dict]:
@@ -299,9 +300,9 @@ def _account_line(acc: dict, now: float) -> str:
     parts = []
     for key, (pct, reset) in sorted(acc["limits"].items()):
         if pct == 0 and reset <= now:
-            parts.append(f"{_title(key)} ✅ atsinaujino")
+            parts.append(t("usage.account_reset", limit=_title(key)))
         else:
-            parts.append(f"{_title(key)} {pct:.0f} % iki {_stamp(reset, now)}")
+            parts.append(t("usage.account_until", limit=_title(key), pct=f"{pct:.0f}", when=_stamp(reset, now)))
     return f"{acc['email']} — " + ", ".join(parts)
 
 
@@ -317,17 +318,17 @@ def _alerts(prev: dict | None, record: dict, others: list[dict], now: float) -> 
     for key, w in record["w"].items():
         before = (prev.get("w") or {}).get(key)
         was = float(before["u"] or 0) if before and abs(before["r"] - w["r"]) < 300 else 0.0
-        crossed = [t for t in _ALERT_AT if was < t <= float(w["u"] or 0)]
+        crossed = [x for x in _ALERT_AT if was < x <= float(w["u"] or 0)]
         if not crossed:
             continue
-        text = (
-            f"⚠️ {record['email']}: {_title(key)} limitas {float(w['u']):.0f} % — "
-            f"atsinaujins {_stamp(w['r'], now)} ({_until(w['r'], now)})."
+        text = t(
+            "usage.alert", email=record["email"], limit=_title(key),
+            pct=f"{float(w['u']):.0f}", when=_stamp(w["r"], now), until=_until(w["r"], now),
         )
         better = [a for a in others if a["free"] > 100 - float(w["u"] or 0)]
-        text += (
-            f"\nLaisviausia kita paskyra: {_account_line(better[0], now)}"
-            if better else "\nLaisvesnės paskyros nežinau."
+        text += "\n" + (
+            t("usage.alert_freest", account=_account_line(better[0], now))
+            if better else t("usage.alert_none_freer")
         )
         out.append(text)
     return out
@@ -385,15 +386,17 @@ def _until(ts: float, now: float) -> str:
     left = ts - now
     hours = left / 3600
     if hours < 1:
-        return f"po {int(left // 60)} min"
-    return f"po {hours:.0f} val." if hours < 48 else f"po {hours / 24:.0f} d."
+        return t("usage.in_minutes", n=int(left // 60))
+    return t("usage.in_hours", n=f"{hours:.0f}") if hours < 48 else t("usage.in_days", n=f"{hours / 24:.0f}")
 
 
 def _stamp(ts: float, now: float) -> str:
     """Local time with its day: "šiandien 18:45", "vakar 09:10", "09-24 10:00"."""
     local = datetime.fromtimestamp(ts)
     days = (datetime.fromtimestamp(now).date() - local.date()).days
-    day = {0: "šiandien", 1: "vakar", -1: "rytoj"}.get(days, local.strftime("%m-%d"))
+    day = {0: t("usage.today"), 1: t("usage.yesterday"), -1: t("usage.tomorrow")}.get(
+        days, local.strftime("%m-%d")
+    )
     return f"{day} {local.strftime('%H:%M')}"
 
 
@@ -428,7 +431,7 @@ def _session_lines(root: Path, turns: list, now: float, k: float | None) -> list
         row[1] = row[1] or cwd
         row[2] = max(row[2], ts)
     if not per:
-        return ["  (šiame PC su šita paskyra nedirbta)"]
+        return ["  " + t("usage.no_sessions")]
     ranked = sorted(per.items(), key=lambda kv: kv[1][0], reverse=True)
     lines = []
     for uuid, (weight, cwd, last) in ranked[:_TOP]:
@@ -437,14 +440,14 @@ def _session_lines(root: Path, turns: list, now: float, k: float | None) -> list
         if len(name) > 40:
             name = name[:40] + "…"
         ago = max(0, int((now - last) // 60))
-        ago_text = f"prieš {ago} min" if ago < 90 else f"prieš {ago // 60} val."
+        ago_text = t("usage.ago_minutes", n=ago) if ago < 90 else t("usage.ago_hours", n=ago // 60)
         label = _project(cwd) + (f" · {name}" if name else "")
         amount = f"{_approx(k * weight)} — " if k is not None else "• "
         lines.append(f"  {amount}{label} ({ago_text})")
     if len(ranked) > _TOP:
         rest = sum(w for _, (w, _, _) in ranked[_TOP:])
         amount = f"{_approx(k * rest)} — " if k is not None else "• "
-        lines.append(f"  {amount}dar {len(ranked) - _TOP} sesijos")
+        lines.append(f"  {amount}" + t("usage.more_sessions", n=len(ranked) - _TOP))
     return lines
 
 
@@ -456,80 +459,83 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
         sample = take_sample(home, ledger, now, full=True)
     except urllib.error.HTTPError as exc:
         logger.warning("usage: HTTP %s", exc.code)
-        hint = " — prisijungimas pasenęs, atidaryk Claude Code" if exc.code == 401 else ""
-        return f"⚠️ Anthropic limitų negavau (HTTP {exc.code}){hint}."
+        hint = t("usage.login_stale") if exc.code == 401 else ""
+        return t("usage.fetch_failed_http", code=exc.code, hint=hint)
     except Exception:  # noqa: BLE001 - never break the command over this
         logger.exception("usage: sampling failed")
-        return "⚠️ Anthropic limitų negavau."
+        return t("usage.fetch_failed")
 
     samples = _load(ledger)
     root = home / ".claude" / "projects"
     tier = sample["tier"].replace("default_claude_", "").replace("_", " ")
     lines = [
         f"📊 {sample['email']}" + (f" ({tier})" if tier else ""),
-        f"Šis PC prie jos prisijungęs nuo {_stamp(sample['since'], now)}.",
+        t("usage.logged_in_since", when=_stamp(sample["since"], now)),
     ]
     for limit in sample["limits"]:
         start, reset = limit["reset"] - limit["span"], limit["reset"]
         counted_from = limit["start"]
         if limit["span"] == _SPANS["session"]:
-            title = "⏱ 5 val. langas"
+            title = t("usage.window_session")
         else:
-            title = "📅 Savaitė" + (f", tik {limit['model']}" if limit["model"] else "")
+            title = (
+                t("usage.window_week_model", model=limit["model"]) if limit["model"]
+                else t("usage.window_week")
+            )
         end = _stamp(reset, now)
         if end.split()[0] == _stamp(start, now).split()[0]:
             end = end.split()[1]  # same day: "šiandien 18:30 – 23:30"
-        lines += ["", f"{title}: {_stamp(start, now)} – {end} (atsinaujins {_until(reset, now)})"]
+        lines += ["", t("usage.window", title=title, start=_stamp(start, now), end=end, until=_until(reset, now))]
         k = _pct_per_token(samples, sample["account"], limit["key"])
         mine = sample["w"][limit["key"]]["l"]
         mine_pct = min(limit["pct"], k * mine) if k is not None else None
-        total = f"{_bar(limit['pct'], mine_pct)} {limit['pct']:.0f} % bendrai"
+        total = t("usage.total", bar=_bar(limit["pct"], mine_pct), pct=f"{limit['pct']:.0f}")
         if limit["key"] == "weekly_all" and sample["breakdown"]:
             total += " (" + ", ".join(f"{name} {pct} %" for name, pct in sample["breakdown"]) + ")"
         lines.append(total)
 
-        since = f"nuo {_stamp(counted_from, now)}"
+        since = _stamp(counted_from, now)
         if mine_pct is not None:
-            lines.append(f"• Šis PC {since}: {_approx(mine_pct)}, iš jų:")
+            lines.append(t("usage.pc_estimate", since=since, pct=_approx(mine_pct)))
         else:
             readings = _window_samples(samples, sample["account"], limit["key"], reset, counted_from)
             if len(readings) > 1:
                 first = readings[0]
                 rise = limit["pct"] - first["u"]
                 ceiling = "< 1 %" if rise < 1 else f"≤ ~{rise:.0f} %"
-                lines.append(
-                    f"• Šis PC {since}: {ceiling} — tiek paskyra pakilo nuo "
-                    f"{_stamp(first['ts'], now)}; tiksliau, kai pakils {_MIN_RISE_PCT} %"
-                )
+                lines.append(t(
+                    "usage.pc_ceiling", since=since, ceiling=ceiling,
+                    first=_stamp(first["ts"], now), rise=_MIN_RISE_PCT,
+                ))
             else:
-                lines.append(f"• Šis PC {since}: dar nežinau — reikia bent dviejų matavimų")
-        turns = [t for t in sample["turns"] if t[1] >= counted_from and _matches(t[2], limit["model"])]
+                lines.append(t("usage.pc_unknown", since=since))
+        turns = [x for x in sample["turns"] if x[1] >= counted_from and _matches(x[2], limit["model"])]
         lines.extend(_session_lines(root, turns, now, k))
         # Work on this PC earlier in the window, before the ledger knew the
         # account: said out loud instead of silently left out.
         before = [
-            t for t in sample["turns"]
-            if start <= t[1] < counted_from and _matches(t[2], limit["model"])
+            x for x in sample["turns"]
+            if start <= x[1] < counted_from and _matches(x[2], limit["model"])
         ]
         if before:
-            sessions = len({t[0] for t in before})
-            guess = f"; jei šia — dar {_approx(k * sum(t[3] for t in before))}" if k is not None else ""
-            lines.append(
-                f"  ❔ iki {_stamp(counted_from, now)} šiame PC buvo darbo (sesijų: {sessions}) — "
-                f"nežinau, kuria paskyra, neįskaičiuota{guess}"
+            sessions = len({x[0] for x in before})
+            guess = (
+                t("usage.unattributed_guess", pct=_approx(k * sum(x[3] for x in before)))
+                if k is not None else ""
             )
-    lines += ["", "👥 Kitos paskyros (paskutinė šiame PC matyta būsena):"]
+            lines.append("  " + t(
+                "usage.unattributed", until=_stamp(counted_from, now), n=sessions, guess=guess,
+            ))
+    lines += ["", t("usage.others_title")]
     if sample["others"]:
         for i, acc in enumerate(sample["others"]):
             star = "⭐ " if i == 0 else ""
-            lines.append(f"• {star}{_account_line(acc, now)} · matyta {_stamp(acc['seen'], now)}")
+            lines.append(t("usage.other_line", star=star, account=_account_line(acc, now), seen=_stamp(acc["seen"], now)))
     else:
-        lines.append("  atsiras čia, kai prie jų prisijungsi šiame PC")
+        lines.append("  " + t("usage.others_none"))
     lines += [
         "",
-        "🟦 šis PC · 🟩 kiti įrenginiai (ar dar neišskirta) · ⬜ liko",
-        "% — nuo tavo limito. „Šis PC“ ir sesijos yra įvertis (≈): skaičiuojamos "
-        "visos šio PC Claude Code sesijos — VS Code, terminalas, tiltas, agentai. "
-        "claude.ai naršyklėje ar programėlėje nesimato ir patenka į kitus įrenginius.",
+        t("usage.legend"),
+        t("usage.footnote"),
     ]
     return "\n".join(lines)

@@ -28,6 +28,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from .i18n import t
+
 from .claude_history import EMPTY, _alive, _blocks_text, title
 
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
@@ -54,7 +56,7 @@ PEER_NOTE = (
     "peer request. Ask follow-up questions as plain text, not AskUserQuestion: "
     "its picker can only be answered in the editor, which they are away from. "
     "They get buttons for a numbered list of options, and for a yes/no question "
-    "that ends with (taip/ne)."
+    "that ends with ({cue})."
 )
 
 logger = logging.getLogger(__name__)
@@ -149,7 +151,8 @@ def find(
 def envelope(text: str, from_name: str = "telegram") -> dict:
     """The JSON object one line of which is a user turn for a peer session."""
     name = from_name if _NAME_RE.match(from_name) else "telegram"
-    body = f'<{_TAG} from-name="{name}">\n{_escape(text)}\n</{_TAG}>\n{PEER_NOTE}'
+    note = PEER_NOTE.format(cue=t("answer.cue"))
+    body = f'<{_TAG} from-name="{name}">\n{_escape(text)}\n</{_TAG}>\n{note}'
     return {
         "msgV": _PROTOCOL,
         "msg_id": str(uuid.uuid4()),
@@ -355,19 +358,19 @@ def _question_lines(inputs) -> str:
     """
     questions = (inputs or {}).get("questions") if isinstance(inputs, dict) else None
     if not isinstance(questions, list) or not questions:
-        return "\U0001F914 Waiting for an answer in the editor."
+        return t("live.waiting_in_editor")
     out = []
     for question in questions:
         if not isinstance(question, dict):
             continue
-        out.append(f"\U0001F914 **{question.get('question') or 'Question'}**")
+        out.append(f"\U0001F914 **{question.get('question') or t('live.question')}**")
         for index, option in enumerate(question.get("options") or [], 1):
             if not isinstance(option, dict):
                 continue
             note = option.get("description") or ""
             out.append(f"   {index}. {option.get('label') or '?'}"
                        + (f" — {note}" if note else ""))
-    out.append("   *answer it in the editor; this tab is blocked until then*")
+    out.append("   " + t("live.answer_in_editor"))
     return "\n".join(out)
 
 

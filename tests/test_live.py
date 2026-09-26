@@ -215,7 +215,7 @@ def test_render_spells_out_a_pending_question():
     assert "2. B — Variantas B." in rendered
     # The choice is made by the picker in the editor; say so rather than imply
     # that a reply here answers it.
-    assert "answer it in the editor" in rendered
+    assert "atsakyk editoriuje" in rendered
 
 
 def test_render_ignores_the_user_side():
