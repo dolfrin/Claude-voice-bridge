@@ -93,6 +93,10 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+# /pc actions, as systemctl verbs; logind lets the logged-in user run them.
+_PC_ACTIONS = ("suspend", "poweroff", "reboot")
+
+
 def _answer_markup(text: str) -> InlineKeyboardMarkup | None:
     """Answer buttons for a message that asks something, or None.
 
@@ -1074,6 +1078,9 @@ class TelegramIO:
             else:
                 await query.edit_message_text(t("answer.failed"))
             return
+        if action in {"pc", "pcgo", "pcno"}:
+            await self._handle_pc_callback(query, action, index_str)
+            return
         if action == "cost":
             # Info action: reply with a fresh message, do not touch the panel.
             await query.message.reply_text(await asyncio.to_thread(usage.format_usage, self.usage_ledger))
@@ -1602,6 +1609,62 @@ class TelegramIO:
         # write must not restart into the same backend and pretend it switched.
         if self._agent_switched == name:
             self._restart()
+
+    async def _cmd_pc(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/pc: suspend, power off or reboot this machine, each confirmed."""
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        if not getattr(self.cfg, "pc_power_commands", False):
+            await msg.reply_text(t("pc.disabled"))
+            return
+        await msg.reply_text(t("pc.title"), reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(f"pc.{action}"), callback_data=f"pc:{action}")]
+            for action in _PC_ACTIONS
+        ]))
+
+    async def _handle_pc_callback(self, query, action: str, arg: str) -> None:
+        if not getattr(self.cfg, "pc_power_commands", False) or (
+            action != "pcno" and arg not in _PC_ACTIONS
+        ):
+            await query.edit_message_text(t("pc.disabled"))
+            return
+        if action == "pcno":
+            await query.edit_message_text(t("pc.cancelled"))
+            return
+        if action == "pc":
+            # Nothing happens on the first tap: switching a PC off by a stray
+            # touch in a pocket is exactly what must not be possible.
+            await query.edit_message_text(
+                t(f"pc.confirm_{arg}"),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(t("answer.yes_button"), callback_data=f"pcgo:{arg}"),
+                    InlineKeyboardButton(t("answer.no_button"), callback_data="pcno:"),
+                ]]),
+            )
+            return
+        await query.edit_message_text(t(f"pc.doing_{arg}"))
+        error = await self._power(arg)
+        if error:
+            await self._send_plain(t("pc.failed", error=error))
+
+    async def _power(self, action: str) -> str | None:
+        """Run ``systemctl <action>`` through logind; the error text, or None.
+
+        A moment's pause first, so the confirmation edit reaches Telegram
+        before the network goes down with the machine."""
+        await asyncio.sleep(1.5)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl", action,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+        except OSError as exc:
+            return str(exc)
+        return (err.decode(errors="replace").strip() or f"exit {proc.returncode}") if proc.returncode else None
 
     async def _cmd_status(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2385,6 +2448,8 @@ class TelegramIO:
             CommandHandler("engine", self._cmd_engine, filters=only_me))
         app.add_handler(
             CommandHandler("agent", self._cmd_agent, filters=only_me))
+        app.add_handler(
+            CommandHandler("pc", self._cmd_pc, filters=only_me))
         app.add_handler(
             CommandHandler("status", self._cmd_status, filters=only_me))
         app.add_handler(

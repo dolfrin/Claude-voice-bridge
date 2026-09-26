@@ -322,6 +322,8 @@ AGENT_BACKEND=claude
 
 # Language the bot speaks to you: en (default) or lt (Lithuanian)
 BOT_LANGUAGE=en
+# Let /pc suspend / shut down / restart this machine (off by default)
+PC_POWER_COMMANDS=false
 
 # TTS: choose auto, openai, piper, together, or lithuanian
 # auto uses Piper only for English-looking text and OpenAI for everything else.
@@ -487,6 +489,7 @@ journalctl --user -u voice-bridge -f
 | 🧠 | `/engine <auto\|openai\|piper\|together\|lithuanian>` | Switch TTS backend live |
 | 🗒 | `/recap` | Show what changed across all projects while you were away |
 | 📊 | `/usage` (or `/cost`) | Claude limits of the logged-in account — 5-hour, weekly, per-model (e.g. Fable) — and this PC's estimated share, per session |
+| 💻 | `/pc` | Suspend, shut down or restart this machine — each confirmed with ✅/❌. Off unless `PC_POWER_COMMANDS=true` |
 | ♾ | `/policies` / `/policies clear [project]` | List, or revoke (all / one project's), the always-allow grants |
 | ⏰ | `/schedule` / `/schedule <project> <HH:MM> <prompt>` / `/schedule remove\|on\|off <id>` | List, add, or toggle/remove a daily recurring prompt delivered to a project at a local time |
 | ❓ | `/help` | Routing rules (name-prefix, last-active, quote-reply, `!` urgent), how to answer approvals/questions from the phone, and the command list |

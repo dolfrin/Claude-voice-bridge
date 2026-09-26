@@ -71,6 +71,9 @@ class Config:
     # backwards compatibility; unix:///... lets Telegram and IDE share it.
     codex_app_server_url: str = ""
     bot_language: str = "en"
+    # /pc may suspend, power off or reboot this machine. Off unless asked for:
+    # switching someone's computer off from a chat must be a deliberate choice.
+    pc_power_commands: bool = False
 
 
 @dataclass
@@ -201,6 +204,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         agent_backend=agent_backend,
         codex_app_server_url=(env.get("CODEX_APP_SERVER_URL") or "").strip(),
         bot_language=bot_language,
+        pc_power_commands=_optional_bool(env, "PC_POWER_COMMANDS", False),
     )
 
 

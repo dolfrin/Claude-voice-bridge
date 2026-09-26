@@ -2927,7 +2927,7 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
     registered_names = {cmd.command for cmd in registered}
     assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
             "mode", "effort", "voice", "verbose", "engine", "recap", "usage", "info", "policies", "schedule", "help",
-            "live", "agent"} == registered_names
+            "live", "agent", "pc"} == registered_names
 
 
 @pytest.mark.asyncio
@@ -3965,3 +3965,59 @@ async def test_hook_message_gets_buttons_when_its_session_asked(tmp_path):
     call = io.app.bot.edit_message_reply_markup.await_args_list
     assert [c.kwargs["message_id"] for c in call] == [900]
     assert mark > 0
+
+
+# --------------------------------------------------------------------------
+# /pc: suspend / power off / reboot, off by default, always confirmed
+# --------------------------------------------------------------------------
+def _pc_io(enabled=True):
+    cfg = make_cfg()
+    cfg.pc_power_commands = enabled
+    io = TelegramIO(cfg, AsyncMock(), FakeControls())
+    io._power = AsyncMock(return_value=None)
+    return io
+
+
+def _pc_query(data):
+    query = AsyncMock()
+    query.data = data
+    query.from_user = MagicMock(id=42)
+    return query
+
+
+@pytest.mark.asyncio
+async def test_pc_is_off_unless_enabled():
+    io = _pc_io(enabled=False)
+    upd = make_cmd_update("/pc")
+    await io._cmd_pc(upd, make_ctx([]))
+    assert "PC_POWER_COMMANDS" in upd.message.reply_text.await_args.args[0]
+
+    await io._handle_callback(MagicMock(callback_query=_pc_query("pcgo:poweroff")), MagicMock())
+    io._power.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pc_needs_a_confirmation_tap():
+    io = _pc_io()
+    upd = make_cmd_update("/pc")
+    await io._cmd_pc(upd, make_ctx([]))
+    data = [r[0].callback_data for r in upd.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard]
+    assert data == ["pc:suspend", "pc:poweroff", "pc:reboot"]
+
+    first = _pc_query("pc:suspend")
+    await io._handle_callback(MagicMock(callback_query=first), MagicMock())
+    io._power.assert_not_awaited()  # the first tap only asks
+    confirm = first.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard[0]
+    assert [b.callback_data for b in confirm] == ["pcgo:suspend", "pcno:"]
+
+    await io._handle_callback(MagicMock(callback_query=_pc_query("pcno:")), MagicMock())
+    io._power.assert_not_awaited()
+    await io._handle_callback(MagicMock(callback_query=_pc_query("pcgo:suspend")), MagicMock())
+    io._power.assert_awaited_once_with("suspend")
+
+
+@pytest.mark.asyncio
+async def test_pc_refuses_an_unknown_action():
+    io = _pc_io()
+    await io._handle_callback(MagicMock(callback_query=_pc_query("pcgo:rm-rf")), MagicMock())
+    io._power.assert_not_awaited()

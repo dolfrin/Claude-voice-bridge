@@ -520,3 +520,38 @@ LT.update({
     "status.interrupted": "Nutraukta.",
     "status.working": "Pradedu.",
 })
+
+
+# --- /pc ---------------------------------------------------------------------------
+EN.update({
+    "cmd.pc": "💻 Suspend / shut down this PC",
+    "pc.disabled": "/pc is off. To allow suspending or shutting down this PC from Telegram, set PC_POWER_COMMANDS=true in .env and restart the bridge.",
+    "pc.title": "💻 This PC:",
+    "pc.suspend": "😴 Suspend",
+    "pc.poweroff": "🔌 Shut down",
+    "pc.reboot": "🔄 Restart",
+    "pc.confirm_suspend": "Suspend the PC? Work in progress stops; a key press or the power button wakes it, and the bridge comes back with it.",
+    "pc.confirm_poweroff": "Shut the PC down? The bridge goes down too — it can only be switched on again at the machine.",
+    "pc.confirm_reboot": "Restart the PC? Work in progress stops; the bridge is back in a minute or two.",
+    "pc.cancelled": "Cancelled — the PC stays as it is.",
+    "pc.doing_suspend": "😴 Suspending…",
+    "pc.doing_poweroff": "🔌 Shutting down…",
+    "pc.doing_reboot": "🔄 Restarting…",
+    "pc.failed": "⚠️ It did not work: {error}",
+})
+LT.update({
+    "cmd.pc": "💻 Užmigdyti / išjungti PC",
+    "pc.disabled": "/pc išjungta. Kad iš Telegram galėtum užmigdyti ar išjungti šį PC, .env nustatyk PC_POWER_COMMANDS=true ir perkrauk tiltą.",
+    "pc.title": "💻 Šis PC:",
+    "pc.suspend": "😴 Užmigdyti",
+    "pc.poweroff": "🔌 Išjungti",
+    "pc.reboot": "🔄 Perkrauti",
+    "pc.confirm_suspend": "Užmigdyti PC? Vykstantis darbas sustos; pažadinsi klavišu ar maitinimo mygtuku, tiltas grįš kartu.",
+    "pc.confirm_poweroff": "Išjungti PC? Tiltas irgi išsijungs — vėl įjungti galėsi tik prie kompiuterio.",
+    "pc.confirm_reboot": "Perkrauti PC? Vykstantis darbas sustos; tiltas grįš po minutės kitos.",
+    "pc.cancelled": "Atšaukta — PC lieka kaip buvo.",
+    "pc.doing_suspend": "😴 Užmigdau…",
+    "pc.doing_poweroff": "🔌 Išjungiu…",
+    "pc.doing_reboot": "🔄 Perkraunu…",
+    "pc.failed": "⚠️ Nepavyko: {error}",
+})
