@@ -3704,10 +3704,36 @@ async def test_restore_live_clears_a_marker_whose_session_is_gone(monkeypatch, t
     marker.write_text("sess-gone")
     monkeypatch.setattr(type(io), "live_marker", staticmethod(lambda: marker))
     monkeypatch.setattr(live_mod, "list_sessions", lambda *a, **k: [])
+    import voice_bridge.telegram_io as tio
+    monkeypatch.setattr(tio.asyncio, "sleep", AsyncMock())
 
     await io._restore_live()
 
     assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_restore_live_survives_a_registry_caught_mid_write(monkeypatch, tmp_path):
+    """Claude Code rewrites its registry file constantly; one read that misses
+    the session must not drop the attachment."""
+    from types import SimpleNamespace
+
+    import voice_bridge.telegram_io as tio
+    from voice_bridge import live as live_mod
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    marker = tmp_path / ".voice-bridge-live"
+    marker.write_text("cur")
+    monkeypatch.setattr(type(io), "live_marker", staticmethod(lambda: marker))
+    reads = iter([[], [SimpleNamespace(session_id="cur", pid=8)]])
+    monkeypatch.setattr(live_mod, "list_sessions", lambda *a, **k: next(reads))
+    monkeypatch.setattr(tio.asyncio, "sleep", AsyncMock())
+    io._attach_live = AsyncMock(return_value="ok")
+
+    await io._restore_live()
+
+    io._attach_live.assert_awaited_once_with("8")
+    assert marker.exists()
 
 
 @pytest.mark.asyncio

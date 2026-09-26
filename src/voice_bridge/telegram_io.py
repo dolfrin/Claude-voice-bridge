@@ -3064,10 +3064,18 @@ class TelegramIO:
             session_id = marker.read_text().strip() if marker.exists() else ""
             if not session_id:
                 return
-            for session in live.list_sessions():
-                if session.session_id == session_id:
-                    await self._attach_live(str(session.pid))
-                    return
+            # Claude Code rewrites its registry file constantly (status,
+            # updatedAt); a read caught mid-write looks like "session gone".
+            # Taking that at face value dropped the attachment on restarts,
+            # so look a few times before concluding the session is really gone.
+            for attempt in range(6):
+                for session in live.list_sessions():
+                    if session.session_id == session_id:
+                        await self._attach_live(str(session.pid))
+                        logger.info("live: re-joined %s after start", session_id)
+                        return
+                await asyncio.sleep(2)
+            logger.info("live: %s is gone, not re-joining", session_id)
             marker.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001 - startup must survive a bad marker
             logger.exception("live: could not restore the attachment")
