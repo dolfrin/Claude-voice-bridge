@@ -3904,3 +3904,62 @@ async def test_note_route_speaks_only_when_the_destination_changes():
 
     sent = [c.args[0] for c in io._send_plain.await_args_list]
     assert sent == ["➡️ Qwing · testai", "➡️ bridge · README"]
+
+
+# --------------------------------------------------------------------------
+# Answer buttons: ✅ Taip / ❌ Ne and numbered options, to the session that asked
+# --------------------------------------------------------------------------
+def test_answer_markup_for_yes_no_and_options():
+    from voice_bridge.telegram_io import _answer_markup
+
+    yn = _answer_markup("Padariau.\n\nAr įkelti?")
+    assert [b.callback_data for b in yn.inline_keyboard[0]] == ["ans:taip", "ans:ne"]
+    opts = _answer_markup("Rinkis:\n1. Greitai\n2. Tvarkingai")
+    assert [r[0].callback_data for r in opts.inline_keyboard] == ["ans:1", "ans:2"]
+    assert _answer_markup("Padaryta.") is None
+
+
+@pytest.mark.asyncio
+async def test_answer_button_goes_to_the_session_that_asked_and_keeps_the_text():
+    from voice_bridge import sent_log
+
+    sent_log.record(77, "ide-qwing", "/p/qwing")
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.live_send_to = AsyncMock(return_value=True)
+    query = AsyncMock()
+    query.data = "ans:taip"
+    query.from_user = MagicMock(id=42)
+    query.message = MagicMock(message_id=77)
+
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    io.live_send_to.assert_awaited_once_with("ide-qwing", "taip")
+    query.edit_message_text.assert_not_awaited()  # the question stays readable
+    markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].text == "✅ Atsakyta: taip"
+
+
+@pytest.mark.asyncio
+async def test_hook_message_gets_buttons_when_its_session_asked(tmp_path):
+    import json as _json
+
+    from voice_bridge import sent_log
+
+    root = tmp_path / "projects"
+    (root / "p").mkdir(parents=True)
+    (root / "p" / "sess.jsonl").write_text(_json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "Viskas.\n\nAr įkelti?"}]},
+    }) + "\n")
+    sent_log.record(900, "sess", "/p")      # the Stop hook's "finished" message
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.app = MagicMock()
+    io.app.bot = AsyncMock()
+    io._own_sent.add(901)
+    sent_log.record(901, "sess", "/p")      # the bridge's own: skipped
+
+    mark = await io._add_hook_buttons(0.0, root)
+
+    call = io.app.bot.edit_message_reply_markup.await_args_list
+    assert [c.kwargs["message_id"] for c in call] == [900]
+    assert mark > 0

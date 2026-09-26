@@ -314,7 +314,19 @@ def _stamp(ts: float, now: float) -> str:
     return local.strftime("%H:%M" if same_day else "%m-%d %H:%M")
 
 
+def _bar(total: float, mine: float | None) -> str:
+    """Ten cells: 🟦 this PC, then other devices (🟩, 🟨 past half, 🟥 past
+    80 %), ⬜ what is left. Any use shows at least one cell."""
+    used = max(1, round(total / 10)) if total > 0 else 0
+    used = min(used, 10)
+    own = min(used, max(1, round(mine / 10)) if mine and mine > 0 else 0)
+    other = "🟥" if total >= 80 else "🟨" if total >= 50 else "🟩"
+    return "🟦" * own + other * (used - own) + "⬜" * (10 - used)
+
+
 def _pct(value: float) -> str:
+    if 0 < value < 0.1:
+        return "< 0.1 %"
     return f"{value:.1f} %" if value < 10 else f"{value:.0f} %"
 
 
@@ -376,16 +388,17 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
         else:
             title = "📅 Savaitė" + (f", tik {limit['model']}" if limit["model"] else "")
         lines += ["", f"{title}: {_stamp(start, now)} – {_stamp(reset, now)} (atsinaujins {_until(reset, now)})"]
-        total = f"• Bendrai paskyroj (visi įrenginiai): {limit['pct']:.0f} %"
-        if limit["key"] == "weekly_all" and sample["breakdown"]:
-            total += " — " + ", ".join(f"{name} {pct} %" for name, pct in sample["breakdown"])
-        lines.append(total)
-
         k = _pct_per_token(samples, sample["account"], limit["key"])
         mine = sample["w"][limit["key"]]["l"]
+        mine_pct = min(limit["pct"], k * mine) if k is not None else None
+        total = f"{_bar(limit['pct'], mine_pct)} {limit['pct']:.0f} % bendrai"
+        if limit["key"] == "weekly_all" and sample["breakdown"]:
+            total += " (" + ", ".join(f"{name} {pct} %" for name, pct in sample["breakdown"]) + ")"
+        lines.append(total)
+
         since = f"nuo {_stamp(counted_from, now)}"
-        if k is not None:
-            lines.append(f"• Šis PC {since}: ≈ {_pct(min(limit['pct'], k * mine))}, iš jų:")
+        if mine_pct is not None:
+            lines.append(f"• Šis PC {since}: ≈ {_pct(mine_pct)}, iš jų:")
         else:
             readings = _window_samples(samples, sample["account"], limit["key"], reset, counted_from)
             if len(readings) > 1:
@@ -402,6 +415,7 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
         lines.extend(_session_lines(root, turns, now, k))
     lines += [
         "",
+        "🟦 šis PC · 🟩 kiti įrenginiai (ar dar neišskirta) · ⬜ liko",
         "% — nuo tavo limito. „Šis PC“ ir sesijos yra įvertis (≈): skaičiuojamos "
         "visos šio PC Claude Code sesijos — VS Code, terminalas, tiltas, agentai. "
         "claude.ai naršyklėje ar programėlėje nesimato ir patenka į kitus įrenginius.",

@@ -61,7 +61,7 @@ def test_other_accounts_turns_are_not_counted_and_estimate_waits(home, monkeypat
 
     text = usage.format_usage(ledger, home, now)
     assert "acc-B@x (max 20x)" in text
-    assert "Bendrai paskyroj (visi įrenginiai): 2 %" in text  # account total, exact
+    assert " 2 % bendrai" in text  # account total, exact
     assert ": < 1 % — tiek paskyra pakilo" in text  # no rise to price from: a ceiling
 
 
@@ -80,7 +80,7 @@ def test_estimate_after_calibration_is_capped_by_account_total(home, monkeypatch
     _limits(monkeypatch, 40, 40, now + 60)
     text = usage.format_usage(ledger, home, now + 60)
 
-    assert "Bendrai paskyroj (visi įrenginiai): 40 %" in text
+    assert "🟦🟩🟩🟩⬜⬜⬜⬜⬜⬜ 40 % bendrai" in text  # 10 % this PC, 30 % others
     assert "Šis PC nuo" in text and "≈ 10 %, iš jų:" in text
     assert "≈ 10 % — proj" in text  # the session, in % of the LIMIT
 
@@ -142,4 +142,12 @@ def test_model_scoped_limit_counts_only_that_models_turns(home, monkeypatch):
     assert sample["w"]["weekly_all"]["l"] == 2000.0          # both models
     assert sample["w"]["weekly_scoped:fable"]["l"] == 500.0  # Fable only
     text = usage.format_usage(home / "ledger.jsonl", home, now + 60)
-    assert "📅 Savaitė, tik Fable" in text and ": 8 %" in text
+    assert "📅 Savaitė, tik Fable" in text and " 8 % bendrai" in text
+
+
+def test_bar_shows_this_pc_others_and_whats_left():
+    assert usage._bar(30, 10) == "🟦🟩🟩⬜⬜⬜⬜⬜⬜⬜"
+    assert usage._bar(6, None) == "🟩⬜⬜⬜⬜⬜⬜⬜⬜⬜"   # any use shows
+    assert usage._bar(85, 85) == "🟦🟦🟦🟦🟦🟦🟦🟦⬜⬜"   # all of it this PC
+    assert usage._bar(90, 0) == "🟥" * 9 + "⬜"
+    assert usage._bar(0, None) == "⬜" * 10

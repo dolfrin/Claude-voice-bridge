@@ -52,7 +52,9 @@ PEER_NOTE = (
     "and they are reading this session's transcript live. Answer here as you "
     "normally would -- do not reply with SendMessage, and do not treat this as a "
     "peer request. Ask follow-up questions as plain text, not AskUserQuestion: "
-    "its picker can only be answered in the editor, which they are away from."
+    "its picker can only be answered in the editor, which they are away from. "
+    "They get buttons for a numbered list of options, and for a yes/no question "
+    "that ends with (taip/ne)."
 )
 
 logger = logging.getLogger(__name__)
@@ -461,3 +463,73 @@ def parse_options(text: str) -> list[str]:
     if [n for n, _ in found] != list(range(1, len(found) + 1)):
         return []
     return [label for _, label in found]
+
+
+# An explicit yes/no cue anywhere in the closing paragraph: „taip“ arba „ne“,
+# taip/ne, (yes/no), yes or no.
+_YES_NO_CUE_RE = re.compile(
+    r"\btaip\b\W{0,3}\s*(?:/|arba|ar)\s*\W{0,3}\bne\b|\byes\b\W{0,3}\s*(?:/|or)\s*\W{0,3}\bno\b",
+    re.IGNORECASE,
+)
+# A closing question that can only be answered yes or no.
+_YES_NO_START_RE = re.compile(
+    r"^(?:ar|should i|shall i|do you want|want me to|can i|may i|is it ok|ok to)\b",
+    re.IGNORECASE,
+)
+
+
+def is_yes_no_question(text: str) -> bool:
+    """Does the message end by asking for a yes or a no?
+
+    Only the closing paragraph counts -- a question buried mid-message is not
+    what the session is waiting on. Either an explicit cue ("taip arba ne",
+    "yes/no") or a last sentence like "Ar daryti?" / "Should I ...?". Strict
+    for the same reason as :func:`parse_options`: a miss means typing the
+    answer, a false positive puts buttons under something that asked nothing.
+    Never raises.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    closing = text.strip().split("\n\n")[-1][-400:]
+    if _YES_NO_CUE_RE.search(closing):
+        return True
+    sentences = re.split(r"(?<=[.!?])\s+", closing.strip())
+    last = sentences[-1].strip(" *_") if sentences else ""
+    return last.endswith("?") and bool(_YES_NO_START_RE.match(last))
+
+
+def last_assistant_text(path: Path | None, tail_bytes: int = 256 * 1024) -> str:
+    """Text of the session's final assistant message, or "" if it ended otherwise.
+
+    "" when the last assistant entry is a tool call (a permission prompt, an
+    editor picker): only a turn that ended in words can be answered from the
+    phone. Reads the tail of the transcript only. Never raises.
+    """
+    if path is None:
+        return ""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - tail_bytes))
+            lines = fh.read().decode(errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") != "assistant":
+            continue
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        if any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content):
+            return ""
+        texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        if any(t.strip() for t in texts):
+            return "\n".join(texts)
+        # A thinking-only entry: the text is in an earlier line of this reply.
+    return ""

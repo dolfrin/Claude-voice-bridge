@@ -399,3 +399,44 @@ def test_typed_here_tells_the_keyboard_from_telegram(tmp_path):
     assert live.typed_here(path, first, path.stat().st_size) is True
     # Nothing new since then -> nothing to report.
     assert live.typed_here(path, path.stat().st_size, path.stat().st_size) is False
+
+
+# --------------------------------------------------------------------------
+# yes/no questions and the final assistant text (answer buttons)
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("text", [
+    "Viską padariau.\n\nParašyk „taip“ arba „ne“.",
+    "Ready to push? (yes/no)",
+    "Pataisiau testus.\n\nAr įkelti į GitHub?",
+    "Done.\n\nShould I deploy it now?",
+    "Tai **taip / ne**?",
+])
+def test_yes_no_questions_are_recognised(text):
+    assert live.is_yes_no_question(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "Ar tai veikia? Taip, patikrinau.\n\nViskas įkelta.",  # question not at the end
+    "Kurį variantą renkiesi?",                              # open question
+    "Padaryta.",
+    "",
+    None,
+])
+def test_other_messages_are_not_yes_no_questions(text):
+    assert live.is_yes_no_question(text) is False
+
+
+def test_last_assistant_text_only_when_the_turn_ended_in_words(tmp_path):
+    import json as _json
+
+    path = tmp_path / "s.jsonl"
+    text_entry = {"type": "assistant", "message": {"content": [{"type": "text", "text": "Ar daryti?"}]}}
+    thinking = {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "..."}]}}
+    tool = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}}
+
+    path.write_text(_json.dumps(text_entry) + "\n" + _json.dumps(thinking) + "\n")
+    assert live.last_assistant_text(path) == "Ar daryti?"
+
+    path.write_text(_json.dumps(text_entry) + "\n" + _json.dumps(tool) + "\n")
+    assert live.last_assistant_text(path) == ""  # waiting on a tool, not on the user
+    assert live.last_assistant_text(None) == ""

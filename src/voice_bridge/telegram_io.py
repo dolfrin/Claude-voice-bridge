@@ -92,6 +92,25 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+def _answer_markup(text: str) -> InlineKeyboardMarkup | None:
+    """Answer buttons for a message that asks something, or None.
+
+    Numbered options get a button each (the number is sent back, as typing
+    it would); a yes/no question gets ✅ Taip / ❌ Ne."""
+    options = live.parse_options(text)
+    if options:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{i}. {label[:40]}", callback_data=f"ans:{i}")]
+            for i, label in enumerate(options, 1)
+        ])
+    if live.is_yes_no_question(text):
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Taip", callback_data="ans:taip"),
+            InlineKeyboardButton("❌ Ne", callback_data="ans:ne"),
+        ]])
+    return None
+
+
 class Controls(Protocol):
     """State surface implemented by bridge.py (Task 10).
 
@@ -408,6 +427,9 @@ class TelegramIO:
         self._agent_switched: str | None = None
         # Where the last message was delivered (see note_route).
         self._last_route: str | None = None
+        # Message ids this process sent: the hook-button watcher skips them.
+        self._own_sent: set = set()
+        self._hook_buttons_task: asyncio.Task | None = None
         # Which Claude account was logged in when, and its limits over time:
         # what /usage needs to tell this PC's part from the account's total.
         self.usage_ledger = usage.ledger_path(cfg.db_path)
@@ -1040,6 +1062,9 @@ class TelegramIO:
                 # Almost always: the editor session stopped waiting before the
                 # tap landed, so it is already asking there instead.
                 await query.edit_message_text("⌛ Per vėlu — atsakyk editoriuje.")
+            return
+        if action == "ans":
+            await self._answer_from_button(query, index_str)
             return
         if action == "liveans":
             # Answer a live session's plain-text question by sending the chosen
@@ -1858,6 +1883,59 @@ class TelegramIO:
             )
         return sent
 
+    async def _answer_from_button(self, query, value: str) -> None:
+        """Send a tapped answer ("taip", "ne", "2") to the session that asked.
+
+        The session is the one that sent the message carrying the buttons
+        (sent_log), falling back to the attached one. The question stays
+        readable: only the buttons change, to say what was answered."""
+        entry = sent_log.lookup(query.message.message_id)
+        if entry and entry.get("s"):
+            sent = await self.live_send_to(entry["s"], value)
+        else:
+            sent = self.live_target() is not None and await self.live_send(value)
+        label = {"taip": "✅ Atsakyta: taip", "ne": "❌ Atsakyta: ne"}.get(
+            value, f"➡️ Atsakyta: {value}"
+        ) if sent else "⚠️ Sesija neatidaryta — atsakyk VS Code"
+        await self._edit_callback_markup(
+            query, InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data="noop:")]])
+        )
+
+    async def _buttons_for_hook_messages(self) -> None:
+        """Put answer buttons under the IDE hooks' own Telegram messages.
+
+        The hooks post "finished" notices straight to Telegram and record
+        which session each came from. When that session's turn ended on a
+        yes/no question or numbered options, the same bot adds the buttons
+        afterwards, so the hooks stay plain curl. Runs until cancelled."""
+        seen_until = time.time()
+        while True:
+            await asyncio.sleep(2)
+            try:
+                seen_until = await self._add_hook_buttons(seen_until)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a missed button is not worth dying for
+                logger.exception("hook buttons: pass failed")
+
+    async def _add_hook_buttons(self, seen_until: float, root: Path | None = None) -> float:
+        """One pass of :meth:`_buttons_for_hook_messages`; returns the new mark."""
+        root = root or Path.home() / ".claude" / "projects"
+        entries = [
+            e for e in sent_log._tail(None)
+            if (e.get("t") or 0) > seen_until and e.get("s")
+            and e.get("m") not in self._own_sent
+        ]
+        for entry in sorted(entries, key=lambda e: e["t"]):
+            seen_until = entry["t"]
+            text = live.last_assistant_text(live.transcript_of(root, entry["s"]))
+            markup = _answer_markup(text)
+            if markup is not None and self.app is not None:
+                await self.app.bot.edit_message_reply_markup(
+                    chat_id=self._chat_id, message_id=entry["m"], reply_markup=markup
+                )
+        return seen_until
+
     def session_label(self, session) -> str:
         """``Project · conversation title`` for a live session."""
         project = self.project_for_cwd(session.cwd)
@@ -1922,6 +2000,7 @@ class TelegramIO:
         mid = getattr(message, "message_id", None)
         if message is None or mid is None:
             return
+        self._own_sent.add(mid)
         try:
             sent_log.record(mid, session_id, cwd)
         except (OSError, TypeError, ValueError):
@@ -2096,15 +2175,7 @@ class TelegramIO:
                 # picker is NOT answerable this way — it is answered in the
                 # editor that raised it — so live.render says exactly that
                 # instead, and parse_options finds nothing there to tap.)
-                options = live.parse_options(body)
-                markup = None
-                if options:
-                    markup = InlineKeyboardMarkup([
-                        [InlineKeyboardButton(
-                            f"{i}. {label[:40]}", callback_data=f"liveans:{i}"
-                        )]
-                        for i, label in enumerate(options, 1)
-                    ])
+                markup = _answer_markup(body)
                 # Every message says which conversation it is from: with more
                 # than one session working, an unlabeled "🔧 Bash ..." could be
                 # any of them.
@@ -2378,6 +2449,7 @@ class TelegramIO:
         await app.updater.start_polling()
         if self._claude_live_enabled:
             self._perm_task = asyncio.create_task(self._watch_permissions())
+            self._hook_buttons_task = asyncio.create_task(self._buttons_for_hook_messages())
             await self._restore_live()
         else:
             self._detach_live()
@@ -2414,9 +2486,11 @@ class TelegramIO:
 
     async def stop(self) -> None:
         """Stop polling and shut the Application down (idempotent)."""
-        task, self._perm_task = self._perm_task, None
-        if task is not None:
-            task.cancel()
+        for name in ("_perm_task", "_hook_buttons_task"):
+            task = getattr(self, name)
+            setattr(self, name, None)
+            if task is not None:
+                task.cancel()
         app = self.app
         if app is None:
             return
