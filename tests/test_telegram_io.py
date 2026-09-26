@@ -4051,7 +4051,7 @@ async def test_with_several_sessions_open_a_message_can_be_moved(monkeypatch):
     await io.note_route("q", "q", session_id="q", cwd="/p/qwing", text="padaryk README")
     await io.note_route("q", "q", session_id="q", cwd="/p/qwing", text="dar vienas")
 
-    assert io._send_plain.await_count == 2  # shown every time, not only on change
+    assert io._send_plain.await_count == 1  # only when the destination changes
     markup = io._send_plain.await_args_list[0].args[1]
     button = markup.inline_keyboard[0][0]
     assert button.text == "↪️ b" and button.callback_data.startswith("mv:1:2")

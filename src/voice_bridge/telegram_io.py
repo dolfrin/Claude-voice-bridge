@@ -2241,16 +2241,15 @@ class TelegramIO:
         self, key: str, label: str, session_id: str | None = None, cwd: str = "",
         text: str | None = None,
     ) -> None:
-        """Say where a message went.
+        """Say where a message went -- only when the destination changes.
 
-        With one session open: once per change of destination (every message
-        confirmed would be noise). With several open, no rule reliably knows
-        which one a plain message was meant for, so every delivery is shown,
-        with a button per other open session that moves the message there.
+        The pinned "🎯" already says where a plain message goes, so confirming
+        every message was noise the user had not asked for. On a change, the
+        other open sessions come as "↪️" buttons in case it was the wrong one.
         """
-        others = self._other_open_sessions(session_id) if text and session_id else []
-        if key == self._last_route and not others:
+        if key == self._last_route:
             return
+        others = self._other_open_sessions(session_id) if text and session_id else []
         self._last_route = key
         markup = None
         if others:
