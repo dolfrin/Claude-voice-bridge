@@ -4245,3 +4245,25 @@ async def test_new_conversation_asks_where_and_hidden_delivers_in_background(mon
 
     controls.enable_and_deliver.assert_awaited_once_with(project, "padaryk X")
     assert io.wants_start_choice(project) is False  # chosen: no second question
+
+
+@pytest.mark.asyncio
+async def test_no_went_to_notice_right_after_joining_a_session(monkeypatch, tmp_path):
+    """After a restart the bridge re-joins the current session; the first
+    message there must not be announced as a change of destination."""
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    session = SimpleNamespace(pid=3, session_id="cur", cwd="/p/x", started_at=0, socket_path="/s")
+    monkeypatch.setattr(live_mod, "find", lambda pid, d: session)
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._tail_live = AsyncMock()
+    io._show_target = AsyncMock()
+    io._write_live_marker = lambda sid: None
+    io._send_plain = AsyncMock()
+
+    await io._attach_live("3")
+    await io.note_route("cur", "x", session_id="cur", cwd="/p/x", text="labas")
+
+    io._send_plain.assert_not_awaited()

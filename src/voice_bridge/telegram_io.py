@@ -2167,11 +2167,17 @@ class TelegramIO:
             and e.get("m") not in self._own_sent
         ]
         current = getattr(self._live_session, "session_id", None)
+        try:
+            marked = self.live_marker().read_text().strip()
+        except OSError:
+            marked = ""
         for entry in sorted(entries, key=lambda e: e["t"]):
             seen_until = entry["t"]
             text = live.last_assistant_text(live.transcript_of(root, entry["s"]))
             markup = _answer_markup(text)
-            if entry["s"] != current:
+            if entry["s"] not in {current, marked}:
+                logger.info("hook buttons: 🎯 under %s from %s (current %s, marker %s)",
+                            entry["m"], entry["s"], current, marked or "-")
                 # Another session spoke: one tap makes it the current one.
                 rows = list(markup.inline_keyboard) if markup is not None else []
                 rows.append([InlineKeyboardButton(
@@ -2422,6 +2428,9 @@ class TelegramIO:
         self._write_live_marker(session.session_id)
         self._live_task = asyncio.create_task(self._tail_live(session))
         self._bridge_project = None
+        # Joined deliberately (or restored after a restart) and pinned below:
+        # the next message there is not a change of destination to announce.
+        self._last_route = session.session_id
         project = self.project_for_cwd(session.cwd)
         if project is not None:
             with contextlib.suppress(Exception):
@@ -2990,6 +2999,12 @@ class TelegramIO:
         app.add_handler(
             CommandHandler("live", self._cmd_live, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
+
+        async def _log_error(update, context) -> None:
+            # One line, not a traceback wall: these are network blips.
+            logger.warning("telegram: %s: %s", type(context.error).__name__, context.error)
+
+        app.add_error_handler(_log_error)
         app.add_handler(MessageHandler(
             only_me & filters.VOICE, self._handle_voice))
         app.add_handler(MessageHandler(
