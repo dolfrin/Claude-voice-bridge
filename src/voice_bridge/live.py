@@ -79,6 +79,8 @@ class LiveSession:
     status: str = ""
     started_at: int = 0
     updated_at: int = 0
+    # When the status last changed (ms): with status "busy", busy since then.
+    status_since: int = 0
 
     @property
     def last_active(self) -> int:
@@ -142,6 +144,7 @@ def list_sessions(
                 status=str(data.get("status") or ""),
                 started_at=int(data.get("startedAt") or 0),
                 updated_at=int(data.get("updatedAt") or 0),
+                status_since=int(data.get("statusUpdatedAt") or 0),
             )
         )
     return sorted(out, key=lambda s: s.started_at, reverse=True)

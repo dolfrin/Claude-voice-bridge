@@ -181,6 +181,13 @@ class _Desktop:
 _desktop = _Desktop()
 
 
+def _duration(seconds: float) -> str:
+    minutes = max(0, int(seconds // 60))
+    if minutes < 60:
+        return t("route.for_minutes", n=minutes)
+    return t("route.for_hours", h=minutes // 60, m=minutes % 60)
+
+
 def _open_session_for(sessions, cwd: str):
     """The live session working in *cwd* (or below it), the most recently
     active one when several are; None if there is none."""
@@ -1947,13 +1954,14 @@ class TelegramIO:
                                    self._interrupt_markup(session))
             return
         what, since = activity
-        minutes = max(0, int((now - since) // 60))
-        took = t("route.for_minutes", n=minutes) if minutes < 60 else t(
-            "route.for_hours", h=minutes // 60, m=minutes % 60
-        )
         what = t("route.thinking") if what == "🤔" else what
+        # The whole task (busy since, from the registry) AND the current step:
+        # a long task is hundreds of short steps, so the step alone always
+        # read "0 min"; a stuck step is the one whose own time keeps growing.
+        busy_since = (getattr(session, "status_since", 0) or 0) / 1000 or since
         await self._send_plain(
-            t("route.busy_doing", label=self.session_label(session), what=what, took=took),
+            t("route.busy_doing", label=self.session_label(session), what=what,
+              total=_duration(now - busy_since), step=_duration(now - since)),
             self._interrupt_markup(session),
         )
 
@@ -2432,12 +2440,11 @@ class TelegramIO:
             text = live.last_assistant_text(live.transcript_of(root, entry["s"]))
             markup = _answer_markup(text)
             if entry["s"] not in {current, marked}:
+                # Another session cut into the conversation: offer (not
+                # instruct) to switch to it, naming it.
                 logger.info("hook buttons: 🎯 under %s from %s (current %s, marker %s)",
                             entry["m"], entry["s"], current, marked or "-")
-                # Another session spoke: one tap makes it the current one.
                 rows = list(markup.inline_keyboard) if markup is not None else []
-                # Name the target: a bare "write here" read like an instruction,
-                # not like the offer to switch that it is.
                 rows.append([InlineKeyboardButton(
                     t("target.write_here", name=Path(entry.get("c") or "").name or "?"),
                     callback_data=f"tgt:{entry['s']}",

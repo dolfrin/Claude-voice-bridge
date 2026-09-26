@@ -4350,3 +4350,33 @@ async def test_message_to_a_busy_session_says_it_is_queued(monkeypatch):
 
     io._send_plain.assert_awaited_once()
     assert "eilėje" in io._send_plain.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_busy_notice_names_the_step_and_both_durations(monkeypatch, tmp_path):
+    """The notice text must render with a real running step (it once asked
+    the catalog for a field it no longer had)."""
+    import json as _json
+    import time as _time
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    transcript = tmp_path / "q.jsonl"
+    started = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(_time.time() - 180))
+    transcript.write_text(_json.dumps({"type": "assistant", "timestamp": started, "message": {"content": [
+        {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "pytest -x"}}]}}) + "\n")
+    busy = SimpleNamespace(pid=4, session_id="q", cwd="/p/q", socket_path="/s", status="busy",
+                           started_at=0, status_since=int((_time.time() - 3900) * 1000))
+    monkeypatch.setattr(live_mod, "find", lambda pid, d: busy)
+    monkeypatch.setattr(live_mod, "transcript_of", lambda root, sid: transcript)
+    monkeypatch.setattr(live_mod, "running_commands", lambda pid: [9])
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._send_plain = AsyncMock()
+    io.session_label = lambda s: "Qwing"
+
+    await io._note_if_busy(busy)
+
+    text = io._send_plain.await_args.args[0]
+    assert "dirba jau 1 val. 5 min" in text and "Bash pytest" in text and "(3 min)" in text
+    assert io._send_plain.await_args.args[1] is not None  # ⛔ Nutraukti offered

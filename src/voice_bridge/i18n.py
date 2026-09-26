@@ -731,13 +731,13 @@ LT.update({
     "route.busy": "⏳ {label} dabar dirba — tavo žinutė eilėje, atsakys kai baigs dabartinį darbą.",
 })
 EN.update({
-    "route.busy_doing": "⏳ {label} is busy: {what} — for {took}. Your message is queued; it answers once that is done.",
+    "route.busy_doing": "⏳ {label} has been working for {total} — now: {what} ({step}). Your message is queued; it answers once that step is done.",
     "route.thinking": "🤔 thinking",
     "route.for_minutes": "{n} min",
     "route.for_hours": "{h} h {m} min",
 })
 LT.update({
-    "route.busy_doing": "⏳ {label} dabar dirba: {what} — jau {took}. Tavo žinutė eilėje, atsakys kai baigs.",
+    "route.busy_doing": "⏳ {label} dirba jau {total} — dabar: {what} ({step}). Tavo žinutė eilėje, pamatys kai baigs šį žingsnį.",
     "route.thinking": "🤔 mąsto",
     "route.for_minutes": "{n} min",
     "route.for_hours": "{h} val. {m} min",
