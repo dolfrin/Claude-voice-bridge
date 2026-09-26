@@ -1,20 +1,23 @@
 """Claude subscription limits: the logged-in account's total, and this PC's part.
 
 The account numbers come from the same endpoint Claude Code's own ``/usage``
-reads. It is not a documented public API, so a failure is reported as "no
-data", never guessed. They cover EVERY device using the account.
+reads: every limit the account has (the 5-hour session, the week, and
+model-scoped weeks such as Fable). It is not a documented public API, so a
+failure is reported as "no data", never guessed. The numbers cover EVERY
+device using the account.
 
 Anthropic does not say how much of that one PC used, and the transcripts in
 ``~/.claude/projects`` do not record which account a turn ran under (one PC may
 switch between several). So the bridge keeps its own ledger: every few minutes
-it records the logged-in account, the account's percentages, and this PC's
-price-weighted tokens under that account in each window. From it:
+it records the logged-in account, each limit's percentage, and this PC's
+price-weighted tokens under that account in each limit's window. From it:
 
 * only turns made while THIS account was logged in are counted as this PC's;
-* the cost of 1 % in tokens is learned as the smallest percent-per-token ratio
-  seen. Other devices only ever push the ratio up, so the minimum comes from
-  the moments when this PC was the only user. It is an estimate, shown with ≈,
-  and not shown at all until there is enough data.
+* the cost of 1 % in tokens is learned from how far a limit rose against this
+  PC's tokens. Other devices only ever push that ratio up, so the smallest one
+  seen comes from when this PC was the only user. It is an estimate (≈);
+* until there is enough rise to learn from, the rise since the first reading
+  is shown as a ceiling: this PC cannot have used more than the account did.
 """
 
 from __future__ import annotations
@@ -34,9 +37,8 @@ from . import claude_history
 logger = logging.getLogger(__name__)
 
 _USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-# (API key, label, window length, ledger field suffix)
-_WINDOWS = (("five_hour", "5 val.", 5 * 3600, "5"), ("seven_day", "Savaitė", 7 * 86400, "7"))
-_TOP = 5
+_SPANS = {"session": 5 * 3600, "weekly": 7 * 86400}
+_TOP = 3
 # Percentages arrive as whole numbers, so a ratio over a 1-2 point rise is
 # mostly rounding error. Price tokens only once the account rose this much.
 _MIN_RISE_PCT = 3
@@ -46,7 +48,7 @@ _KEEP_DAYS = 30
 # models. Cache reads dominate raw token counts but cost a tenth, so an
 # unweighted sum would crown whichever session re-read the longest context.
 # ponytail: one weight set for every model; add per-model factors if the PC
-# mixes Opus/Sonnet/Haiku heavily and the ≈ drifts.
+# mixes models heavily and the ≈ drifts.
 _WEIGHTS = {
     "input_tokens": 1.0,
     "cache_creation_input_tokens": 1.25,
@@ -72,7 +74,7 @@ def current_account(home: Path) -> tuple[str, str, str]:
 
 
 def fetch_limits(home: Path, timeout: float = 10) -> dict:
-    """``{"five_hour": {...}, "seven_day": {...}}`` from Anthropic. Raises on failure."""
+    """The raw usage document from Anthropic. Raises on failure."""
     creds = json.loads((home / ".claude" / ".credentials.json").read_text())
     token = creds["claudeAiOauth"]["accessToken"]
     req = urllib.request.Request(_USAGE_URL, headers={
@@ -83,14 +85,46 @@ def fetch_limits(home: Path, timeout: float = 10) -> dict:
         return json.load(resp)
 
 
-def session_weights(root: Path, since: float) -> dict[str, tuple[float, str, float]]:
-    """``{session_uuid: (weighted_tokens, cwd, last_ts)}`` for turns after *since*.
+def parse_limits(data: dict) -> list[dict]:
+    """Every session/weekly limit as ``{key, model, pct, reset, span}``.
+
+    Read from the generic ``limits`` list so a new model-scoped limit shows up
+    without a code change; the older fixed keys are the fallback.
+    """
+    out = []
+    for item in data.get("limits") or []:
+        span = _SPANS.get(item.get("group"))
+        if span is None or item.get("percent") is None or not item.get("resets_at"):
+            continue
+        model = ((item.get("scope") or {}).get("model") or {}).get("display_name")
+        out.append({
+            "key": item.get("kind", "?") + (f":{model.lower()}" if model else ""),
+            "model": model,
+            "pct": float(item["percent"]),
+            "reset": datetime.fromisoformat(item["resets_at"]).timestamp(),
+            "span": span,
+        })
+    if out:
+        return out
+    for key, kind, group in (("five_hour", "session", "session"), ("seven_day", "weekly_all", "weekly")):
+        window = data.get(key) or {}
+        if window.get("utilization") is not None and window.get("resets_at"):
+            out.append({
+                "key": kind, "model": None, "pct": float(window["utilization"]),
+                "reset": datetime.fromisoformat(window["resets_at"]).timestamp(),
+                "span": _SPANS[group],
+            })
+    return out
+
+
+def _turns(root: Path, since: float) -> list[tuple[str, float, str, float, str]]:
+    """``(session_uuid, ts, model, weighted_tokens, cwd)`` for turns after *since*.
 
     Subagent transcripts (``<uuid>/subagents/*.jsonl``) count toward their
     parent session. One API response is written as several lines (one per
     content block) carrying the same usage, hence the dedup on message id.
     """
-    out: dict[str, list] = defaultdict(lambda: [0.0, "", 0.0])
+    out = []
     seen: set[str] = set()
     for path in root.glob("*/**/*.jsonl"):
         try:
@@ -119,11 +153,15 @@ def session_weights(root: Path, since: float) -> dict[str, tuple[float, str, flo
                 if key in seen:
                     continue
                 seen.add(key)
-                row = out[uuid]
-                row[0] += sum(float(usage.get(k) or 0) * w for k, w in _WEIGHTS.items())
-                row[1] = row[1] or entry.get("cwd") or ""
-                row[2] = max(row[2], ts)
-    return {k: (v[0], v[1], v[2]) for k, v in out.items() if v[0] > 0}
+                weight = sum(float(usage.get(k) or 0) * w for k, w in _WEIGHTS.items())
+                if weight > 0:
+                    out.append((uuid, ts, str(msg.get("model") or ""), weight, entry.get("cwd") or ""))
+    return out
+
+
+def _matches(turn_model: str, limit_model: str | None) -> bool:
+    """Does a turn count toward a limit? Model-scoped limits count only their model."""
+    return limit_model is None or limit_model.lower() in turn_model.lower()
 
 
 def _load(ledger: Path) -> list[dict]:
@@ -134,9 +172,17 @@ def _load(ledger: Path) -> list[dict]:
     out = []
     for line in lines:
         try:
-            out.append(json.loads(line))
+            sample = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if "w" not in sample and "u5" in sample:
+            # First ledger format: fixed 5-hour and weekly fields.
+            sample["w"] = {
+                key: {"u": sample[f"u{n}"], "r": sample[f"r{n}"], "s": sample[f"s{n}"], "l": sample[f"l{n}"]}
+                for key, n in (("session", "5"), ("weekly_all", "7"))
+                if sample.get(f"u{n}") is not None
+            }
+        out.append(sample)
     return out
 
 
@@ -171,61 +217,78 @@ def _account_since(samples: list[dict], account: str, home: Path) -> float:
 
 
 def take_sample(home: Path, ledger: Path, now: float | None = None) -> dict:
-    """Record the account's limits and this PC's share of them; return the sample."""
+    """Record each limit and this PC's tokens toward it; return the sample.
+
+    The sample also carries the parsed limits and the scanned turns under
+    ``"limits"`` / ``"turns"`` for the caller; only the ledger fields are saved.
+    """
     now = time.time() if now is None else now
     samples = _load(ledger)
     account, email, tier = current_account(home)
-    limits = fetch_limits(home)
+    data = fetch_limits(home)
+    limits = parse_limits(data)
     since = _account_since(samples, account, home)
-    sample = {"ts": now, "account": account, "email": email, "tier": tier, "since": since}
+    for limit in limits:
+        limit["start"] = max(limit["reset"] - limit["span"], since)
     root = home / ".claude" / "projects"
-    for key, _, span, n in _WINDOWS:
-        window = limits.get(key) or {}
-        resets = window.get("resets_at")
-        reset_ts = datetime.fromisoformat(resets).timestamp() if resets else now + span
-        start = max(reset_ts - span, since)
-        sample[f"u{n}"] = window.get("utilization")
-        sample[f"r{n}"] = reset_ts
-        sample[f"s{n}"] = start
-        sample[f"l{n}"] = sum(w for w, _, _ in session_weights(root, start).values())
-    _append(ledger, sample, samples)
-    return sample
+    turns = _turns(root, min((l["start"] for l in limits), default=now))
+    record = {
+        "ts": now, "account": account, "email": email, "tier": tier, "since": since,
+        "w": {
+            l["key"]: {
+                "u": l["pct"], "r": l["reset"], "s": l["start"],
+                "l": sum(w for _, ts, m, w, _ in turns if ts >= l["start"] and _matches(m, l["model"])),
+            }
+            for l in limits
+        },
+    }
+    _append(ledger, record, samples)
+    breakdown = [
+        (row.get("display_name"), row.get("percent"))
+        for row in ((data.get("seven_day_breakdown") or {}).get("rows") or [])
+        if row.get("percent")
+    ]
+    return {**record, "limits": limits, "turns": turns, "breakdown": breakdown}
 
 
-def _pct_per_token(samples: list[dict], account: str, n: str) -> float | None:
-    """Smallest %-per-weighted-token seen for this account and window.
+def _window_samples(samples: list[dict], account: str, key: str, reset: float, start: float) -> list[dict]:
+    """Readings of one limit within one window of one login, oldest first."""
+    group = [
+        s["w"][key] | {"ts": s["ts"]}
+        for s in samples
+        if s["account"] == account and key in s.get("w", {})
+        # resets_at jitters by a second between reads.
+        and abs(s["w"][key]["r"] - reset) < 300 and s["w"][key]["s"] == start
+    ]
+    return sorted(group, key=lambda x: x["ts"])
 
-    Within one window (same reset, same login) the account's percentage and
-    this PC's cumulative tokens both only grow, so the rise of one against the
-    rise of the other prices a token even when the window began before the
-    login. When the window lies wholly inside the login, its start (0 %, 0
-    tokens) is a valid origin too. Other devices only ever make a ratio
-    larger, hence the minimum across windows.
+
+def _pct_per_token(samples: list[dict], account: str, key: str) -> float | None:
+    """Smallest %-per-weighted-token seen for this account and limit.
+
+    Within one window (same reset, same login) the limit's percentage and this
+    PC's cumulative tokens both only grow, so the rise of one against the rise
+    of the other prices a token even when the window began before the login.
+    When the window lies wholly inside the login, its start (0 %, 0 tokens) is
+    a valid origin too. Other devices only ever make a ratio larger, hence the
+    minimum across windows.
     """
     windows: dict[tuple, list[dict]] = defaultdict(list)
     for s in samples:
-        if s["account"] == account and s.get(f"u{n}") is not None:
-            # resets_at jitters by a second between reads; bucket it.
-            windows[(round(s[f"r{n}"] / 300), s[f"s{n}"])].append(s)
+        w = s.get("w", {}).get(key)
+        if s["account"] == account and w and w.get("u") is not None:
+            windows[(round(w["r"] / 300), w["s"])].append(w | {"ts": s["ts"]})
     ratios = []
     for group in windows.values():
-        group.sort(key=lambda s: s["ts"])
+        group.sort(key=lambda x: x["ts"])
         first, last = group[0], group[-1]
-        rise = last[f"u{n}"] - first[f"u{n}"]
-        spent = last[f"l{n}"] - first[f"l{n}"]
+        rise, spent = last["u"] - first["u"], last["l"] - first["l"]
         if rise >= _MIN_RISE_PCT and spent > 0:
             ratios.append(rise / spent)
-        if first[f"s{n}"] <= first[f"r{n}"] - _span(n) + 1:
-            ratios.extend(
-                x[f"u{n}"] / x[f"l{n}"]
-                for x in group
-                if x[f"u{n}"] >= _MIN_RISE_PCT and x[f"l{n}"] > 0
-            )
+        span = _SPANS["session"] if key == "session" else _SPANS["weekly"]
+        if first["s"] <= first["r"] - span + 1:
+            ratios.extend(x["u"] / x["l"] for x in group if x["u"] >= _MIN_RISE_PCT and x["l"] > 0)
     return min(ratios) if ratios else None
-
-
-def _span(n: str) -> int:
-    return next(span for _, _, span, m in _WINDOWS if m == n)
 
 
 def _project(cwd: str) -> str:
@@ -255,16 +318,19 @@ def _pct(value: float) -> str:
     return f"{value:.1f} %" if value < 10 else f"{value:.0f} %"
 
 
-def _session_lines(
-    root: Path, since: float, now: float, k: float | None, top: int = _TOP
-) -> list[str]:
-    """This PC's sessions since *since*, each as ≈ % of the account's limit."""
-    weights = session_weights(root, since)
-    if not weights:
+def _session_lines(root: Path, turns: list, now: float, k: float | None) -> list[str]:
+    """This PC's sessions among *turns*, each as ≈ % of the limit when priced."""
+    per: dict[str, list] = defaultdict(lambda: [0.0, "", 0.0])
+    for uuid, ts, _, weight, cwd in turns:
+        row = per[uuid]
+        row[0] += weight
+        row[1] = row[1] or cwd
+        row[2] = max(row[2], ts)
+    if not per:
         return ["  (šiame PC su šita paskyra nedirbta)"]
-    ranked = sorted(weights.items(), key=lambda kv: kv[1][0], reverse=True)
+    ranked = sorted(per.items(), key=lambda kv: kv[1][0], reverse=True)
     lines = []
-    for uuid, (weight, cwd, last) in ranked[:top]:
+    for uuid, (weight, cwd, last) in ranked[:_TOP]:
         path = next(root.glob(f"*/{uuid}.jsonl"), None)
         name = claude_history.title(path) if path else ""
         if len(name) > 40:
@@ -274,15 +340,15 @@ def _session_lines(
         label = _project(cwd) + (f" · {name}" if name else "")
         amount = f"≈ {_pct(k * weight)} — " if k is not None else "• "
         lines.append(f"  {amount}{label} ({ago_text})")
-    if len(ranked) > top:
-        rest = sum(w for _, (w, _, _) in ranked[top:])
+    if len(ranked) > _TOP:
+        rest = sum(w for _, (w, _, _) in ranked[_TOP:])
         amount = f"≈ {_pct(k * rest)} — " if k is not None else "• "
-        lines.append(f"  {amount}dar {len(ranked) - top} sesijos")
+        lines.append(f"  {amount}dar {len(ranked) - _TOP} sesijos")
     return lines
 
 
 def format_usage(ledger: Path, home: Path | None = None, now: float | None = None) -> str:
-    """The /usage message: this account's total, this PC's part, its sessions."""
+    """The /usage message: every limit, this PC's part of it, and its sessions."""
     home = home or Path.home()
     now = time.time() if now is None else now
     try:
@@ -296,39 +362,48 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
         return "⚠️ Anthropic limitų negavau."
 
     samples = _load(ledger)
+    root = home / ".claude" / "projects"
     tier = sample["tier"].replace("default_claude_", "").replace("_", " ")
-    login = sample["since"]
     lines = [
         f"📊 {sample['email']}" + (f" ({tier})" if tier else ""),
-        f"Šis PC prie jos prisijungęs nuo {_stamp(login, now)}.",
+        f"Šis PC prie jos prisijungęs nuo {_stamp(sample['since'], now)}.",
     ]
-    for (_, _, span, n), title in zip(_WINDOWS, ("⏱ 5 val. langas", "📅 Savaitės langas")):
-        reset = sample[f"r{n}"]
-        start = reset - span
-        counted_from = sample[f"s{n}"]
-        partial = counted_from > start + 1
-        lines.append("")
-        lines.append(
-            f"{title}: {_stamp(start, now)} – {_stamp(reset, now)} "
-            f"(atsinaujins {_until(reset, now)})"
-        )
-        if sample[f"u{n}"] is not None:
-            lines.append(f"• Bendrai paskyroj (visi įrenginiai): {sample[f'u{n}']:.0f} %")
-        k = _pct_per_token(samples, sample["account"], n)
-        since = f"nuo {_stamp(counted_from, now)}" + (" (prisijungimo)" if partial else "")
-        if k is None:
-            lines.append(
-                f"• Šis PC {since}: dar mokausi — reikia, kad paskyra "
-                f"pakiltų bent {_MIN_RISE_PCT} %"
-            )
+    for limit in sample["limits"]:
+        start, reset = limit["reset"] - limit["span"], limit["reset"]
+        counted_from = limit["start"]
+        if limit["span"] == _SPANS["session"]:
+            title = "⏱ 5 val. langas"
         else:
-            mine = min(sample[f"u{n}"] or 0, k * sample[f"l{n}"])
-            lines.append(f"• Šis PC {since}: ≈ {_pct(mine)}, iš jų:")
-        lines.extend(_session_lines(home / ".claude" / "projects", counted_from, now, k, top=3))
-    lines.append("")
-    lines.append(
+            title = "📅 Savaitė" + (f", tik {limit['model']}" if limit["model"] else "")
+        lines += ["", f"{title}: {_stamp(start, now)} – {_stamp(reset, now)} (atsinaujins {_until(reset, now)})"]
+        total = f"• Bendrai paskyroj (visi įrenginiai): {limit['pct']:.0f} %"
+        if limit["key"] == "weekly_all" and sample["breakdown"]:
+            total += " — " + ", ".join(f"{name} {pct} %" for name, pct in sample["breakdown"])
+        lines.append(total)
+
+        k = _pct_per_token(samples, sample["account"], limit["key"])
+        mine = sample["w"][limit["key"]]["l"]
+        since = f"nuo {_stamp(counted_from, now)}"
+        if k is not None:
+            lines.append(f"• Šis PC {since}: ≈ {_pct(min(limit['pct'], k * mine))}, iš jų:")
+        else:
+            readings = _window_samples(samples, sample["account"], limit["key"], reset, counted_from)
+            if len(readings) > 1:
+                first = readings[0]
+                rise = limit["pct"] - first["u"]
+                ceiling = "< 1 %" if rise < 1 else f"≤ ~{rise:.0f} %"
+                lines.append(
+                    f"• Šis PC {since}: {ceiling} — tiek paskyra pakilo nuo "
+                    f"{_stamp(first['ts'], now)}; tiksliau, kai pakils {_MIN_RISE_PCT} %"
+                )
+            else:
+                lines.append(f"• Šis PC {since}: dar nežinau — reikia bent dviejų matavimų")
+        turns = [t for t in sample["turns"] if t[1] >= counted_from and _matches(t[2], limit["model"])]
+        lines.extend(_session_lines(root, turns, now, k))
+    lines += [
+        "",
         "% — nuo tavo limito. „Šis PC“ ir sesijos yra įvertis (≈): skaičiuojamos "
         "visos šio PC Claude Code sesijos — VS Code, terminalas, tiltas, agentai. "
-        "claude.ai naršyklėje ar programėlėje nesimato ir patenka į kitus įrenginius."
-    )
+        "claude.ai naršyklėje ar programėlėje nesimato ir patenka į kitus įrenginius.",
+    ]
     return "\n".join(lines)

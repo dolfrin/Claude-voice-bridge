@@ -57,13 +57,12 @@ def test_other_accounts_turns_are_not_counted_and_estimate_waits(home, monkeypat
     ledger = home / "ledger.jsonl"
 
     sample = usage.take_sample(home, ledger, now)
-    assert sample["l5"] == 100.0  # 20 output tokens * 5, the pre-login 40 excluded
+    assert sample["w"]["session"]["l"] == 100.0  # 20 output tokens * 5, the pre-login 40 excluded
 
     text = usage.format_usage(ledger, home, now)
     assert "acc-B@x (max 20x)" in text
     assert "Bendrai paskyroj (visi įrenginiai): 2 %" in text  # account total, exact
-    assert "(prisijungimo):" in text  # the PC's list starts at the login, not the window
-    assert "dar mokausi" in text  # one reading: nothing to price tokens from yet
+    assert ": < 1 % — tiek paskyra pakilo" in text  # no rise to price from: a ceiling
 
 
 def test_estimate_after_calibration_is_capped_by_account_total(home, monkeypatch):
@@ -117,5 +116,30 @@ def test_rise_within_a_window_prices_tokens_even_after_a_mid_window_login(home, 
     text = usage.format_usage(ledger, home, now + 120)
 
     # 3 points for 3000 tokens -> 0.001 %/token; this PC's 4000 tokens -> 4 %.
-    assert "(prisijungimo): ≈ 4.0 %, iš jų:" in text
+    assert ": ≈ 4.0 %, iš jų:" in text
     assert "≈ 4.0 % — proj" in text
+
+
+def test_model_scoped_limit_counts_only_that_models_turns(home, monkeypatch):
+    now = 1_800_000_000.0
+    transcript = home / ".claude" / "projects" / "p" / "s1.jsonl"
+    fable = json.loads(_turn(now - 600, "f", 100))
+    fable["message"]["model"] = "claude-fable-5-1"
+    opus = json.loads(_turn(now - 500, "o", 300))
+    opus["message"]["model"] = "claude-opus-5-5"
+    transcript.write_text(json.dumps(fable) + "\n" + json.dumps(opus) + "\n")
+    os.utime(transcript, (now, now))
+    _login(home, "acc-A", now - 30 * 24 * HOUR)
+    reset = _iso(now + 4 * 24 * HOUR)
+    monkeypatch.setattr(usage, "fetch_limits", lambda home: {"limits": [
+        {"kind": "weekly_all", "group": "weekly", "percent": 30, "resets_at": reset, "scope": None},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 8, "resets_at": reset,
+         "scope": {"model": {"id": None, "display_name": "Fable"}}},
+    ]})
+
+    sample = usage.take_sample(home, home / "ledger.jsonl", now)
+
+    assert sample["w"]["weekly_all"]["l"] == 2000.0          # both models
+    assert sample["w"]["weekly_scoped:fable"]["l"] == 500.0  # Fable only
+    text = usage.format_usage(home / "ledger.jsonl", home, now + 60)
+    assert "📅 Savaitė, tik Fable" in text and ": 8 %" in text
