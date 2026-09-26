@@ -47,3 +47,16 @@ def _lithuanian_texts():
     i18n.set_language("lt")
     yield
     i18n.set_language("lt")
+
+
+@pytest.fixture(autouse=True)
+def _private_live_files(monkeypatch, tmp_path):
+    """Keep tests off the real ~/.claude marker files. Detaching in a test
+    deleted the real "which session is being streamed" marker, so the running
+    bridge could not re-join after its next restart."""
+    from voice_bridge.telegram_io import TelegramIO
+
+    live_marker = tmp_path / ".voice-bridge-live"
+    alive_marker = tmp_path / ".voice-bridge-alive"
+    monkeypatch.setattr(TelegramIO, "live_marker", staticmethod(lambda: live_marker))
+    monkeypatch.setattr(TelegramIO, "alive_marker", staticmethod(lambda: alive_marker))
