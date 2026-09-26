@@ -37,9 +37,9 @@ _USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # (API key, label, window length, ledger field suffix)
 _WINDOWS = (("five_hour", "5 val.", 5 * 3600, "5"), ("seven_day", "Savaitė", 7 * 86400, "7"))
 _TOP = 5
-# Percentages arrive as whole numbers, so a ratio taken at 1-4 % is mostly
-# rounding error. Calibrate only from samples at or above this.
-_MIN_CALIBRATION_PCT = 5
+# Percentages arrive as whole numbers, so a ratio over a 1-2 point rise is
+# mostly rounding error. Price tokens only once the account rose this much.
+_MIN_RISE_PCT = 3
 _KEEP_DAYS = 30
 
 # Relative token prices (input = 1), the same ratios across current Claude
@@ -193,17 +193,34 @@ def take_sample(home: Path, ledger: Path, now: float | None = None) -> dict:
 
 
 def _pct_per_token(samples: list[dict], account: str, n: str) -> float | None:
-    """Smallest %-per-weighted-token seen for this account and window."""
-    ratios = [
-        s[f"u{n}"] / s[f"l{n}"]
-        for s in samples
-        if s["account"] == account
-        and (s.get(f"u{n}") or 0) >= _MIN_CALIBRATION_PCT
-        and (s.get(f"l{n}") or 0) > 0
-        # Only windows fully inside the known login; otherwise part of the
-        # percentage came from before we could attribute anything.
-        and s[f"s{n}"] <= s[f"r{n}"] - _span(n) + 1
-    ]
+    """Smallest %-per-weighted-token seen for this account and window.
+
+    Within one window (same reset, same login) the account's percentage and
+    this PC's cumulative tokens both only grow, so the rise of one against the
+    rise of the other prices a token even when the window began before the
+    login. When the window lies wholly inside the login, its start (0 %, 0
+    tokens) is a valid origin too. Other devices only ever make a ratio
+    larger, hence the minimum across windows.
+    """
+    windows: dict[tuple, list[dict]] = defaultdict(list)
+    for s in samples:
+        if s["account"] == account and s.get(f"u{n}") is not None:
+            # resets_at jitters by a second between reads; bucket it.
+            windows[(round(s[f"r{n}"] / 300), s[f"s{n}"])].append(s)
+    ratios = []
+    for group in windows.values():
+        group.sort(key=lambda s: s["ts"])
+        first, last = group[0], group[-1]
+        rise = last[f"u{n}"] - first[f"u{n}"]
+        spent = last[f"l{n}"] - first[f"l{n}"]
+        if rise >= _MIN_RISE_PCT and spent > 0:
+            ratios.append(rise / spent)
+        if first[f"s{n}"] <= first[f"r{n}"] - _span(n) + 1:
+            ratios.extend(
+                x[f"u{n}"] / x[f"l{n}"]
+                for x in group
+                if x[f"u{n}"] >= _MIN_RISE_PCT and x[f"l{n}"] > 0
+            )
     return min(ratios) if ratios else None
 
 
@@ -234,11 +251,17 @@ def _stamp(ts: float, now: float) -> str:
     return local.strftime("%H:%M" if same_day else "%m-%d %H:%M")
 
 
-def _session_lines(root: Path, since: float, now: float, top: int = _TOP) -> list[str]:
+def _pct(value: float) -> str:
+    return f"{value:.1f} %" if value < 10 else f"{value:.0f} %"
+
+
+def _session_lines(
+    root: Path, since: float, now: float, k: float | None, top: int = _TOP
+) -> list[str]:
+    """This PC's sessions since *since*, each as ≈ % of the account's limit."""
     weights = session_weights(root, since)
-    total = sum(w for w, _, _ in weights.values())
-    if not total:
-        return ["  (šiame PC su šita paskyra dar nedirbta)"]
+    if not weights:
+        return ["  (šiame PC su šita paskyra nedirbta)"]
     ranked = sorted(weights.items(), key=lambda kv: kv[1][0], reverse=True)
     lines = []
     for uuid, (weight, cwd, last) in ranked[:top]:
@@ -249,10 +272,12 @@ def _session_lines(root: Path, since: float, now: float, top: int = _TOP) -> lis
         ago = max(0, int((now - last) // 60))
         ago_text = f"prieš {ago} min" if ago < 90 else f"prieš {ago // 60} val."
         label = _project(cwd) + (f" · {name}" if name else "")
-        lines.append(f"  {weight / total * 100:.0f} % — {label} ({ago_text})")
+        amount = f"≈ {_pct(k * weight)} — " if k is not None else "• "
+        lines.append(f"  {amount}{label} ({ago_text})")
     if len(ranked) > top:
         rest = sum(w for _, (w, _, _) in ranked[top:])
-        lines.append(f"  {rest / total * 100:.0f} % — dar {len(ranked) - top} sesijos")
+        amount = f"≈ {_pct(k * rest)} — " if k is not None else "• "
+        lines.append(f"  {amount}dar {len(ranked) - top} sesijos")
     return lines
 
 
@@ -290,27 +315,20 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
         if sample[f"u{n}"] is not None:
             lines.append(f"• Bendrai paskyroj (visi įrenginiai): {sample[f'u{n}']:.0f} %")
         k = _pct_per_token(samples, sample["account"], n)
-        if k is not None:
-            mine = min(sample[f"u{n}"] or 0, k * sample[f"l{n}"])
-            lines.append(f"• Šis PC: ≈ {mine:.0f} %")
-        elif partial:
-            # Part of this window's percentage predates the login, so it cannot
-            # be split; the next window starts clean.
+        since = f"nuo {_stamp(counted_from, now)}" + (" (prisijungimo)" if partial else "")
+        if k is None:
             lines.append(
-                "• Šis PC: sužinosiu nuo kito lango — šitas prasidėjo "
-                "prieš prisijungiant šia paskyra"
+                f"• Šis PC {since}: dar mokausi — reikia, kad paskyra "
+                f"pakiltų bent {_MIN_RISE_PCT} %"
             )
         else:
-            lines.append(
-                f"• Šis PC: dar mokausi — reikia bent {_MIN_CALIBRATION_PCT} % naudojimo"
-            )
-        why = " (prisijungimo)" if partial else " (lango pradžios)"
-        lines.append(f"• Šio PC sesijos nuo {_stamp(counted_from, now)}{why}:")
-        lines.extend(_session_lines(home / ".claude" / "projects", counted_from, now, top=3))
+            mine = min(sample[f"u{n}"] or 0, k * sample[f"l{n}"])
+            lines.append(f"• Šis PC {since}: ≈ {_pct(mine)}, iš jų:")
+        lines.extend(_session_lines(home / ".claude" / "projects", counted_from, now, k, top=3))
     lines.append("")
     lines.append(
-        "Sesijų % — dalis nuo šio PC darbo tame lange. Skaičiuojamos visos šio "
-        "PC Claude Code sesijos: VS Code, terminalas, tiltas, agentai. "
-        "claude.ai naršyklėje ar programėlėje — ne, jos patenka į „kitus“."
+        "% — nuo tavo limito. „Šis PC“ ir sesijos yra įvertis (≈): skaičiuojamos "
+        "visos šio PC Claude Code sesijos — VS Code, terminalas, tiltas, agentai. "
+        "claude.ai naršyklėje ar programėlėje nesimato ir patenka į kitus įrenginius."
     )
     return "\n".join(lines)

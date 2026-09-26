@@ -63,7 +63,7 @@ def test_other_accounts_turns_are_not_counted_and_estimate_waits(home, monkeypat
     assert "acc-B@x (max 20x)" in text
     assert "Bendrai paskyroj (visi įrenginiai): 2 %" in text  # account total, exact
     assert "(prisijungimo):" in text  # the PC's list starts at the login, not the window
-    assert "sužinosiu nuo kito lango" in text  # window began before the login
+    assert "dar mokausi" in text  # one reading: nothing to price tokens from yet
 
 
 def test_estimate_after_calibration_is_capped_by_account_total(home, monkeypatch):
@@ -82,8 +82,8 @@ def test_estimate_after_calibration_is_capped_by_account_total(home, monkeypatch
     text = usage.format_usage(ledger, home, now + 60)
 
     assert "Bendrai paskyroj (visi įrenginiai): 40 %" in text
-    assert "Šis PC: ≈ 10 %" in text
-    assert "(lango pradžios):" in text
+    assert "Šis PC nuo" in text and "≈ 10 %, iš jų:" in text
+    assert "≈ 10 % — proj" in text  # the session, in % of the LIMIT
 
 
 def test_switching_account_restarts_attribution(home, monkeypatch):
@@ -97,3 +97,25 @@ def test_switching_account_restarts_attribution(home, monkeypatch):
 
     assert first["since"] == now - 3 * HOUR
     assert second["since"] == now + 600
+
+
+def test_rise_within_a_window_prices_tokens_even_after_a_mid_window_login(home, monkeypatch):
+    now = 1_800_000_000.0
+    transcript = home / ".claude" / "projects" / "p" / "s1.jsonl"
+    _login(home, "acc-A", now - 30 * 60)  # the 5-hour window began before this
+    ledger = home / "ledger.jsonl"
+
+    transcript.write_text(_turn(now - 10 * 60, "a", 200) + "\n")  # 1000 weighted
+    os.utime(transcript, (now, now))
+    _limits(monkeypatch, 2, 30, now)  # resets 4 h from now: began 1 h ago
+    usage.take_sample(home, ledger, now)
+
+    with transcript.open("a") as fh:
+        fh.write(_turn(now + 60, "b", 600) + "\n")  # +3000 weighted
+    os.utime(transcript, (now + 120, now + 120))
+    _limits(monkeypatch, 5, 30, now)  # same window, same reset time
+    text = usage.format_usage(ledger, home, now + 120)
+
+    # 3 points for 3000 tokens -> 0.001 %/token; this PC's 4000 tokens -> 4 %.
+    assert "(prisijungimo): ≈ 4.0 %, iš jų:" in text
+    assert "≈ 4.0 % — proj" in text
