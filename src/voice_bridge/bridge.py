@@ -555,10 +555,14 @@ def make_inbound(
         if proj is not None and await telegram.live_route(proj.cwd, text, spoken=spoken):
             logger.info("route: -> project %s, its open editor session", project)
             return
-        # Nothing open on this project here: only now does the bridge run it
-        # in a session of its own, and that becomes the current one.
+        # Nothing open on this project here. Starting a conversation for it
+        # asks where (VS Code or background) unless that was already chosen.
         await store.set_last_active(project)
         controls.mark_last_active(project)
+        if telegram.wants_start_choice(project):
+            logger.info("route: -> project %s, asking where to start", project)
+            await telegram.start_session(project, text)
+            return
         await telegram.use_bridge_session(project)
         label = getattr(proj, "display_name", None) or project
         await telegram.note_route(
@@ -1398,6 +1402,13 @@ async def build() -> Wiring:
         async def live_send_to(self, session_id, text, spoken: bool = False):
             io = telegram_ref.get("io")
             return await io.live_send_to(session_id, text, spoken) if io is not None else False
+
+        def wants_start_choice(self, project):
+            io = telegram_ref.get("io")
+            return io.wants_start_choice(project) if io is not None else False
+
+        async def start_session(self, project, text):
+            await telegram_ref["io"].start_session(project, text)
 
         def pending_tab(self):
             io = telegram_ref.get("io")

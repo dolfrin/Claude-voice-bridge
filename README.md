@@ -326,8 +326,8 @@ BOT_LANGUAGE=en
 PC_POWER_COMMANDS=false
 # Keep each Claude login seen here so /account can switch back (off by default)
 CLAUDE_ACCOUNT_SWITCHING=false
-# ON / /newproject also open VS Code with a new Claude tab (needs xdotool, X11)
-OPEN_CLAUDE_TAB_ON_ENABLE=false
+# Where a new conversation starts: ask | live (VS Code tab) | hidden (background)
+NEW_SESSION=ask
 
 # TTS: choose auto, openai, piper, together, or lithuanian
 # auto uses Piper only for English-looking text and OpenAI for everything else.
@@ -745,8 +745,8 @@ lose messages; if its transcript is gone, a fresh one is started.
 
 ### Opening a project in VS Code from the phone
 
-`/open <project> [message]` (and, with `OPEN_CLAUDE_TAB_ON_ENABLE=true`, turning a
-project on or `/newproject`) opens the project's VS Code window with a **new Claude
+`/open <project> [message]` (and choosing **🖥 VS Code** when a new conversation
+starts — see below) opens the project's VS Code window with a **new Claude
 tab**. The Claude extension cannot be told from outside to start a conversation — its
 `vscode://anthropic.claude-code/open` link only pre-fills the tab in front — so the tab
 is opened through the command palette with simulated keystrokes (`xdotool`, X11), and
@@ -754,6 +754,17 @@ the first message is typed in and sent. Every step first checks that the project
 Code window, and then its new Claude tab, is the active one; if not, nothing is typed
 and the bot says so. The new session is joined and pinned as the current one. A project
 that already has a Claude conversation open is simply joined.
+
+### Where a new conversation starts
+
+Whenever a conversation would start — turning a project on, `/newproject`, or writing
+to a project that has no Claude session open in VS Code — the bot asks, with a button
+each: **🖥 VS Code (visible)**, a new Claude tab in the editor as above, or **👻 Background
+(hidden)**, the bridge's own session nobody sees in an editor. `NEW_SESSION=live` or
+`hidden` makes that choice permanent; `ask` (default) asks each time. Once a project's
+background session is the current conversation, further messages go there without
+asking. Background sessions never count as "open": routing and the ↪️ buttons only
+ever offer sessions you can see in an editor or terminal.
 
 ### Telegram notifications from IDE hooks
 

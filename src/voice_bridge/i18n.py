@@ -662,3 +662,28 @@ LT.update({
     "open.timeout": "⚠️ {project}: žinutė įrašyta, bet per 30 s sesija neatsirado — pažiūrėk PC.",
     "target.new_tab": "{project} · naujas VS Code Claude skirtukas (tavo kita žinutė jį pradės)",
 })
+
+
+# --- where a new conversation starts ---------------------------------------------------
+EN.update({
+    "start.where": "{project}: where should the conversation start?",
+    "start.live": "🖥 VS Code (visible)",
+    "start.hidden": "👻 Background (hidden)",
+    "start.expired": "⚠️ This choice has expired",
+})
+LT.update({
+    "start.where": "{project}: kur pradėti pokalbį?",
+    "start.live": "🖥 VS Code (matoma)",
+    "start.hidden": "👻 Fone (nematoma)",
+    "start.expired": "⚠️ Šis pasirinkimas nebegalioja",
+})
+EN.update({
+    "target.untitled": "new conversation, {time}",
+    "route.went_to": "➡️ Went to: {label}",
+    "route.move_hint": "Wrong place? Move it to:",
+})
+LT.update({
+    "target.untitled": "naujas pokalbis, {time}",
+    "route.went_to": "➡️ Nuėjo į: {label}",
+    "route.move_hint": "Ne ten? Perkelk į:",
+})

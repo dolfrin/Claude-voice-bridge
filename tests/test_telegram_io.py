@@ -3906,7 +3906,7 @@ async def test_note_route_speaks_only_when_the_destination_changes():
     await io.note_route("s2", "bridge · README")
 
     sent = [c.args[0] for c in io._send_plain.await_args_list]
-    assert sent == ["➡️ Qwing · testai", "➡️ bridge · README"]
+    assert sent == ["➡️ Nuėjo į: Qwing · testai", "➡️ Nuėjo į: bridge · README"]
 
 
 # --------------------------------------------------------------------------
@@ -4199,3 +4199,49 @@ async def test_typing_is_refused_unless_the_claude_tab_is_in_front(monkeypatch):
 
     assert ok is False
     assert not any(a[1] == "type" for a in typed)  # nothing typed into a code editor
+
+
+def test_session_label_never_repeats_the_same_name():
+    from types import SimpleNamespace
+
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io.project_for_cwd = lambda cwd: None
+    import voice_bridge.live as live_mod
+
+    same = SimpleNamespace(cwd="/p/Qwing", session_id="a", started_at=0)
+    orig = live_mod.title_of
+    try:
+        live_mod.title_of = lambda root, sid: "Qwing"
+        assert io.session_label(same) == "Qwing"
+        live_mod.title_of = lambda root, sid: ""
+        assert io.session_label(same).startswith("Qwing · naujas pokalbis, ")
+    finally:
+        live_mod.title_of = orig
+
+
+@pytest.mark.asyncio
+async def test_new_conversation_asks_where_and_hidden_delivers_in_background(monkeypatch):
+    import voice_bridge.telegram_io as tio
+
+    monkeypatch.setattr(tio.shutil, "which", lambda name: f"/usr/bin/{name}")
+    controls = FakeControls()
+    controls.enable_and_deliver = AsyncMock()
+    io = TelegramIO(make_cfg(), AsyncMock(), controls)
+    io._send_plain = AsyncMock(return_value=MagicMock(message_id=1))
+    io._show_target = AsyncMock()
+    project = controls.snapshot()[0]["project"]
+
+    await io.start_session(project, "padaryk X")
+
+    markup = io._send_plain.await_args.args[1]
+    data = [b.callback_data for b in markup.inline_keyboard[0]]
+    assert data[0].startswith("start:live:") and data[1].startswith("start:hidden:")
+    assert "kur pradėti pokalbį" in io._send_plain.await_args.args[0]
+
+    query = AsyncMock()
+    query.data = data[1]
+    query.from_user = MagicMock(id=42)
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    controls.enable_and_deliver.assert_awaited_once_with(project, "padaryk X")
+    assert io.wants_start_choice(project) is False  # chosen: no second question

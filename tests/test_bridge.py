@@ -234,6 +234,9 @@ class FakeTelegram:
     def pending_tab(self):
         return None
 
+    def wants_start_choice(self, project):
+        return False
+
     def pending_ask_token_for_message(self, message_id):
         return self._ask_by_message.get(message_id)
 

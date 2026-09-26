@@ -540,6 +540,11 @@ class TelegramIO:
         self._move_seq = 0
         # A new Claude tab opened by /open, waiting for its first message.
         self._pending_tab: dict | None = None
+        # "Where to start?" questions awaiting a tap, and the project whose
+        # background session is the current conversation (if any).
+        self._start_pending: dict[str, tuple[str, str | None]] = {}
+        self._start_seq = 0
+        self._bridge_project: str | None = None
         # Message ids this process sent: the hook-button watcher skips them.
         self._own_sent: set = set()
         self._hook_buttons_task: asyncio.Task | None = None
@@ -1187,6 +1192,9 @@ class TelegramIO:
                 await query.edit_message_text(t("answer.sent", answer=index_str))
             else:
                 await query.edit_message_text(t("answer.failed"))
+            return
+        if action == "start":
+            await self._handle_start_callback(query, index_str)
             return
         if action == "tgt":
             await self._write_here(query, index_str)
@@ -2219,9 +2227,15 @@ class TelegramIO:
         row = _find_project_row(self.controls.snapshot(), project) if project else None
         name = (row or {}).get("display_name") or project or Path(session.cwd).name
         title = live.title_of(Path.home() / ".claude" / "projects", session.session_id)
-        if title and len(title) > 40:
+        if not title:
+            # Two untitled sessions of one project must still be told apart.
+            started = time.strftime("%H:%M", time.localtime((session.started_at or 0) / 1000))
+            title = t("target.untitled", time=started)
+        if title.strip().lower() == name.strip().lower():
+            return name
+        if len(title) > 40:
             title = title[:40] + "…"
-        return f"{name} · {title}" if title else name
+        return f"{name} · {title}"
 
     async def note_route(
         self, key: str, label: str, session_id: str | None = None, cwd: str = "",
@@ -2245,14 +2259,20 @@ class TelegramIO:
             self._moves[token] = (text, session_id)
             for old in list(self._moves)[:-20]:  # keep the last few
                 self._moves.pop(old, None)
-            markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    t("move.button", label=self.session_label(x)[:40]),
-                    callback_data=f"mv:{token}:{x.pid}",
-                )]
-                for x in others[:4]
-            ])
-        message = await self._send_plain(f"➡️ {label}", markup)
+            rows, seen = [], {label}
+            for x in others:
+                other = self.session_label(x)[:40]
+                if other in seen:
+                    continue
+                seen.add(other)
+                rows.append([InlineKeyboardButton(
+                    t("move.button", label=other), callback_data=f"mv:{token}:{x.pid}",
+                )])
+                if len(rows) == 4:
+                    break
+            markup = InlineKeyboardMarkup(rows) if rows else None
+        text_out = t("route.went_to", label=label) + ("\n" + t("route.move_hint") if markup else "")
+        message = await self._send_plain(text_out, markup)
         # A reply to the notice itself must reach the same place.
         await self._remember_sent(message, cwd, session_id)
 
@@ -2327,14 +2347,16 @@ class TelegramIO:
 
         Returns the sent Message so the caller can edit it later, or None when
         the send failed."""
+        if self.app is None:
+            return None
         try:
             return await _send_with_retry(
                 lambda: self.app.bot.send_message(
                     chat_id=self._chat_id, text=text, reply_markup=reply_markup
                 )
             )
-        except TelegramError:
-            logger.exception("live: could not send notice")
+        except Exception:  # noqa: BLE001 - a notice must never break its caller
+            logger.exception("could not send notice")
             return None
 
     async def _send_plain_voice(self, voice_bytes: bytes):
@@ -2400,6 +2422,7 @@ class TelegramIO:
         self._live_session = session
         self._write_live_marker(session.session_id)
         self._live_task = asyncio.create_task(self._tail_live(session))
+        self._bridge_project = None
         project = self.project_for_cwd(session.cwd)
         if project is not None:
             with contextlib.suppress(Exception):
@@ -2557,10 +2580,64 @@ class TelegramIO:
         return bool(row and row.get("enabled"))
 
     async def _opened_on_enable(self, project: str) -> None:
-        """After a project is switched on: open it on the PC when configured."""
-        if getattr(self.cfg, "open_claude_tab_on_enable", False):
+        """A project was switched on: start its conversation where wanted."""
+        await self.start_session(project, None)
+
+    def _session_mode(self) -> str:
+        """ask / live / hidden; live needs the Claude editor and xdotool."""
+        mode = getattr(self.cfg, "new_session", "ask")
+        if mode != "hidden" and not (
+            self._claude_live_enabled and shutil.which("code") and shutil.which("xdotool")
+        ):
+            return "hidden"
+        return mode
+
+    def wants_start_choice(self, project: str) -> bool:
+        """Should a message for *project*, with no editor session open, ask
+        where to start? Not when its background session is already the
+        current conversation -- that choice was made."""
+        return self._session_mode() != "hidden" and self._bridge_project != project
+
+    async def start_session(self, project: str, text: str | None) -> None:
+        """Start *project*'s conversation: in VS Code, in the background, or
+        -- when NEW_SESSION=ask -- after asking with a button for each."""
+        mode = self._session_mode()
+        if mode == "ask":
+            self._start_seq += 1
+            token = str(self._start_seq)
+            self._start_pending[token] = (project, text)
+            for old in list(self._start_pending)[:-20]:
+                self._start_pending.pop(old, None)
+            row = _find_project_row(self.controls.snapshot(), project)
+            label = (row or {}).get("display_name") or project
+            await self._send_plain(t("start.where", project=label), InlineKeyboardMarkup([[
+                InlineKeyboardButton(t("start.live"), callback_data=f"start:live:{token}"),
+                InlineKeyboardButton(t("start.hidden"), callback_data=f"start:hidden:{token}"),
+            ]]))
+            return
+        await self._start_in(mode, project, text)
+
+    async def _start_in(self, mode: str, project: str, text: str | None) -> None:
+        if mode == "live":
             await self._send_plain(t("open.starting", project=project))
-            await self._send_plain(await self.open_on_pc(project))
+            await self._send_plain(await self.open_on_pc(project, text))
+            return
+        await self.use_bridge_session(project)
+        if text:
+            await self.controls.enable_and_deliver(project, text)
+
+    async def _handle_start_callback(self, query, arg: str) -> None:
+        mode, _, token = arg.partition(":")
+        pending = self._start_pending.pop(token, None)
+        if pending is None or mode not in {"live", "hidden"}:
+            await self._edit_callback_markup(query, InlineKeyboardMarkup([[
+                InlineKeyboardButton(t("start.expired"), callback_data="noop:")
+            ]]))
+            return
+        await self._edit_callback_markup(query, InlineKeyboardMarkup([[InlineKeyboardButton(
+            t("start.live") if mode == "live" else t("start.hidden"), callback_data="noop:"
+        )]]))
+        await self._start_in(mode, *pending)
 
     async def focus_project(self, project: str) -> None:
         """Make *project* the current one: its open editor session if there is
@@ -2580,6 +2657,7 @@ class TelegramIO:
     async def use_bridge_session(self, project: str) -> None:
         """The current conversation is now *project*'s bridge session."""
         self._detach_live()
+        self._bridge_project = project
         row = _find_project_row(self.controls.snapshot(), project)
         label = (row or {}).get("display_name") or project
         await self._show_target(t("target.bridge", project=label))

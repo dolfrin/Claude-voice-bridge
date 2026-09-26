@@ -18,6 +18,7 @@ AUTONOMY_MODES = ("safe", "full", "ask")
 AGENT_BACKENDS = ("claude", "codex")
 # Language the bot speaks to the user; English unless BOT_LANGUAGE says lt.
 BOT_LANGUAGES = ("en", "lt")
+NEW_SESSION_MODES = ("ask", "live", "hidden")
 TTS_BACKENDS = ("auto", "openai", "piper", "together", "lithuanian")
 # Canonical, ORDERED source of truth for the per-project reasoning effort. The
 # SDK's ClaudeAgentOptions.effort accepts exactly these levels; passing None
@@ -77,9 +78,10 @@ class Config:
     # Keep a copy of every Claude login seen here so /account can switch back
     # to it. Off by default: the copies are live tokens for every account.
     claude_account_switching: bool = False
-    # Turning a project on (and /newproject) also opens it in VS Code on this
-    # PC with a new Claude tab, which the next Telegram message starts.
-    open_claude_tab_on_enable: bool = False
+    # Where a new conversation starts: "live" (a visible Claude tab in VS Code
+    # on this PC), "hidden" (the bridge's own background session), or "ask"
+    # with a button for each.
+    new_session: str = "ask"
 
 
 @dataclass
@@ -179,6 +181,12 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             f"got: {bot_language!r}"
         )
 
+    new_session = (env.get("NEW_SESSION") or "ask").strip().lower()
+    if new_session not in NEW_SESSION_MODES:
+        raise ValueError(
+            f"Config key NEW_SESSION must be one of {list(NEW_SESSION_MODES)}, got: {new_session!r}"
+        )
+
     return Config(
         telegram_bot_token=_require(env, "TELEGRAM_BOT_TOKEN"),
         telegram_allowed_user_id=_require_int(env, "TELEGRAM_ALLOWED_USER_ID"),
@@ -212,7 +220,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         bot_language=bot_language,
         pc_power_commands=_optional_bool(env, "PC_POWER_COMMANDS", False),
         claude_account_switching=_optional_bool(env, "CLAUDE_ACCOUNT_SWITCHING", False),
-        open_claude_tab_on_enable=_optional_bool(env, "OPEN_CLAUDE_TAB_ON_ENABLE", False),
+        new_session=new_session,
     )
 
 

@@ -122,6 +122,11 @@ def list_sessions(
             continue
         if pid == skip_pid or not alive(pid):
             continue
+        # SDK sessions -- the bridge's own background ones among them -- have
+        # had a socket since Claude Code 2.1.2xx, but nobody sees them in an
+        # editor: routing a message there would hide it, so they never count.
+        if str(data.get("entrypoint") or "").startswith("sdk"):
+            continue
         out.append(
             LiveSession(
                 pid=pid,

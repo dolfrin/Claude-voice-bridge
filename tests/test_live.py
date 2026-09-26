@@ -440,3 +440,19 @@ def test_last_assistant_text_only_when_the_turn_ended_in_words(tmp_path):
     path.write_text(_json.dumps(text_entry) + "\n" + _json.dumps(tool) + "\n")
     assert live.last_assistant_text(path) == ""  # waiting on a tool, not on the user
     assert live.last_assistant_text(None) == ""
+
+
+def test_background_sdk_sessions_are_never_live(tmp_path):
+    import json as _json
+    import os as _os
+
+    (tmp_path / "1.json").write_text(_json.dumps({
+        "pid": _os.getpid(), "sessionId": "ide", "cwd": "/p", "messagingSocketPath": "/s/1",
+        "entrypoint": "claude-vscode"}))
+    (tmp_path / "2.json").write_text(_json.dumps({
+        "pid": _os.getpid(), "sessionId": "bg", "cwd": "/p", "messagingSocketPath": "/s/2",
+        "entrypoint": "sdk-py"}))
+
+    found = live.list_sessions(tmp_path, is_alive=lambda pid: True)
+
+    assert [s.session_id for s in found] == ["ide"]
