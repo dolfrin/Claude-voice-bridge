@@ -152,8 +152,18 @@ def _resolve(path: str, cwd: str) -> str:
     lives inside cwd but points outside of it is not mistaken for an
     in-cwd path. Non-existent paths are still resolved (as far as their
     existing ancestors allow) so a Write to a brand-new file stays safe.
+
+    Resolution is strict first: since Python 3.13 a non-strict resolve no
+    longer raises on a symlink loop but quietly returns the path unresolved,
+    which would pass containment. Strict raises (ELOOP, or RuntimeError on
+    older Pythons) and callers fail closed; only a path that plainly does not
+    exist yet falls back to resolving as far as it can.
     """
-    return str(Path(cwd, path).resolve())
+    target = Path(cwd, path)
+    try:
+        return str(target.resolve(strict=True))
+    except FileNotFoundError:
+        return str(target.resolve())
 
 
 def _inside_cwd(path: str, cwd: str) -> bool:

@@ -1,6 +1,6 @@
 # Claude Voice Bridge — Claude or Codex from Telegram
 
-![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/python-3.14-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Telegram](https://img.shields.io/badge/telegram-bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)
 ![Claude](https://img.shields.io/badge/claude-agent_sdk-D97757?style=for-the-badge)
 ![Codex](https://img.shields.io/badge/codex-app--server-111111?style=for-the-badge)
@@ -172,12 +172,14 @@ will be added soon.
 
 ### System packages
 
-- Python **3.10**
+- Python **3.14** recommended (3.10+ works; 3.10 reaches end of life in October 2026).
+  [`uv`](https://docs.astral.sh/uv/) installs it without touching the system Python.
 - **ffmpeg** on `PATH` (required by the Piper TTS backend to encode OGG/Opus; also
   used for Telegram audio handling)
 
 ```bash
-sudo apt-get update && sudo apt-get install -y ffmpeg python3.10 python3.10-venv
+sudo apt-get update && sudo apt-get install -y ffmpeg
+curl -LsSf https://astral.sh/uv/install.sh | sh   # if uv is not installed yet
 ```
 
 ### Runtime Python packages (NOT installed by default in the test venv)
@@ -230,9 +232,9 @@ but is slower.
 git clone <this-repo> claude-voice-bridge
 cd claude-voice-bridge
 
-python3.10 -m venv .venv
+uv venv --python 3.14 .venv
 source .venv/bin/activate
-pip install -e .
+uv pip install -e .
 
 cp .env.example .env
 cp projects.yaml.example projects.yaml
@@ -260,10 +262,9 @@ foreground run works.
 git clone <this-repo> claude-voice-bridge
 cd claude-voice-bridge
 
-python3.10 -m venv .venv
+uv venv --python 3.14 .venv
 source .venv/bin/activate
-pip install --upgrade pip
-pip install -e .
+uv pip install -e .
 ```
 
 `pip install -e .` installs all runtime dependencies declared in `pyproject.toml`:
