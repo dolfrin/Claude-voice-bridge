@@ -65,6 +65,15 @@ def ledger_path(db_path: str) -> Path:
     return Path(db_path).parent / "claude-usage.jsonl"
 
 
+def last_reading(ledger: Path) -> dict | None:
+    """The newest ledger sample's limits ({"session": %, "weekly_all": %}),
+    or None -- the home screen shows it without calling Anthropic."""
+    samples = _load(ledger)
+    if not samples:
+        return None
+    return {key: w.get("u") for key, w in (samples[-1].get("w") or {}).items()}
+
+
 def current_account(home: Path) -> tuple[str, str, str]:
     """``(account_uuid, email, rate_limit_tier)`` of the logged-in Claude account."""
     data = json.loads((home / ".claude.json").read_text())

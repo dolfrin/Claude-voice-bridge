@@ -25,34 +25,15 @@ from .tts import available_voices
 _MODES = list(AUTONOMY_MODES)
 _ENGINES = list(TTS_BACKENDS)
 _EFFORTS = list(EFFORT_LEVELS)
+# The "/" menu: the entry points only. Every other command still works as a
+# shortcut, but 29 entries that overlapped made nothing findable.
 _COMMAND_NAMES = (
-    "menu",
-    "panel",
+    "start",
+    "chats",
     "projects",
-    "projects_all",
-    "projects_refresh",
-    "newproject",
-    "handoff",
-    "status",
-    "info",
-    "on",
-    "off",
-    "stop",
-    "mode",
-    "effort",
-    "voice",
-    "verbose",
-    "engine",
-    "agent",
-    "recap",
     "usage",
-    "policies",
-    "schedule",
-    "help",
-    "live",
-    "open",
-    "account",
     "pc",
+    "help",
 )
 
 

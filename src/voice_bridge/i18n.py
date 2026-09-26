@@ -625,8 +625,8 @@ LT.update({
 
 
 # --- help ---------------------------------------------------------------------------
-EN["help.text"] = "❓ How the bridge works\n\n🎯 Where your message goes\n• Pinned at the top, “🎯 Writing to: …” — a plain message goes there.\n• Reply to a message — to the session it came from (it becomes the current one).\n• “project: text” — to that project (name, label or folder, see /projects).\n• 🎯 Switch to … — the button under another session's message makes it the current one.\n• ↪️ — if a message went to the wrong session, moves it in one tap.\n• If the project has a session open in VS Code, the message goes into it; a bridge session starts only when none is open.\n\nSigns\n• 💬 Project · conversation — which session an answer is from.\n• ➡️ — where your message went.\n• ✅ Yes / ❌ No, 1. 2. 3. — answers as buttons.\n• 🖥 next to a project (/projects) — a session is open in VS Code.\n• “!” at the start — interrupts the current work (e.g. “!api: stop”).\n\nCommands\n/menu — button menu\n/projects — projects (all: /projects_all)\n/live — pick one of the open sessions\n/usage — Claude limits: 5-hour, week, this PC, other accounts\n/account — switch the Claude account\n/agent — Claude or Codex\n/pc — suspend / shut down / restart the PC\n/recap — what happened while you were away\n/panel, /info, /voice, /mode, /policies, /schedule — settings\n/help — this help"
-LT["help.text"] = '❓ Kaip veikia tiltas\n\n🎯 Kur eina tavo žinutė\n• Viršuje prisegta „🎯 Rašai: …“ — paprasta žinutė eina ten.\n• Reply į žinutę — į tą sesiją, iš kurios ji atėjo (ji tampa dabartine).\n• „projektas: tekstas“ — į tą projektą (vardas, pavadinimas ar aplankas, žr. /projects).\n• 🎯 Perjungti į … — mygtukas po kitos sesijos žinute padaro ją dabartine.\n• ↪️ — jei žinutė nuėjo ne ten, vienu paspaudimu perkelia ją.\n• Jei projekto sesija atidaryta VS Code, rašoma į ją; tilto sesija paleidžiama tik jei neatidaryta.\n\nŽenklai\n• 💬 Projektas · pokalbis — iš kurios sesijos atsakymas.\n• ➡️ — kur nuėjo tavo žinutė.\n• ✅ Taip / ❌ Ne, 1. 2. 3. — atsakymai mygtukais.\n• 🖥 prie projekto (/projects) — sesija atidaryta VS Code.\n• „!“ žinutės pradžioje — nutraukia dabartinį darbą (pvz. „!qwing: stok“).\n\nKomandos\n/menu — meniu mygtukais\n/projects — projektai (visi: /projects_all)\n/live — pasirinkti vieną iš atidarytų sesijų\n/usage — Claude limitai: 5 val., savaitė, šis PC, kitos paskyros\n/account — perjungti Claude paskyrą\n/agent — Claude ar Codex\n/pc — užmigdyti / išjungti / perkrauti PC\n/recap — kas nutiko, kol nebuvai\n/panel, /info, /voice, /mode, /policies, /schedule — nustatymai\n/help — ši pagalba'
+EN["help.text"] = "❓ How the bridge works\n\n🎯 Where your message goes\n• Pinned at the top, “🎯 Writing to: …” — a plain message goes there.\n• Reply to a message — to the session it came from (it becomes the current one).\n• “project: text” — to that project (name, label or folder, see /projects).\n• 🎯 Switch to … — the button under another session's message makes it the current one.\n• ↪️ — if a message went to the wrong session, moves it in one tap.\n• If the project has a session open in VS Code, the message goes into it; a bridge session starts only when none is open.\n\nSigns\n• 💬 Project · conversation — which session an answer is from.\n• ➡️ — where your message went.\n• ✅ Yes / ❌ No, 1. 2. 3. — answers as buttons.\n• 🖥 next to a project (/projects) — a session is open in VS Code.\n• “!” at the start — interrupts the current work (e.g. “!api: stop”).\n\nCommands\n/start — home: where you write, what runs, limits and 4 sections\n/chats — open conversations: what each does, switch, stop, new\n/projects — projects\n/usage — Claude limits\n/pc — sleep / shut down the PC\n/help — this help\n(Older commands still work as shortcuts.)"
+LT["help.text"] = '❓ Kaip veikia tiltas\n\n🎯 Kur eina tavo žinutė\n• Viršuje prisegta „🎯 Rašai: …“ — paprasta žinutė eina ten.\n• Reply į žinutę — į tą sesiją, iš kurios ji atėjo (ji tampa dabartine).\n• „projektas: tekstas“ — į tą projektą (vardas, pavadinimas ar aplankas, žr. /projects).\n• 🎯 Perjungti į … — mygtukas po kitos sesijos žinute padaro ją dabartine.\n• ↪️ — jei žinutė nuėjo ne ten, vienu paspaudimu perkelia ją.\n• Jei projekto sesija atidaryta VS Code, rašoma į ją; tilto sesija paleidžiama tik jei neatidaryta.\n\nŽenklai\n• 💬 Projektas · pokalbis — iš kurios sesijos atsakymas.\n• ➡️ — kur nuėjo tavo žinutė.\n• ✅ Taip / ❌ Ne, 1. 2. 3. — atsakymai mygtukais.\n• 🖥 prie projekto (/projects) — sesija atidaryta VS Code.\n• „!“ žinutės pradžioje — nutraukia dabartinį darbą (pvz. „!qwing: stok“).\n\nKomandos\n/start — pradžia: kur rašai, kas vyksta, limitai ir 4 skyriai\n/chats — atidaryti pokalbiai: kas ką daro, perjungti, sustabdyti, naujas\n/projects — projektai\n/usage — Claude limitai\n/pc — užmigdyti / išjungti PC\n/help — ši pagalba\n(Senos komandos veikia kaip trumpiniai.)'
 EN["menu.help"] = "❓ Help"
 LT["menu.help"] = "❓ Pagalba"
 EN["target.bridge"] = "{project} · bridge session (not open in VS Code)"
@@ -818,4 +818,63 @@ EN.update({
 LT.update({
     "route.queued_short": "⏳ Eilėje pas {label} (dirba).",
     "move.not_here": "↪️ Ne jai — perkelti į {label}",
+})
+
+
+# --- home screen and its sections --------------------------------------------------------
+EN.update({
+    "cmd.start": "🏠 Home: where you write, what runs, limits",
+    "cmd.chats": "💬 Open conversations",
+    "home.current": "🎯 You are writing to: {label}",
+    "home.current_none": "🎯 No current conversation — a plain message goes to the current project.",
+    "home.sessions": "💬 Open conversations: {n} (busy: {busy})",
+    "home.limits": "📊 Limits: 5-hour {five} % · week {week} %",
+    "home.chats": "💬 Conversations", "home.projects": "⚙️ Projects",
+    "home.status": "📊 Limits and status", "home.system": "🛠 System",
+    "home.help": "❓ Help", "home.back": "⬅️ Home",
+    "home.all_projects": "📚 All projects", "home.new_project": "🆕 New project",
+    "home.discover": "🔎 Find new projects",
+    "home.status_title": "📊 Limits and status",
+    "home.recap": "🗒 What happened while I was away",
+    "home.schedules": "⏰ Scheduled prompts",
+    "home.system_title": "🛠 System",
+    "home.agent": "🤖 Claude / Codex", "home.account": "👤 Claude account",
+    "home.pc": "💻 This PC (sleep / off)", "home.policies": "♾ Always-allow grants",
+    "chats.title": "💬 Open conversations",
+    "chats.busy": "⏳ working for {total} — {what}",
+    "chats.idle": "💤 idle",
+    "chats.none": "No conversation is open in an editor or terminal.",
+    "chats.write": "🎯 Write to {label}",
+    "chats.is_current": "✓ Writing to {label}",
+    "chats.stop": "⛔ Stop the command of {label}",
+    "chats.new": "➕ New conversation",
+    "chats.new_pick": "➕ New conversation — in which project?",
+})
+LT.update({
+    "cmd.start": "🏠 Pradžia: kur rašai, kas vyksta, limitai",
+    "cmd.chats": "💬 Atidaryti pokalbiai",
+    "home.current": "🎯 Dabar rašai: {label}",
+    "home.current_none": "🎯 Dabartinio pokalbio nėra — paprasta žinutė eis dabartiniam projektui.",
+    "home.sessions": "💬 Atidaryti pokalbiai: {n} (dirba: {busy})",
+    "home.limits": "📊 Limitai: 5 val. {five} % · savaitė {week} %",
+    "home.chats": "💬 Pokalbiai", "home.projects": "⚙️ Projektai",
+    "home.status": "📊 Limitai ir būklė", "home.system": "🛠 Sistema",
+    "home.help": "❓ Pagalba", "home.back": "⬅️ Pradžia",
+    "home.all_projects": "📚 Visi projektai", "home.new_project": "🆕 Naujas projektas",
+    "home.discover": "🔎 Rasti naujus projektus",
+    "home.status_title": "📊 Limitai ir būklė",
+    "home.recap": "🗒 Kas nutiko, kol nebuvau",
+    "home.schedules": "⏰ Suplanuotos užduotys",
+    "home.system_title": "🛠 Sistema",
+    "home.agent": "🤖 Claude / Codex", "home.account": "👤 Claude paskyra",
+    "home.pc": "💻 Šis PC (užmigdyti / išjungti)", "home.policies": "♾ „Visada leisti“ leidimai",
+    "chats.title": "💬 Atidaryti pokalbiai",
+    "chats.busy": "⏳ dirba jau {total} — {what}",
+    "chats.idle": "💤 laisva",
+    "chats.none": "Nė vienas pokalbis neatidarytas redaktoriuje ar terminale.",
+    "chats.write": "🎯 Rašyti: {label}",
+    "chats.is_current": "✓ Dabar rašai: {label}",
+    "chats.stop": "⛔ Sustabdyti komandą: {label}",
+    "chats.new": "➕ Naujas pokalbis",
+    "chats.new_pick": "➕ Naujas pokalbis — kuriame projekte?",
 })

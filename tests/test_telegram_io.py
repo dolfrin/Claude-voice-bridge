@@ -1024,9 +1024,9 @@ async def test_cmd_help_documents_routing_and_commands():
     assert ":" in sent  # name-prefix "projektas: tekstas"
     assert "!" in sent  # urgent interrupt prefix
     # command reference — every command listed one line each
-    for cmd in ("/panel", "/projects", "/recap", "/usage", "/info",
-                "/voice", "/policies", "/schedule", "/help"):
-        assert cmd in sent, cmd
+    from voice_bridge.telegram_views import _COMMAND_NAMES
+    for name in _COMMAND_NAMES:
+        assert f"/{name}" in sent, name
     # HTML-safe: no raw markup metacharacters that would break a parse_mode send.
     assert "<" not in sent and ">" not in sent
 
@@ -2062,8 +2062,10 @@ async def test_cmd_menu_replies_with_main_menu():
 
     sent = upd.message.reply_text.await_args.args[0]
     markup = upd.message.reply_text.await_args.kwargs["reply_markup"]
-    assert sent == "🏠 Alex for Claude"
-    assert markup.inline_keyboard[0][0].callback_data == "menu:projects"
+    assert sent.startswith("🏠 Alex for Claude")
+    assert "🎯" in sent  # says where a plain message goes
+    data = [b.callback_data for r in markup.inline_keyboard for b in r]
+    assert data == ["home:chats", "home:projects", "home:status", "home:system", "home:help"]
 
 
 @pytest.mark.asyncio
@@ -2917,9 +2919,8 @@ async def test_run_builds_application_and_registers_handlers(monkeypatch):
 
     registered = fake_app.bot.set_my_commands.await_args.args[0]
     registered_names = {cmd.command for cmd in registered}
-    assert {"menu", "panel", "projects", "projects_all", "projects_refresh", "newproject", "handoff", "status", "on", "off", "stop",
-            "mode", "effort", "voice", "verbose", "engine", "recap", "usage", "info", "policies", "schedule", "help",
-            "live", "agent", "pc", "account", "open"} == registered_names
+    # the "/" menu holds the entry points only; the rest stay as shortcuts
+    assert registered_names == {"start", "chats", "projects", "usage", "pc", "help"}
 
 
 @pytest.mark.asyncio
@@ -4364,3 +4365,45 @@ async def test_busy_notice_names_the_step_and_both_durations(monkeypatch, tmp_pa
     text = io._send_plain.await_args.args[0]
     assert "dirba jau 1 val. 5 min" in text and "Bash pytest" in text and "(3 min)" in text
     assert io._send_plain.await_args.args[1] is not None  # ⛔ Nutraukti offered
+
+
+
+@pytest.mark.asyncio
+async def test_home_sections_open_and_lead_back_home(monkeypatch):
+    import voice_bridge.live as live_mod
+
+    monkeypatch.setattr(live_mod, "list_sessions", lambda *a, **k: [])
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    for section, expect in (("chats", "Atidaryti pokalbiai"), ("projects", "Valdymo skydelis"),
+                            ("status", "Limitai ir būklė"), ("system", "Sistema"),
+                            ("new", "kuriame projekte")):
+        query = AsyncMock()
+        query.data = f"home:{section}"
+        query.from_user = MagicMock(id=42)
+        await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+        call = query.edit_message_text.await_args
+        assert expect in call.kwargs["text"], section
+        data = [b.callback_data for r in call.kwargs["reply_markup"].inline_keyboard for b in r]
+        assert "home:main" in data, section  # always a way back
+
+
+
+@pytest.mark.asyncio
+async def test_home_screens_escape_titles_for_html(monkeypatch):
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    session = SimpleNamespace(pid=1, session_id="s", cwd="/p/x", status="idle", status_since=0,
+                              started_at=0, last_active=1)
+    monkeypatch.setattr(live_mod, "list_sessions", lambda *a, **k: [session])
+    monkeypatch.setattr(live_mod, "title_of", lambda root, sid: "a <b> & c")
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    query = AsyncMock()
+    query.data = "home:chats"
+    query.from_user = MagicMock(id=42)
+
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    text = query.edit_message_text.await_args.kwargs["text"]
+    assert "&lt;b&gt; &amp; c" in text and "<b>" not in text

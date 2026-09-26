@@ -32,6 +32,7 @@ import signal
 import time
 import random
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Awaitable, Callable, Protocol, TypeVar
 
 from telegram import (
@@ -1111,13 +1112,146 @@ class TelegramIO:
     async def _cmd_menu(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
+        """/start and /menu: the home screen -- where plain messages go, what
+        the sessions are doing, the limits, and the four sections."""
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
+        text, markup = self._home()
+        await msg.reply_text(text, reply_markup=markup)
+
+    async def _cmd_chats(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        msg = update.message
+        if msg is None or not self._allowed(msg.from_user.id):
+            return
+        text, markup = self._chats()
+        await msg.reply_text(text, reply_markup=markup)
+
+    def _home(self) -> tuple[str, InlineKeyboardMarkup]:
         # The bot's own Telegram name, so every install shows its own.
         name = getattr(getattr(self.app, "bot", None), "first_name", None)
-        title = f"🏠 {name}" if isinstance(name, str) and name else t("menu.title")
-        await msg.reply_text(title, reply_markup=build_menu_markup())
+        lines = [f"🏠 {name}" if isinstance(name, str) and name else t("menu.title"), ""]
+        if self._live_session is not None:
+            lines.append(t("home.current", label=self.session_label(self._live_session)))
+        elif self._bridge_project:
+            lines.append(t("home.current", label=t("target.bridge", project=self._bridge_project)))
+        else:
+            lines.append(t("home.current_none"))
+        sessions = []
+        with contextlib.suppress(Exception):
+            sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
+        busy = [s for s in sessions if s.status == "busy"]
+        if sessions:
+            lines.append(t("home.sessions", n=len(sessions), busy=len(busy)))
+        reading = None
+        with contextlib.suppress(Exception):
+            reading = usage.last_reading(self.usage_ledger)
+        if reading and reading.get("session") is not None and reading.get("weekly_all") is not None:
+            lines.append(t("home.limits", five=f"{reading['session']:.0f}", week=f"{reading['weekly_all']:.0f}"))
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton(t("home.chats"), callback_data="home:chats"),
+             InlineKeyboardButton(t("home.projects"), callback_data="home:projects")],
+            [InlineKeyboardButton(t("home.status"), callback_data="home:status"),
+             InlineKeyboardButton(t("home.system"), callback_data="home:system")],
+            [InlineKeyboardButton(t("home.help"), callback_data="home:help")],
+        ])
+        return "\n".join(lines), markup
+
+    def _chats(self) -> tuple[str, InlineKeyboardMarkup]:
+        """💬 Conversations: every open session, what it is doing, and one tap
+        to write to it, stop its command, or start a new one."""
+        sessions = []
+        with contextlib.suppress(Exception):
+            sessions = live.list_sessions(Path.home() / ".claude" / "sessions")
+        current = getattr(self._live_session, "session_id", None)
+        lines, rows = [t("chats.title"), ""], []
+        now = time.time()
+        for s in sessions:
+            label = self.session_label(s)
+            if s.status == "busy":
+                activity = live.current_activity(live.transcript_of(Path.home() / ".claude" / "projects", s.session_id))
+                what = (t("route.thinking") if activity and activity[0] == "🤔" else activity[0]) if activity else ""
+                since = (s.status_since or 0) / 1000 or now
+                state = t("chats.busy", total=_duration(now - since), what=what)
+            else:
+                state = t("chats.idle")
+            mark = "🎯 " if s.session_id == current else ""
+            lines.append(f"{mark}{label}\n   {state}")
+            if s.session_id == current:
+                rows.append([InlineKeyboardButton(t("chats.is_current", label=label[:40]), callback_data="noop:")])
+            else:
+                rows.append([InlineKeyboardButton(t("chats.write", label=label[:40]), callback_data=f"tgt:{s.session_id}")])
+            if s.status == "busy" and live.running_commands(s.pid):
+                rows.append([InlineKeyboardButton(t("chats.stop", label=label[:30]), callback_data=f"intr:ask:{s.session_id}")])
+        if not sessions:
+            lines.append(t("chats.none"))
+        rows.append([InlineKeyboardButton(t("chats.new"), callback_data="home:new")])
+        rows.append([InlineKeyboardButton(t("home.back"), callback_data="home:main")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    async def _run_from_button(self, query, handler) -> None:
+        """Run a /command's handler from a section button: its replies land
+        in the chat as if the command had been typed."""
+        async def reply_text(*a, **k):
+            return await query.message.reply_text(*a, **k)
+
+        message = SimpleNamespace(
+            from_user=query.from_user, message_id=query.message.message_id,
+            reply_to_message=None, reply_text=reply_text,
+        )
+        await handler(SimpleNamespace(message=message, callback_query=None), SimpleNamespace(args=[]))
+
+    async def _handle_home(self, query, section: str) -> None:
+        back = [InlineKeyboardButton(t("home.back"), callback_data="home:main")]
+        # These screens are sent as HTML; conversation titles come from Claude
+        # and may hold "<" or "&", which would make Telegram reject the screen.
+        if section == "main":
+            text, markup = self._home()
+            await self._edit_callback_text(query, html.escape(text), markup)
+        elif section == "chats":
+            text, markup = self._chats()
+            await self._edit_callback_text(query, html.escape(text), markup)
+        elif section == "new":
+            rows = [
+                [InlineKeyboardButton(f"🆕 {row.get('display_name') or row['project']}", callback_data=f"newc:{idx}")]
+                for idx, row in _project_list_rows(self.controls.snapshot(), show_all=True)[:10]
+            ]
+            await self._edit_callback_text(query, t("chats.new_pick"), InlineKeyboardMarkup(rows + [back]))
+        elif section == "projects":
+            panel = build_panel_markup(self.controls.snapshot()).inline_keyboard
+            rows = [list(r) for r in panel] + [
+                [InlineKeyboardButton(t("home.all_projects"), callback_data="menu:projects_all"),
+                 InlineKeyboardButton(t("home.new_project"), callback_data="home:newproject")],
+                [InlineKeyboardButton(t("home.discover"), callback_data="menu:refresh")],
+                back,
+            ]
+            await self._edit_callback_text(query, t("panel.title"), InlineKeyboardMarkup(rows))
+        elif section == "status":
+            await self._edit_callback_text(query, t("home.status_title"), InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("panel.limits"), callback_data="cost")],
+                [InlineKeyboardButton(t("home.recap"), callback_data="recap")],
+                [InlineKeyboardButton(t("home.schedules"), callback_data="home:schedule")],
+                back,
+            ]))
+        elif section == "system":
+            engine = (self.controls.snapshot() or [{}])[0].get("engine", "?")
+            await self._edit_callback_text(query, t("home.system_title"), InlineKeyboardMarkup([
+                [InlineKeyboardButton(t("home.agent"), callback_data="home:agent"),
+                 InlineKeyboardButton(t("home.account"), callback_data="home:account")],
+                [InlineKeyboardButton(t("home.pc"), callback_data="home:pc"),
+                 InlineKeyboardButton(t("panel.engine", engine=engine), callback_data="cmopen:engine:0")],
+                [InlineKeyboardButton(t("home.policies"), callback_data="home:policies")],
+                back,
+            ]))
+        elif section == "help":
+            await query.message.reply_text(_format_help())
+        elif section == "newproject":
+            asked = await query.message.reply_text(t("newproject.ask"), reply_markup=ForceReply(selective=True))
+            self._name_prompts.add(asked.message_id)
+        elif section in {"agent", "account", "pc", "policies", "schedule"}:
+            await self._run_from_button(query, getattr(self, f"_cmd_{section}"))
 
     async def _handle_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1222,6 +1356,17 @@ class TelegramIO:
             return
         if action == "intr":
             await self._handle_interrupt(query, index_str)
+            return
+        if action == "home":
+            await self._handle_home(query, index_str)
+            return
+        if action == "newc":
+            snap = self.controls.snapshot()
+            if index_str.isdigit() and int(index_str) < len(snap):
+                project = snap[int(index_str)]["project"]
+                if not snap[int(index_str)].get("enabled"):
+                    await self.controls.toggle(project, True)
+                await self.start_session(project, None)
             return
         if action in {"pset", "pact"}:
             await self._handle_settings(query, action, index_str)
@@ -2039,7 +2184,7 @@ class TelegramIO:
             await self.controls.select(row["project"])
             await self.focus_project(row["project"])
         text, markup = build_project_settings(self.controls.snapshot(), idx)
-        await self._edit_callback_text(query, text, markup)
+        await self._edit_callback_text(query, html.escape(text), markup)
 
     def _choice_markup(self, kind: str, idx: int, back: bool = False) -> InlineKeyboardMarkup:
         """Buttons for one setting of one project, ✓ on the current value."""
@@ -2102,7 +2247,7 @@ class TelegramIO:
         if from_settings:
             # Chosen from a project's settings screen: show it updated.
             text, markup = build_project_settings(self.controls.snapshot(), idx)
-            await self._edit_callback_text(query, text, markup)
+            await self._edit_callback_text(query, html.escape(text), markup)
             return
         shown = t(f"choose.v_{value}") if kind == "verbose" else value
         await self._edit_callback_markup(query, InlineKeyboardMarkup([[
@@ -3265,7 +3410,9 @@ class TelegramIO:
         only_me = filters.User(user_id=self.cfg.telegram_allowed_user_id)
 
         app.add_handler(
-            CommandHandler("menu", self._cmd_menu, filters=only_me))
+            CommandHandler(["menu", "start"], self._cmd_menu, filters=only_me))
+        app.add_handler(
+            CommandHandler("chats", self._cmd_chats, filters=only_me))
         app.add_handler(
             CommandHandler("panel", self._cmd_panel, filters=only_me))
         app.add_handler(
@@ -3315,7 +3462,7 @@ class TelegramIO:
         app.add_handler(
             CommandHandler("schedule", self._cmd_schedule, filters=only_me))
         app.add_handler(
-            CommandHandler(["help", "start"], self._cmd_help, filters=only_me))
+            CommandHandler("help", self._cmd_help, filters=only_me))
         app.add_handler(
             CommandHandler("live", self._cmd_live, filters=only_me))
         app.add_handler(CallbackQueryHandler(self._handle_callback))
