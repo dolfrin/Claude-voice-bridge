@@ -299,6 +299,16 @@ _APPROVAL_TRUNCATED_MARKER = "…[truncated]"
 _SAFE_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,80}")
 
 
+def permission_hook_registered(settings: Path) -> bool:
+    """Does Claude Code run hooks/editor-permission.sh on PermissionRequest?"""
+    try:
+        groups = json.loads(settings.read_text()).get("hooks", {}).get("PermissionRequest", [])
+        return any("editor-permission.sh" in str(hook.get("command", ""))
+                   for group in groups for hook in group.get("hooks", []))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 
 
 def _parse_schedule_id(raw: str | None) -> int | None:
@@ -1336,9 +1346,9 @@ class TelegramIO:
                 await query.edit_message_text(
                     t("approval.allowed") if allow else t("approval.denied"))
             else:
-                # Almost always: the editor session stopped waiting before the
-                # tap landed, so it is already asking there instead.
-                await query.edit_message_text(t("approval.too_late"))
+                # The editor session stopped waiting before the tap landed:
+                # answered there, or it gave up and is asking there instead.
+                await query.edit_message_text(self._perm_gone_text(ident))
             return
         if action == "ans":
             await self._answer_from_button(query, index_str)
@@ -3264,6 +3274,10 @@ class TelegramIO:
         return Path.home() / ".claude" / ".voice-bridge-alive"
 
     @staticmethod
+    def claude_settings() -> Path:
+        return Path.home() / ".claude" / "settings.json"
+
+    @staticmethod
     def perm_dir() -> Path:
         """Where the IDE hook drops permission requests and reads answers."""
         return Path.home() / ".claude" / ".voice-bridge-perm"
@@ -3277,6 +3291,14 @@ class TelegramIO:
         asks the user itself, exactly as before this existed.
         """
         directory = self.perm_dir()
+        # The hook lives in ~/.claude/settings.json, outside this repo; it went
+        # missing once and prompts silently lost their buttons.
+        if not permission_hook_registered(self.claude_settings()):
+            logger.warning("perm: no PermissionRequest hook runs editor-permission.sh")
+            try:
+                await self._send_plain(t("approval.hook_missing"))
+            except Exception:  # noqa: BLE001 - a warning must not stop the watcher
+                logger.exception("perm: could not report the missing hook")
         while True:
             try:
                 await asyncio.sleep(1.0)
@@ -3338,9 +3360,21 @@ class TelegramIO:
                 continue
             self._perm_pending.pop(ident, None)
             try:
-                await message.edit_text(t("approval.too_late"))
+                await message.edit_text(self._perm_gone_text(ident))
             except Exception:  # noqa: BLE001 - a failed edit must not stop the watcher
                 logger.exception("perm: could not mark %s expired", ident)
+
+    def _perm_gone_text(self, ident: str) -> str:
+        """Why a request is no longer waiting, from the note the hook left."""
+        note = self.perm_dir() / f"{ident}.gone"
+        try:
+            reason = note.read_text().strip()
+            note.unlink()
+        except OSError:
+            reason = ""
+        if reason == "editor":
+            return t("approval.answered_in_editor")
+        return t("approval.too_late")
 
     def answer_permission(self, ident: str, allow: bool) -> bool:
         """Write the decision the blocked editor hook is waiting for."""

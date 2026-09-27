@@ -790,23 +790,36 @@ after — such a notification reaches that exact session.
 
 ### Answering the IDE's permission prompts from Telegram
 
-The bridge can relay tool-permission prompts from IDE sessions to Telegram with
-**✅ Leisti** / **❌ Neleisti** buttons. This needs a Claude Code hook on your machine
-(not included in this repo) that talks to the bridge through files:
+The bridge can relay tool-permission prompts from VS Code sessions to Telegram with
+**✅ Leisti** / **❌ Neleisti** buttons. Register `hooks/editor-permission.sh` in
+`~/.claude/settings.json`:
+
+```json
+"PermissionRequest": [{"hooks": [{"type": "command",
+  "command": "/path/to/claude-voice-bridge/hooks/editor-permission.sh", "timeout": 3600}]}]
+```
+
+The bridge warns in Telegram at start when it is not registered. It talks to the
+bridge through files:
 
 | File | Written by | Meaning |
 |---|---|---|
 | `~/.claude/.voice-bridge-alive` | bridge, every second | Heartbeat; a missing or stale (>15 s) file means "bridge down, do not wait" |
 | `~/.claude/.voice-bridge-perm/<id>.req.json` | hook | Request: `{"project", "tool", "detail", "cwd"}` |
 | `~/.claude/.voice-bridge-perm/<id>.ans` | bridge | Answer: `allow` or `deny` |
+| `~/.claude/.voice-bridge-perm/<id>.gone` | hook | Why it stopped waiting: `editor`, `timeout`, `bridge`, `closed` |
 
-Use a `PreToolUse` hook rather than `PermissionRequest`: the VS Code extension keeps
-its own dialog open even after a `PermissionRequest` hook answers. The hook should
-only engage for tools that would really prompt, check the heartbeat first, delete its
-request file when it gives up, and fall through to the normal editor prompt on
-timeout or any error. When the request file disappears, the Telegram message is edited
-to "⌛ Per vėlu — atsakyk editoriuje" so a late tap is never mistaken for an answer.
-Request ids must match `[A-Za-z0-9_-]`; anything else is refused.
+In the VS Code extension (Claude Code 2.1.283) a `PermissionRequest` hook runs
+alongside the editor's dialog: whichever answers first wins, and a hook answer
+withdraws the dialog. So the hook can wait for the phone while the editor stays
+usable. It engages only for VS Code sessions (a terminal may hold its dialog back
+until the hook returns) and not for AskUserQuestion / ExitPlanMode; those, and a
+stopped bridge, get the plain notification from `~/.claude/notify-question.sh`.
+The session registry shows `waiting` while a dialog is open; when that ends without
+a tap, the prompt was answered in the editor and the Telegram message says
+"✔️ Jau atsakyta editoriuje". On timeout it says "⌛ Per vėlu — atsakyk editoriuje",
+so a late tap is never mistaken for an answer. Request ids must match
+`[A-Za-z0-9._-]`; anything else is refused.
 
 ## Usage and limits
 

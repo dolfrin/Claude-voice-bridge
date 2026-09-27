@@ -60,3 +60,7 @@ def _private_live_files(monkeypatch, tmp_path):
     alive_marker = tmp_path / ".voice-bridge-alive"
     monkeypatch.setattr(TelegramIO, "live_marker", staticmethod(lambda: live_marker))
     monkeypatch.setattr(TelegramIO, "alive_marker", staticmethod(lambda: alive_marker))
+    perm_dir = tmp_path / ".voice-bridge-perm"
+    settings = tmp_path / "settings.json"
+    monkeypatch.setattr(TelegramIO, "perm_dir", staticmethod(lambda: perm_dir))
+    monkeypatch.setattr(TelegramIO, "claude_settings", staticmethod(lambda: settings))
