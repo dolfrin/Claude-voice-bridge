@@ -2555,7 +2555,7 @@ class TelegramIO:
         best = _open_session_for(sessions, cwd)
         if best is None:
             return False
-        return await self._send_to(best, text, spoken)
+        return await self._send_to(best, text, spoken, why="its project's open session")
 
     async def live_post(self, cwd: str, text: str) -> bool:
         """Put *text* into the editor session open on *cwd*, if any, WITHOUT
@@ -2573,7 +2573,9 @@ class TelegramIO:
             logger.exception("live: could not post to the session on %s", cwd)
             return False
 
-    async def live_send_to(self, session_id: str, text: str, spoken: bool = False) -> bool:
+    async def live_send_to(
+        self, session_id: str, text: str, spoken: bool = False, why: str = "reply to its message",
+    ) -> bool:
         """Send *text* into the session *session_id* if it is open on this PC.
 
         This is how a reply goes back to the conversation that produced the
@@ -2588,12 +2590,16 @@ class TelegramIO:
             logger.exception("live: could not list sessions")
             return False
         match = next((x for x in sessions if x.session_id == session_id), None)
-        return match is not None and await self._send_to(match, text, spoken)
+        return match is not None and await self._send_to(match, text, spoken, why=why)
 
-    async def _send_to(self, session, text: str, spoken: bool, movable: bool = True) -> bool:
-        """Attach to *session* (so its answer streams back) and send *text*."""
+    async def _send_to(
+        self, session, text: str, spoken: bool, movable: bool = True, why: str = "message routed there",
+    ) -> bool:
+        """Attach to *session* (so its answer streams back) and send *text*.
+        *why* goes to the log, so every change of the current session can be
+        traced to what caused it."""
         if self._live_session is None or self._live_session.pid != session.pid:
-            await self._attach_live(str(session.pid), why="message routed there")
+            await self._attach_live(str(session.pid), why=why)
         sent = await self.live_send(text, spoken=spoken, movable=movable)
         if sent:
             await self.note_route(
@@ -2610,7 +2616,7 @@ class TelegramIO:
         readable: only the buttons change, to say what was answered."""
         entry = sent_log.lookup(query.message.message_id)
         if entry and entry.get("s"):
-            sent = await self.live_send_to(entry["s"], value)
+            sent = await self.live_send_to(entry["s"], value, why=f"answer button {value!r}")
         else:
             sent = self.live_target() is not None and await self.live_send(value)
         label = {
@@ -2727,7 +2733,7 @@ class TelegramIO:
         # The edited button below says where it went; a fresh "➡️ … ↪️"
         # notice would only offer to move it straight back.
         self._last_route = target.session_id
-        moved = await self._send_to(target, text, self._live_spoken, movable=False)
+        moved = await self._send_to(target, text, self._live_spoken, movable=False, why="↪️ move button")
         await self._edit_callback_markup(query, InlineKeyboardMarkup([[InlineKeyboardButton(
             t("move.done", label=self.session_label(target)[:40]) if moved else t("move.gone"),
             callback_data="noop:",

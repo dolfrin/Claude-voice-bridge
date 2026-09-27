@@ -3955,7 +3955,7 @@ async def test_answer_button_goes_to_the_session_that_asked_and_keeps_the_text()
 
     await io._handle_callback(MagicMock(callback_query=query), MagicMock())
 
-    io.live_send_to.assert_awaited_once_with("ide-qwing", "taip")
+    io.live_send_to.assert_awaited_once_with("ide-qwing", "taip", why="answer button 'taip'")
     query.edit_message_text.assert_not_awaited()  # the question stays readable
     markup = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
     assert markup.inline_keyboard[0][0].text == "✅ Atsakyta: taip"
@@ -4080,7 +4080,7 @@ async def test_with_several_sessions_open_a_message_can_be_moved(monkeypatch):
     query.from_user = MagicMock(id=42)
     await io._handle_callback(MagicMock(callback_query=query), MagicMock())
 
-    io._send_to.assert_awaited_once_with(bridge, "padaryk README", False, movable=False)
+    io._send_to.assert_awaited_once_with(bridge, "padaryk README", False, movable=False, why="↪️ move button")
     assert socket_sends and socket_sends[0][0] == "/s/q"  # qwing told to disregard
     assert "Nekreipk dėmesio" in socket_sends[0][1]
 
