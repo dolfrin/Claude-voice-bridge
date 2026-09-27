@@ -290,12 +290,8 @@ def build_panel_markup(snapshot: list[dict]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(
             f"⚙️ {row.get('display_name') or row['project']} {state}", callback_data=f"pset:{i}"
         )])
-    engine = snapshot[0]["engine"] if snapshot else "openai"
-    rows.append([InlineKeyboardButton(t("panel.engine", engine=engine), callback_data="cmopen:engine:0")])
-    rows.append([
-        InlineKeyboardButton(t("panel.limits"), callback_data="cost"),
-        InlineKeyboardButton(t("panel.recap"), callback_data="recap"),
-    ])
+    # Limits, recap and the speech engine live under "📊" and "🛠" on the
+    # home screen; repeating them here made one thing look like two.
     rows.append([InlineKeyboardButton(t("panel.all_off"), callback_data="alloff")])
     return InlineKeyboardMarkup(rows)
 

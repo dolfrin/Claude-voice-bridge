@@ -172,7 +172,6 @@ EN.update({
     'panel.all_off': '⏸ ALL OFF',
     'panel.engine': 'engine: {engine} ▾',
     'panel.limits': '📊 Limits',
-    'panel.recap': '🗒 Recap',
     'panel.mode_of': '{project} mode',
     'panel.voice_of': '{project} voice',
     'panel.back': 'back',
@@ -222,7 +221,6 @@ LT.update({
     'panel.all_off': '⏸ VISI OFF',
     'panel.engine': 'variklis: {engine} ▾',
     'panel.limits': '📊 Limitai',
-    'panel.recap': '🗒 Santrauka',
     'panel.mode_of': '{project} režimas',
     'panel.voice_of': '{project} balsas',
     'panel.back': 'atgal',
@@ -264,7 +262,6 @@ EN.update({
     "off.expired": "This request has expired.",
     "off.cancelled": "Cancelled: {project}",
     "off.sent": "Enabled and sent to {project}.",
-    "panel.title": "Control panel",
     "menu.title": "🏠 Menu",
     "codex.no_claude_permissions": "Claude permissions are off in this channel — it is reserved for Codex.",
     "codex.no_live": "Claude /live is off in this channel — it is reserved for Codex.",
@@ -349,7 +346,6 @@ LT.update({
     "off.expired": "Šis prašymas nebegalioja.",
     "off.cancelled": "Atšaukta: {project}",
     "off.sent": "Įjungta ir nusiųsta į {project}.",
-    "panel.title": "Valdymo skydelis",
     "menu.title": "🏠 Meniu",
     "codex.no_claude_permissions": "Claude leidimai šiame kanale išjungti — kanalas skirtas Codex.",
     "codex.no_live": "Claude /live šiame kanale išjungtas — kanalas skirtas Codex.",
@@ -766,7 +762,7 @@ LT.update({
 
 # --- /panel settings screen and the project list ------------------------------------------
 EN.update({
-    "panel.title": "🎛 Control panel\nTap a project to see and change its settings. Below: settings shared by all.",
+    "panel.title": "⚙️ Projects\nTap a project to see and change its settings.",
     "panel.engine": "🧠 Speech engine: {engine}",
     "panel.all_off": "⏸ Switch all projects off",
     "settings.on": "🟢 On — messages to it are handled",
@@ -791,7 +787,7 @@ EN.update({
     "projects.legend": "🎯 name — write to that project · ▶/⏸ — switch it on/off",
 })
 LT.update({
-    "panel.title": "🎛 Valdymo skydelis\nPaspausk projektą — pamatysi ir pakeisi jo nustatymus. Žemiau — bendri visiems.",
+    "panel.title": "⚙️ Projektai\nPaspausk projektą — pamatysi ir pakeisi jo nustatymus.",
     "panel.engine": "🧠 Kalbos variklis: {engine}",
     "panel.all_off": "⏸ Išjungti visus projektus",
     "settings.on": "🟢 Įjungtas — žinutės jam apdorojamos",
@@ -830,7 +826,7 @@ EN.update({
     "cmd.start": "🏠 Home: where you write, what runs, limits",
     "cmd.chats": "💬 Open conversations",
     "home.current": "🎯 You are writing to: {label}",
-    "home.current_none": "🎯 No current conversation — a plain message goes to the current project.",
+    "home.current_none": "🎯 No current conversation — a plain message goes to the project you wrote to last.",
     "home.sessions": "💬 Open conversations: {n} (busy: {busy})",
     "home.limits": "📊 Limits: 5-hour {five} % · week {week} %",
     "home.chats": "💬 Conversations", "home.projects": "⚙️ Projects",
@@ -858,7 +854,7 @@ LT.update({
     "cmd.start": "🏠 Pradžia: kur rašai, kas vyksta, limitai",
     "cmd.chats": "💬 Atidaryti pokalbiai",
     "home.current": "🎯 Dabar rašai: {label}",
-    "home.current_none": "🎯 Dabartinio pokalbio nėra — paprasta žinutė eis dabartiniam projektui.",
+    "home.current_none": "🎯 Dabartinio pokalbio nėra — paprasta žinutė eis projektui, kuriam rašei paskutinį kartą.",
     "home.sessions": "💬 Atidaryti pokalbiai: {n} (dirba: {busy})",
     "home.limits": "📊 Limitai: 5 val. {five} % · savaitė {week} %",
     "home.chats": "💬 Pokalbiai", "home.projects": "⚙️ Projektai",

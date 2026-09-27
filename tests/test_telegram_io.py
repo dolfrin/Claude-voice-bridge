@@ -1486,9 +1486,10 @@ def test_build_panel_markup_has_per_project_and_global_rows():
     assert [r[0].callback_data for r in kb[:2]] == ["pset:0", "pset:1"]
     assert all(len(r) == 1 for r in kb[:2])
     assert "qwing" in kb[0][0].text  # the full name, not "q…"
-    # shared settings; no "all on" (it would start every project)
+    # only "all off"; no "all on" (it would start every project), and no
+    # limits/recap/engine, which live under the home screen's other sections
     data = [b.callback_data for r in kb[2:] for b in r]
-    assert data == ["cmopen:engine:0", "cost", "recap", "alloff"]
+    assert data == ["alloff"]
 
 
 def test_project_settings_screen_explains_each_setting_and_labels_each_button():
@@ -1519,18 +1520,17 @@ def test_build_menu_markup_has_primary_actions():
     ]
 
 
-def test_build_panel_markup_reflects_state_and_engine():
+def test_build_panel_markup_reflects_state():
     snap = FakeControls().snapshot()
     snap[1]["last_active"] = True
     texts = [b.text for r in build_panel_markup(snap).inline_keyboard for b in r]
     assert texts[0].endswith("🟢") and texts[1].endswith("⏸")  # on / off
-    assert any("openai" in x for x in texts)
 
 
 def test_build_panel_markup_empty_snapshot():
     kb = build_panel_markup([]).inline_keyboard
-    # no project rows, only the shared settings
-    assert [b.callback_data for r in kb for b in r] == ["cmopen:engine:0", "cost", "recap", "alloff"]
+    # no project rows, only "all off"
+    assert [b.callback_data for r in kb for b in r] == ["alloff"]
 
 
 def test_format_projects_uses_status_path_and_last_active_first():
@@ -3901,7 +3901,7 @@ def test_project_views_stay_within_telegram_limits_with_many_projects():
         for i in range(70)
     ]
     panel = build_panel_markup(snap)
-    assert sum(len(r) for r in panel.inline_keyboard) == 3 + 4  # 3 on + shared
+    assert sum(len(r) for r in panel.inline_keyboard) == 3 + 1  # 3 on + "all off"
 
     seen = set()
     for page in range(10):
@@ -4453,7 +4453,7 @@ async def test_home_sections_open_and_lead_back_home(monkeypatch):
 
     monkeypatch.setattr(live_mod, "list_sessions", lambda *a, **k: [])
     io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
-    for section, expect in (("chats", "Atidaryti pokalbiai"), ("projects", "Valdymo skydelis"),
+    for section, expect in (("chats", "Atidaryti pokalbiai"), ("projects", "Projektai"),
                             ("status", "Limitai ir būklė"), ("system", "Sistema"),
                             ("new", "kuriame projekte")):
         query = AsyncMock()
