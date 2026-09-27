@@ -76,7 +76,7 @@ EN.update({
     "usage.others_none": "will appear here once you log in to them on this PC",
     "usage.spare_title": "🪙 Spare account (the bridge's own sessions)",
     "usage.spare_window": "{title} {pct} % · resets {reset}",
-    "usage.spare_spent": "🪙 Spare account used up until {until} — the bridge's sessions run on this account meanwhile",
+    "usage.spare_spent": "🪙 Spare account used up until {until} — the bridge's sessions run on the main account (above) meanwhile",
     "usage.spare_unknown": "🪙 Spare account set up — its limit shows here after its first answer",
     "usage.legend": "🟦 this PC · 🟩 other devices (or not split yet) · ⬜ left",
     "usage.footnote": (
@@ -123,7 +123,7 @@ LT.update({
     "usage.others_none": "atsiras čia, kai prie jų prisijungsi šiame PC",
     "usage.spare_title": "🪙 Atsarginė paskyra (tilto sesijos)",
     "usage.spare_window": "{title} {pct} % · atsinaujina {reset}",
-    "usage.spare_spent": "🪙 Atsarginė paskyra išnaudota iki {until} — tuo metu tilto sesijos dirba šia paskyra",
+    "usage.spare_spent": "🪙 Atsarginė paskyra išnaudota iki {until} — tuo metu tilto sesijos dirba pagrindine paskyra (viršuje)",
     "usage.spare_unknown": "🪙 Atsarginė paskyra paruošta — jos limitas atsiras čia po pirmo atsakymo",
     "usage.legend": "🟦 šis PC · 🟩 kiti įrenginiai (ar dar neišskirta) · ⬜ liko",
     "usage.footnote": (
