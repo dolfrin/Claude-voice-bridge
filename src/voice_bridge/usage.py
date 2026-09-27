@@ -32,7 +32,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from . import claude_history
+from . import claude_history, spare_account
 from .i18n import t
 
 logger = logging.getLogger(__name__)
@@ -248,7 +248,13 @@ def take_sample(home: Path, ledger: Path, now: float | None = None, full: bool =
     scan_from = min(
         (l["reset"] - l["span"] if full else l["start"] for l in limits), default=now
     )
-    turns = _turns(root, scan_from)
+    # Turns the bridge ran on the spare account count against that account,
+    # not this one.
+    spare = spare_account.spans(ledger.parent)
+    turns = [
+        x for x in _turns(root, scan_from)
+        if not any(sid == x[0] and a <= x[1] <= b for sid, a, b in spare)
+    ]
     record = {
         "ts": now, "account": account, "email": email, "tier": tier, "since": since,
         "w": {
@@ -460,6 +466,16 @@ def _session_lines(root: Path, turns: list, now: float, k: float | None) -> list
     return lines
 
 
+def _spare_line(spare: dict, now: float) -> str:
+    """The spare account as its bridge sessions last reported it."""
+    if (spare.get("until") or 0) > now:
+        return t("usage.spare_spent", until=_stamp(spare["until"], now))
+    if spare.get("utilization") is None:
+        return t("usage.spare_unknown")
+    reset = f" · {_stamp(spare['resets_at'], now)}" if spare.get("resets_at") else ""
+    return t("usage.spare_used", pct=f"{spare['utilization'] * 100:.0f}", reset=reset)
+
+
 def format_usage(ledger: Path, home: Path | None = None, now: float | None = None) -> str:
     """The /usage message: every limit, this PC's part of it, and its sessions."""
     home = home or Path.home()
@@ -542,6 +558,9 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
             lines.append(t("usage.other_line", star=star, account=_account_line(acc, now), seen=_stamp(acc["seen"], now)))
     else:
         lines.append("  " + t("usage.others_none"))
+    spare = spare_account.status(ledger.parent)
+    if spare is not None:
+        lines += ["", _spare_line(spare, now)]
     lines += [
         "",
         t("usage.legend"),

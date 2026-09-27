@@ -74,6 +74,9 @@ EN.update({
     "usage.others_title": "👥 Other accounts (last state seen on this PC):",
     "usage.other_line": "• {star}{account} · seen {seen}",
     "usage.others_none": "will appear here once you log in to them on this PC",
+    "usage.spare_used": "🪙 Spare account (the bridge's own sessions): {pct} % of its limit used{reset}",
+    "usage.spare_spent": "🪙 Spare account used up until {until} — the bridge's sessions run on this account meanwhile",
+    "usage.spare_unknown": "🪙 Spare account set up — its limit shows here after its first answer",
     "usage.legend": "🟦 this PC · 🟩 other devices (or not split yet) · ⬜ left",
     "usage.footnote": (
         "% — of your limit. \"This PC\" and the sessions are estimates (≈): every "
@@ -117,6 +120,9 @@ LT.update({
     "usage.others_title": "👥 Kitos paskyros (paskutinė šiame PC matyta būsena):",
     "usage.other_line": "• {star}{account} · matyta {seen}",
     "usage.others_none": "atsiras čia, kai prie jų prisijungsi šiame PC",
+    "usage.spare_used": "🪙 Atsarginė paskyra (tilto sesijos): išnaudota {pct} % limito{reset}",
+    "usage.spare_spent": "🪙 Atsarginė paskyra išnaudota iki {until} — tuo metu tilto sesijos dirba šia paskyra",
+    "usage.spare_unknown": "🪙 Atsarginė paskyra paruošta — jos limitas atsiras čia po pirmo atsakymo",
     "usage.legend": "🟦 šis PC · 🟩 kiti įrenginiai (ar dar neišskirta) · ⬜ liko",
     "usage.footnote": (
         "% — nuo tavo limito. „Šis PC“ ir sesijos yra įvertis (≈): skaičiuojamos "

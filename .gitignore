@@ -18,3 +18,9 @@ docs/superpowers/
 .env.tmp
 *.bak-*
 projects.yaml.bak*
+# Bridge state kept next to the database; holds live login tokens
+claude-accounts.json
+claude-spare-token
+claude-spare.json
+claude-usage.jsonl
+telegram-pinned-target.json

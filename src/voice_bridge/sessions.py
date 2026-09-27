@@ -39,6 +39,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    RateLimitEvent,
     ResultMessage,
     TextBlock,
     ToolUseBlock,
@@ -49,6 +50,7 @@ from claude_agent_sdk.types import CanUseToolShadowedWarning
 from . import claude_history
 from .approvals import ApprovalManager, make_can_use_tool
 from .catchup import build_catchup
+from .spare_account import SpareAccount
 from .config import (
     AUTONOMY_MODES,
     EFFORT_LEVELS,
@@ -187,6 +189,10 @@ class _Session:
         self.client: ClaudeSDKClient | None = None
         self.queue: asyncio.Queue = asyncio.Queue()
         self.task: asyncio.Task | None = None
+        # Running on the spare account's token (see spare_account), and
+        # mid-turn: a session is moved between accounts only between turns.
+        self.on_spare = False
+        self.busy = False
 
 
 class SessionManager:
@@ -208,6 +214,8 @@ class SessionManager:
         self._approvals = approvals
         self._ask_user = ask_user
         self._sessions: dict[str, _Session] = {}
+        self._spare = SpareAccount(Path(cfg.db_path).expanduser().parent)
+        self._moves: set[asyncio.Task] = set()  # spare -> main hand-overs in flight
 
         # Supervision state (crash recovery / deliver recovery).
         # _restart_tasks: pending backoff->restart supervisor task per project.
@@ -348,6 +356,16 @@ class SessionManager:
             if catchup:
                 text = f"{catchup}\n\n---\n\n{text}"
         self._last_activity[project] = self._monotonic()
+        if sess.on_spare != self._spare.usable() and not sess.busy and sess.queue.empty():
+            # The spare account ran out, or its limit has reset: move the
+            # session between turns. Resume keeps the conversation.
+            logger.info("%s: moving the session %s the spare account", project,
+                        "off" if sess.on_spare else "to")
+            await self._stop(project)
+            await self._ensure_started(project)
+            sess = self._sessions.get(project)
+            if sess is None:
+                return
         position = sess.queue.qsize() + 1
         await sess.queue.put((text, mirror_text))
         if position > 1:
@@ -644,6 +662,13 @@ class SessionManager:
         if resume and _open_elsewhere(resume):
             logger.warning("%s: session %s is open elsewhere; forking", name, resume)
             options.fork_session = True
+        # The spare account, while it has allowance left: only this process
+        # gets its token, the PC's own login is untouched.
+        token = self._spare.token() if self._spare.usable() else None
+        if token:
+            options.env = {**(options.env or {}), "CLAUDE_CODE_OAUTH_TOKEN": token}
+            sess.on_spare = True
+            logger.info("%s: starting on the spare account", name)
 
         client = ClaudeSDKClient(options)
         try:
@@ -777,6 +802,9 @@ class SessionManager:
             # message. The SDK gets the former; the IDE transcript gets the
             # latter (Task C — do not echo our own catch-up back into the IDE).
             text, mirror_text = item
+            sess.busy = True
+            started = time.time()
+            spent = False  # the spare account ran out during this turn
             try:
                 await self._emit_status(name, t("status.working"), transient=True)
                 await append_transcript(sess.project.cwd, "user", mirror_text)
@@ -802,7 +830,12 @@ class SessionManager:
                 )
                 try:
                     async for msg in client.receive_response():
-                        if isinstance(msg, AssistantMessage):
+                        if isinstance(msg, RateLimitEvent):
+                            if sess.on_spare and self._spare.record_limit(msg.rate_limit_info):
+                                spent = True
+                        elif isinstance(msg, AssistantMessage):
+                            if sess.on_spare and getattr(msg, "error", None) == "rate_limit":
+                                spent = True
                             self._record_last_model(name, msg)
                             for block in msg.content:
                                 if isinstance(block, TextBlock):
@@ -824,6 +857,8 @@ class SessionManager:
                             session_id = getattr(msg, "session_id", None)
                             if session_id:
                                 await self._store.set_session_id(name, session_id)
+                                if sess.on_spare:
+                                    self._spare.record_turn(session_id, started, time.time())
                             if getattr(msg, "is_error", False):
                                 result_error = True
                                 result_subtype = getattr(msg, "subtype", None)
@@ -839,6 +874,15 @@ class SessionManager:
                 # assistant text (or the error-detail Outbound), so the last
                 # thing the user sees is the answer, not stale tool lines.
                 await self._flush_verbose(name, activity_buffer)
+                if spent and result_error:
+                    # The turn failed on the spare account's limit: run it
+                    # again on the main login instead of showing the error.
+                    logger.info("%s: spare account used up; retrying the turn on the main login", name)
+                    self._spare.mark_spent()
+                    task = asyncio.create_task(self._off_spare(name, item))
+                    self._moves.add(task)
+                    task.add_done_callback(self._moves.discard)
+                    return
                 joined = "\n".join(p for p in parts if p).strip()
                 if joined:
                     await append_transcript(sess.project.cwd, "assistant", joined)
@@ -862,6 +906,25 @@ class SessionManager:
                 await self._emit_crash(sess, err)
                 self._schedule_restart(name)
                 return
+            finally:
+                sess.busy = False
+
+    async def _off_spare(self, name: str, retry) -> None:
+        """Restart *name* on the main login and give it the failed turn again,
+        ahead of anything queued meanwhile. Resume keeps the conversation."""
+        old = self._sessions.get(name)
+        pending = []
+        while old is not None and not old.queue.empty():
+            item = old.queue.get_nowait()
+            if item is not _SHUTDOWN:
+                pending.append(item)
+        await self._stop(name)
+        await self._ensure_started(name)
+        new = self._sessions.get(name)
+        if new is None:
+            return
+        for item in [retry, *pending]:
+            await new.queue.put(item)
 
     def _record_last_model(self, name: str, msg: AssistantMessage) -> None:
         """Record the ACTUAL model that answered (AssistantMessage.model).

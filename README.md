@@ -857,6 +857,25 @@ the bridge so its sessions use it. Editor windows keep the old login until reloa
 log in to that account once with `claude /login`. Those copies are live tokens for every
 account, which is why the feature is off unless you turn it on.
 
+**A spare account for the bridge's own sessions.** If you pay for a second, smaller
+subscription, the sessions the bridge starts itself (not your editor windows) can use its
+allowance first. Run once at the PC, and sign in with the spare account in the browser
+that opens:
+
+```bash
+.venv/bin/python -m voice_bridge.spare_account
+```
+
+It runs `claude setup-token` and saves the one-year token to `claude-spare-token` (0600)
+next to the bridge's database; restart the bridge. Only the bridge's sessions get it,
+through `CLAUDE_CODE_OAUTH_TOKEN`: the PC's own login, VS Code and terminals are not
+touched. When Claude Code reports the spare account's limit reached (paid extra usage
+counts as reached), the bridge restarts that session on the PC's login, runs the same
+turn again and moves back once the limit resets. Such a token can only make model
+requests, so `/usage` shows the spare account from what its sessions last reported, and
+turns made on it do not count toward the main account's share. Delete the token file to
+stop.
+
 ---
 
 ## Context sync (IDE ⇄ Telegram)
