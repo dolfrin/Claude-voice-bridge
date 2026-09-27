@@ -468,12 +468,23 @@ def _session_lines(root: Path, turns: list, now: float, k: float | None) -> list
 
 def _spare_line(spare: dict, now: float) -> str:
     """The spare account as its bridge sessions last reported it."""
+    windows = [
+        t("usage.spare_window", title=title, pct=f"{float(w['utilization']) * 100:.0f}",
+          reset=_stamp(w["resetsAt"], now))
+        for key, title in (("five_hour", t("usage.window_session")), ("seven_day", t("usage.window_week")))
+        if isinstance(w := (spare.get("windows") or {}).get(key), dict)
+        and w.get("utilization") is not None and w.get("resetsAt")
+    ]
     if (spare.get("until") or 0) > now:
-        return t("usage.spare_spent", until=_stamp(spare["until"], now))
-    if spare.get("utilization") is None:
+        head = t("usage.spare_spent", until=_stamp(spare["until"], now))
+    elif windows or spare.get("utilization") is not None:
+        head = t("usage.spare_title")
+        if not windows:
+            windows = [t("usage.spare_window", title="", pct=f"{spare['utilization'] * 100:.0f}",
+                         reset=_stamp(spare["resets_at"], now) if spare.get("resets_at") else "?")]
+    else:
         return t("usage.spare_unknown")
-    reset = f" · {_stamp(spare['resets_at'], now)}" if spare.get("resets_at") else ""
-    return t("usage.spare_used", pct=f"{spare['utilization'] * 100:.0f}", reset=reset)
+    return "\n".join([head] + ["  " + w for w in windows])
 
 
 def format_usage(ledger: Path, home: Path | None = None, now: float | None = None) -> str:

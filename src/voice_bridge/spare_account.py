@@ -58,7 +58,7 @@ def status(db_dir: Path) -> dict | None:
     if not (db_dir / TOKEN_FILE).exists():
         return None
     state = _read(state_path(db_dir))
-    return {k: state.get(k) for k in ("until", "utilization", "resets_at", "kind")}
+    return {k: state.get(k) for k in ("until", "utilization", "resets_at", "kind", "windows")}
 
 
 class SpareAccount:
@@ -87,8 +87,11 @@ class SpareAccount:
         Extra paid usage ("overage") counts as used up: the point is the
         allowance already paid for, not a new bill."""
         state = _read(state_path(self._dir))
+        # Every window's reading ("five_hour", "seven_day") when Claude Code
+        # sends them; the top-level utilization is often missing.
+        windows = (info.raw or {}).get("unifiedWindows") or {}
         state.update(utilization=info.utilization, resets_at=info.resets_at,
-                     kind=info.rate_limit_type)
+                     kind=info.rate_limit_type, windows=windows, seen=self._clock())
         spent = info.status == "rejected" or info.rate_limit_type == "overage"
         if spent:
             state["until"] = info.resets_at or self._clock() + 3600

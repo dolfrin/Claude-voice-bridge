@@ -98,3 +98,18 @@ def test_usage_does_not_count_spare_turns_against_the_main_account(tmp_path, mon
     sample = usage.take_sample(tmp_path, tmp_path / "ledger.jsonl", now)
 
     assert [x[0] for x in sample["turns"]] == ["main-sess"]
+
+
+def test_usage_shows_both_windows_of_the_spare_account(tmp_path):
+    sa.save_token(tmp_path, "sk-ant-oat01-x")
+    now = 1_790_496_000.0
+    raw = {"unifiedWindows": {"five_hour": {"utilization": 0, "resetsAt": now + 3600},
+                              "seven_day": {"utilization": 1, "resetsAt": now + 86400}}}
+    spare = sa.SpareAccount(tmp_path, clock=lambda: now)
+    info = RateLimitInfo(status="rejected", resets_at=int(now + 86400), rate_limit_type="seven_day", raw=raw)
+    assert spare.record_limit(info) is True
+
+    line = usage._spare_line(sa.status(tmp_path), now)
+
+    assert "išnaudota iki" in line
+    assert "5 val. langas 0 %" in line and "Savaitė 100 %" in line
