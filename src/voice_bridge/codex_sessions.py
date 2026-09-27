@@ -586,9 +586,7 @@ class CodexSessionManager:
         if project not in self._projects:
             return
         await self._store.set_enabled(project, enabled)
-        if enabled:
-            await self._start(project)
-        else:
+        if not enabled:  # enabling starts nothing: deliver() does, when needed
             await self._stop(project)
 
     async def set_mode(self, project: str, mode: str) -> None:

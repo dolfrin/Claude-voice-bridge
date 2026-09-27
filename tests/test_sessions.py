@@ -329,7 +329,7 @@ async def test_deliver_reports_queue_position_when_busy():
     await sm.stop_all()
 
 
-async def test_interrupt_restarts_enabled_session_and_emits_status():
+async def test_interrupt_stops_session_and_next_message_starts_it():
     project = make_project("qwing")
     store = FakeStore(enabled={"qwing": True})
     outbound: list[Outbound] = []
@@ -345,10 +345,13 @@ async def test_interrupt_restarts_enabled_session_and_emits_status():
 
     assert stopped is True
     assert first.disconnected is True
-    assert len(FakeClaudeSDKClient.instances) == 2
+    assert len(FakeClaudeSDKClient.instances) == 1  # no hidden restart
     assert outbound[-1].text == "Nutraukta."
     assert outbound[-1].spoken == " "
     assert outbound[-1].transient is False
+
+    await sm.deliver("qwing", "vel")
+    assert len(FakeClaudeSDKClient.instances) == 2
 
     await sm.stop_all()
 
@@ -410,7 +413,7 @@ async def test_deliver_to_unknown_project_is_noop():
 # on/off lifecycle
 # --------------------------------------------------------------------------- #
 
-async def test_set_enabled_false_stops_and_persists_then_true_restarts():
+async def test_set_enabled_false_stops_then_true_waits_for_a_message():
     project = make_project("qwing")
     store = FakeStore(enabled={"qwing": True})
 
@@ -428,8 +431,10 @@ async def test_set_enabled_false_stops_and_persists_then_true_restarts():
     assert store._enabled["qwing"] is False
 
     await sm.set_enabled("qwing", True)
-    assert sm.is_running("qwing") is True
     assert store._enabled["qwing"] is True
+    assert sm.is_running("qwing") is False  # nothing hidden starts on /on
+    await sm.deliver("qwing", "labas")
+    assert sm.is_running("qwing") is True
     assert len(FakeClaudeSDKClient.instances) == 2
 
     await sm.stop_all()
@@ -467,7 +472,7 @@ async def test_set_enabled_true_opens_vscode_when_configured(monkeypatch):
 
     assert calls
     assert calls[0][0][:2] == ("/usr/bin/code", "/tmp/qwing")
-    assert sm.is_running("qwing") is True
+    assert sm.is_running("qwing") is False
 
     await sm.stop_all()
 

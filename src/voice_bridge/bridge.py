@@ -1582,10 +1582,11 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
     tick can't delay shutdown. Shutdown is symmetric and runs in ``finally``.
     """
     sent_log.prune()
-    # Telegram first: a project that fails to start reports it through
-    # Telegram, and before run() there is no bot to report with.
+    # No bridge session starts here: each one is a hidden Claude/Codex
+    # process (~170 MB) that forks the conversation open in the editor, and
+    # messages go to that editor session first. deliver() starts one the
+    # first time a message really needs it.
     await wiring.telegram.run()
-    await wiring.sessions.start_all()
     scheduler_task = asyncio.create_task(
         run_scheduler(
             wiring.store,

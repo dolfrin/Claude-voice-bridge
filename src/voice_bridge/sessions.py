@@ -422,18 +422,18 @@ class SessionManager:
                 self._schedule_restart(name)
 
     async def interrupt(self, project: str) -> bool:
-        """Cancel the running session, drop queued turns, and restart if enabled."""
+        """Cancel the running session and drop queued turns; the next message
+        starts it again (see :meth:`deliver`)."""
         if project not in self._projects:
             return False
         was_running = project in self._sessions
         await self._stop(project)
-        if await self._store.is_enabled(project):
-            await self._start(project)
         await self._emit_status(project, t("status.interrupted"))
         return was_running
 
     async def set_enabled(self, project: str, enabled: bool) -> None:
-        """Persist the enabled flag and start (resume) or stop the session."""
+        """Persist the enabled flag; stop the session when disabling. Enabling
+        starts nothing: the first message that needs it does (:meth:`deliver`)."""
         if project not in self._projects:
             return
         await self._store.set_enabled(project, enabled)
@@ -445,7 +445,6 @@ class SessionManager:
             self._last_activity.pop(project, None)
             if self._cfg.open_vscode_on_enable:
                 await self._open_vscode(self._projects[project])
-            await self._start(project)
         else:
             await self._stop(project)
             if self._cfg.close_vscode_on_disable:

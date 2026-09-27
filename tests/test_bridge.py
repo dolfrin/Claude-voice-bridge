@@ -2036,12 +2036,12 @@ async def test_build_wires_and_run_loop(monkeypatch):
     assert wired.telegram is telegram
     assert wired.sessions is sessions
 
-    # the run loop: start_all, run, then stop on the event being set
+    # the run loop: run, then stop on the event being set
     stop = asyncio.Event()
     stop.set()  # already stopped -> returns immediately after startup
     await run_until_stopped(wired, stop)
 
-    assert sessions.started == 1
+    assert sessions.started == 0  # bridge sessions start on demand, not at boot
     assert telegram.ran == 1
     assert telegram.stopped == 1
     assert sessions.stopped == 1
