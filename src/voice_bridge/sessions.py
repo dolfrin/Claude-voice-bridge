@@ -50,7 +50,7 @@ from claude_agent_sdk.types import CanUseToolShadowedWarning
 from . import claude_history
 from .approvals import ApprovalManager, make_can_use_tool
 from .catchup import build_catchup
-from .spare_account import SpareAccount
+from .spare_account import Spares
 from .config import (
     AUTONOMY_MODES,
     EFFORT_LEVELS,
@@ -189,9 +189,9 @@ class _Session:
         self.client: ClaudeSDKClient | None = None
         self.queue: asyncio.Queue = asyncio.Queue()
         self.task: asyncio.Task | None = None
-        # Running on the spare account's token (see spare_account), and
-        # mid-turn: a session is moved between accounts only between turns.
-        self.on_spare = False
+        # The spare account it runs on (see spare_account), None for the PC's
+        # login; and mid-turn: a session changes account only between turns.
+        self.spare: str | None = None
         self.busy = False
 
 
@@ -214,7 +214,7 @@ class SessionManager:
         self._approvals = approvals
         self._ask_user = ask_user
         self._sessions: dict[str, _Session] = {}
-        self._spare = SpareAccount(Path(cfg.db_path).expanduser().parent)
+        self._spares = Spares(Path(cfg.db_path).expanduser().parent)
         self._moves: set[asyncio.Task] = set()  # spare -> main hand-overs in flight
 
         # Supervision state (crash recovery / deliver recovery).
@@ -356,11 +356,15 @@ class SessionManager:
             if catchup:
                 text = f"{catchup}\n\n---\n\n{text}"
         self._last_activity[project] = self._monotonic()
-        if sess.on_spare != self._spare.usable() and not sess.busy and sess.queue.empty():
-            # The spare account ran out, or its limit has reset: move the
+        misplaced = (
+            not self._spares.usable(sess.spare) if sess.spare
+            else self._spares.pick() is not None
+        )
+        if misplaced and not sess.busy and sess.queue.empty():
+            # Its spare account ran out, or one has allowance again: move the
             # session between turns. Resume keeps the conversation.
-            logger.info("%s: moving the session %s the spare account", project,
-                        "off" if sess.on_spare else "to")
+            logger.info("%s: moving the session %s spare account", project,
+                        "off its" if sess.spare else "to a")
             await self._stop(project)
             await self._ensure_started(project)
             sess = self._sessions.get(project)
@@ -662,13 +666,14 @@ class SessionManager:
         if resume and _open_elsewhere(resume):
             logger.warning("%s: session %s is open elsewhere; forking", name, resume)
             options.fork_session = True
-        # The spare account, while it has allowance left: only this process
+        # A spare account while one has allowance left: only this process
         # gets its token, the PC's own login is untouched.
-        token = self._spare.token() if self._spare.usable() else None
+        spare = self._spares.pick()
+        token = self._spares.token(spare) if spare else None
         if token:
             options.env = {**(options.env or {}), "CLAUDE_CODE_OAUTH_TOKEN": token}
-            sess.on_spare = True
-            logger.info("%s: starting on the spare account", name)
+            sess.spare = spare
+            logger.info("%s: starting on spare account %s", name, spare)
 
         client = ClaudeSDKClient(options)
         try:
@@ -831,10 +836,10 @@ class SessionManager:
                 try:
                     async for msg in client.receive_response():
                         if isinstance(msg, RateLimitEvent):
-                            if sess.on_spare and self._spare.record_limit(msg.rate_limit_info):
+                            if sess.spare and self._spares.record_limit(sess.spare, msg.rate_limit_info):
                                 spent = True
                         elif isinstance(msg, AssistantMessage):
-                            if sess.on_spare and getattr(msg, "error", None) == "rate_limit":
+                            if sess.spare and getattr(msg, "error", None) == "rate_limit":
                                 spent = True
                             self._record_last_model(name, msg)
                             for block in msg.content:
@@ -857,8 +862,8 @@ class SessionManager:
                             session_id = getattr(msg, "session_id", None)
                             if session_id:
                                 await self._store.set_session_id(name, session_id)
-                                if sess.on_spare:
-                                    self._spare.record_turn(session_id, started, time.time())
+                                if sess.spare:
+                                    self._spares.record_turn(session_id, started, time.time())
                             if getattr(msg, "is_error", False):
                                 result_error = True
                                 result_subtype = getattr(msg, "subtype", None)
@@ -877,8 +882,8 @@ class SessionManager:
                 if spent and result_error:
                     # The turn failed on the spare account's limit: run it
                     # again on the main login instead of showing the error.
-                    logger.info("%s: spare account used up; retrying the turn on the main login", name)
-                    self._spare.mark_spent()
+                    logger.info("%s: spare account %s used up; retrying the turn", name, sess.spare)
+                    self._spares.mark_spent(sess.spare)
                     task = asyncio.create_task(self._off_spare(name, item))
                     self._moves.add(task)
                     task.add_done_callback(self._moves.discard)
@@ -910,8 +915,9 @@ class SessionManager:
                 sess.busy = False
 
     async def _off_spare(self, name: str, retry) -> None:
-        """Restart *name* on the main login and give it the failed turn again,
-        ahead of anything queued meanwhile. Resume keeps the conversation."""
+        """Restart *name* on the next spare account, or the main login when
+        none is left, and give it the failed turn again, ahead of anything
+        queued meanwhile. Resume keeps the conversation."""
         old = self._sessions.get(name)
         pending = []
         while old is not None and not old.queue.empty():

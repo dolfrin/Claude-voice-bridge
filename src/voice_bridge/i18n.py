@@ -74,10 +74,12 @@ EN.update({
     "usage.others_title": "👥 Other accounts (last state seen on this PC):",
     "usage.other_line": "• {star}{account} · seen {seen}",
     "usage.others_none": "will appear here once you log in to them on this PC",
-    "usage.spare_title": "🪙 Spare account (the bridge's own sessions)",
+    "usage.spares_title": "🪙 Spare accounts (background work; the one expiring first is used first, the main account when all are used up):",
+    "usage.spare_title": "• {name}",
     "usage.spare_window": "{title} {pct} % · resets {reset}",
-    "usage.spare_spent": "🪙 Spare account used up until {until} — the bridge's sessions run on the main account (above) meanwhile",
-    "usage.spare_unknown": "🪙 Spare account set up — its limit shows here after its first answer",
+    "usage.spare_spent": "• {name}: used up until {until}",
+    "usage.spare_unknown": "• {name}: its limits show here after its first answer",
+    "usage.spare_next": "← next",
     "usage.legend": "🟦 this PC · 🟩 other devices (or not split yet) · ⬜ left",
     "usage.footnote": (
         "% — of your limit. \"This PC\" and the sessions are estimates (≈): every "
@@ -121,10 +123,12 @@ LT.update({
     "usage.others_title": "👥 Kitos paskyros (paskutinė šiame PC matyta būsena):",
     "usage.other_line": "• {star}{account} · matyta {seen}",
     "usage.others_none": "atsiras čia, kai prie jų prisijungsi šiame PC",
-    "usage.spare_title": "🪙 Atsarginė paskyra (tilto sesijos)",
+    "usage.spares_title": "🪙 Atsarginės paskyros (darbai fone; pirma naudojama ta, kurios limitas baigiasi anksčiausiai, kai visos išnaudotos — pagrindinė):",
+    "usage.spare_title": "• {name}",
     "usage.spare_window": "{title} {pct} % · atsinaujina {reset}",
-    "usage.spare_spent": "🪙 Atsarginė paskyra išnaudota iki {until} — tuo metu tilto sesijos dirba pagrindine paskyra (viršuje)",
-    "usage.spare_unknown": "🪙 Atsarginė paskyra paruošta — jos limitas atsiras čia po pirmo atsakymo",
+    "usage.spare_spent": "• {name}: išnaudota iki {until}",
+    "usage.spare_unknown": "• {name}: limitai atsiras čia po pirmo atsakymo",
+    "usage.spare_next": "← kita",
     "usage.legend": "🟦 šis PC · 🟩 kiti įrenginiai (ar dar neišskirta) · ⬜ liko",
     "usage.footnote": (
         "% — nuo tavo limito. „Šis PC“ ir sesijos yra įvertis (≈): skaičiuojamos "

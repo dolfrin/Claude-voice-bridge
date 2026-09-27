@@ -466,8 +466,8 @@ def _session_lines(root: Path, turns: list, now: float, k: float | None) -> list
     return lines
 
 
-def _spare_line(spare: dict, now: float) -> str:
-    """The spare account as its bridge sessions last reported it."""
+def _spare_line(name: str, spare: dict, now: float, is_next: bool = False) -> str:
+    """One spare account as its sessions last reported it."""
     windows = [
         t("usage.spare_window", title=title, pct=f"{float(w['utilization']) * 100:.0f}",
           reset=_stamp(w["resetsAt"], now))
@@ -476,14 +476,16 @@ def _spare_line(spare: dict, now: float) -> str:
         and w.get("utilization") is not None and w.get("resetsAt")
     ]
     if (spare.get("until") or 0) > now:
-        head = t("usage.spare_spent", until=_stamp(spare["until"], now))
+        head = t("usage.spare_spent", name=name, until=_stamp(spare["until"], now))
     elif windows or spare.get("utilization") is not None:
-        head = t("usage.spare_title")
+        head = t("usage.spare_title", name=name)
         if not windows:
             windows = [t("usage.spare_window", title="", pct=f"{spare['utilization'] * 100:.0f}",
                          reset=_stamp(spare["resets_at"], now) if spare.get("resets_at") else "?")]
     else:
-        return t("usage.spare_unknown")
+        head, windows = t("usage.spare_unknown", name=name), []
+    if is_next:
+        head += " " + t("usage.spare_next")
     return "\n".join([head] + ["  " + w for w in windows])
 
 
@@ -569,9 +571,11 @@ def format_usage(ledger: Path, home: Path | None = None, now: float | None = Non
             lines.append(t("usage.other_line", star=star, account=_account_line(acc, now), seen=_stamp(acc["seen"], now)))
     else:
         lines.append("  " + t("usage.others_none"))
-    spare = spare_account.status(ledger.parent)
-    if spare is not None:
-        lines += ["", _spare_line(spare, now)]
+    spares = spare_account.status(ledger.parent)
+    if spares:
+        next_one = spare_account.Spares(ledger.parent).pick()
+        lines += ["", t("usage.spares_title")]
+        lines += [_spare_line(name, acc, now, name == next_one) for name, acc in spares]
     lines += [
         "",
         t("usage.legend"),
