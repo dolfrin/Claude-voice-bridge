@@ -2508,7 +2508,7 @@ class TelegramIO:
         """The live session this chat is driving, or None."""
         return self._live_session if self._claude_live_enabled else None
 
-    async def live_send(self, text: str, spoken: bool = False) -> bool:
+    async def live_send(self, text: str, spoken: bool = False, movable: bool = True) -> bool:
         """Deliver *text* into the attached live session. False if not attached
         or the socket refused (the envelope is Claude Code's internal wire
         format, so a future release can break it without warning).
@@ -2516,7 +2516,10 @@ class TelegramIO:
         ``spoken`` says the message arrived as a voice note, which is how the
         stream decides whether to answer out loud: away from the keyboard you
         talk and want to be talked back to, at the desk a voice note is just
-        noise over the text you are already reading."""
+        noise over the text you are already reading.
+
+        ``movable`` False: the message was just moved here by "↪️", so no
+        "↪️" is offered again -- each one bounced it back the other way."""
         if not self._claude_live_enabled:
             return False
         session = self._live_session
@@ -2525,7 +2528,7 @@ class TelegramIO:
         self._live_spoken = spoken
         try:
             await live.send(session.socket_path, text)
-            await self._note_if_busy(session, text)
+            await self._note_if_busy(session, text if movable else "")
             return True
         except Exception:  # noqa: BLE001 - never crash the inbound path
             logger.exception("live: send failed for pid %s", session.pid)
@@ -2571,11 +2574,11 @@ class TelegramIO:
         match = next((x for x in sessions if x.session_id == session_id), None)
         return match is not None and await self._send_to(match, text, spoken)
 
-    async def _send_to(self, session, text: str, spoken: bool) -> bool:
+    async def _send_to(self, session, text: str, spoken: bool, movable: bool = True) -> bool:
         """Attach to *session* (so its answer streams back) and send *text*."""
         if self._live_session is None or self._live_session.pid != session.pid:
             await self._attach_live(str(session.pid), why="message routed there")
-        sent = await self.live_send(text, spoken=spoken)
+        sent = await self.live_send(text, spoken=spoken, movable=movable)
         if sent:
             await self.note_route(
                 session.session_id, self.session_label(session),
@@ -2705,8 +2708,10 @@ class TelegramIO:
                 await live.send(wrong.socket_path, t("move.ignore", text=text[:200]))
             except Exception:  # noqa: BLE001 - the move itself matters more
                 logger.exception("move: could not tell %s to disregard", wrong_id)
-        self._last_route = None  # say where it went now
-        moved = await self._send_to(target, text, self._live_spoken)
+        # The edited button below says where it went; a fresh "➡️ … ↪️"
+        # notice would only offer to move it straight back.
+        self._last_route = target.session_id
+        moved = await self._send_to(target, text, self._live_spoken, movable=False)
         await self._edit_callback_markup(query, InlineKeyboardMarkup([[InlineKeyboardButton(
             t("move.done", label=self.session_label(target)[:40]) if moved else t("move.gone"),
             callback_data="noop:",

@@ -4080,9 +4080,49 @@ async def test_with_several_sessions_open_a_message_can_be_moved(monkeypatch):
     query.from_user = MagicMock(id=42)
     await io._handle_callback(MagicMock(callback_query=query), MagicMock())
 
-    io._send_to.assert_awaited_once_with(bridge, "padaryk README", False)
+    io._send_to.assert_awaited_once_with(bridge, "padaryk README", False, movable=False)
     assert socket_sends and socket_sends[0][0] == "/s/q"  # qwing told to disregard
     assert "Nekreipk dėmesio" in socket_sends[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_moved_message_is_not_offered_to_move_back(monkeypatch):
+    """Every move used to post a fresh "↪️" pointing back, and one message
+    bounced between two sessions five times in 18 s (2026-09-27)."""
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    a = SimpleNamespace(pid=1, session_id="a", cwd="/p/x", socket_path="/s/a", status="idle", last_active=1)
+    b = SimpleNamespace(pid=2, session_id="b", cwd="/p/x", socket_path="/s/b", status="busy", last_active=2,
+                        status_since=0, updated_at=0)
+    monkeypatch.setattr(live_mod, "list_sessions", lambda d: [a, b])
+    monkeypatch.setattr(live_mod, "find", lambda pid, d: {1: a, 2: b}[pid])
+    monkeypatch.setattr(live_mod, "send", AsyncMock())
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._send_plain = AsyncMock(return_value=MagicMock(message_id=5))
+    io._show_target = AsyncMock()
+    io.session_label = lambda s: s.session_id
+
+    async def attach(pid, why=""):
+        io._live_session = {1: a, 2: b}[int(pid)]
+
+    io._attach_live = attach
+    io._live_session = a
+    await io.note_route("a", "a", session_id="a", cwd="/p/x", text="tau")
+    button = io._send_plain.await_args.args[1].inline_keyboard[0][0]
+    io._send_plain.reset_mock()
+
+    query = AsyncMock()
+    query.data = button.callback_data
+    query.from_user = MagicMock(id=42)
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    assert io._live_session is b
+    for call in io._send_plain.await_args_list:  # b is busy: its line, no way back
+        markup = call.args[1] if len(call.args) > 1 else None
+        texts = [x.text for row in (markup.inline_keyboard if markup else []) for x in row]
+        assert not any(x.startswith("↪️") for x in texts), texts
 
 
 # --------------------------------------------------------------------------
@@ -4351,7 +4391,7 @@ async def test_busy_notice_names_the_step_and_both_durations(monkeypatch, tmp_pa
     started = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(_time.time() - 180))
     transcript.write_text(_json.dumps({"type": "assistant", "timestamp": started, "message": {"content": [
         {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "pytest -x"}}]}}) + "\n")
-    busy = SimpleNamespace(pid=4, session_id="q", cwd="/p/q", socket_path="/s", status="busy",
+    busy = SimpleNamespace(pid=4, session_id="q", cwd="/p/q", socket_path="/s", status="busy", last_active=2,
                            started_at=0, status_since=int((_time.time() - 3900) * 1000))
     monkeypatch.setattr(live_mod, "find", lambda pid, d: busy)
     monkeypatch.setattr(live_mod, "transcript_of", lambda root, sid: transcript)
