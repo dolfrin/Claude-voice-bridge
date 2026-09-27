@@ -135,6 +135,8 @@ def build_projects_list_markup(
         if page < pages - 1:
             nav.append(InlineKeyboardButton("▶", callback_data=f"menu:projects_all:{page + 1}"))
         rows.append(nav)
+    if not show_all and len(_project_list_rows(snapshot, show_all=True)) > len(_project_list_rows(snapshot)):
+        rows.append([InlineKeyboardButton(t("menu.all"), callback_data="menu:projects_all")])
     return InlineKeyboardMarkup(rows)
 
 

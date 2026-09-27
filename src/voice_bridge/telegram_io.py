@@ -1370,6 +1370,10 @@ class TelegramIO:
         if action == "home":
             await self._handle_home(query, index_str)
             return
+        if action == "pinchats":
+            text, markup = self._chats()
+            await query.message.reply_text(text, reply_markup=markup)
+            return
         if action == "newc":
             snap = self.controls.snapshot()
             if index_str.isdigit() and int(index_str) < len(snap):
@@ -1612,7 +1616,10 @@ class TelegramIO:
             # Reply with a fresh PLAIN message (like cost/recap) so the
             # HTML-free policy text is never parsed as HTML, and the menu stays.
             policies = await self.controls.list_policies()
-            await query.message.reply_text(_format_policies(policies))
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton(t("policies.clear_button"), callback_data="polclr:")
+            ]]) if policies else None
+            await query.message.reply_text(_format_policies(policies), reply_markup=markup)
 
     async def _edit_callback_markup(self, query, new_markup: InlineKeyboardMarkup) -> None:
         try:
@@ -2970,6 +2977,9 @@ class TelegramIO:
             return
         self._target_label = label
         text = t("target.pinned", label=label) if label else t("target.none")
+        # Its own action: "home:" edits the message in place, which would
+        # replace the pinned line itself.
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(t("home.chats"), callback_data="pinchats:")]])
         bot = self.app.bot
         pinned = None
         try:
@@ -2979,13 +2989,15 @@ class TelegramIO:
         try:
             if pinned:
                 try:
-                    await bot.edit_message_text(chat_id=self._chat_id, message_id=pinned, text=text)
+                    await bot.edit_message_text(
+                        chat_id=self._chat_id, message_id=pinned, text=text, reply_markup=markup
+                    )
                     return
                 except BadRequest as exc:
                     if "not modified" in str(exc).lower():
                         return
             message = await bot.send_message(
-                chat_id=self._chat_id, text=text, disable_notification=True
+                chat_id=self._chat_id, text=text, disable_notification=True, reply_markup=markup
             )
             await bot.pin_chat_message(
                 chat_id=self._chat_id, message_id=message.message_id, disable_notification=True

@@ -4167,6 +4167,26 @@ async def test_current_session_is_pinned_then_edited_in_place(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pinned_line_opens_conversations_without_replacing_itself(tmp_path):
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._pin_file = tmp_path / "pin.json"
+    io.app = MagicMock()
+    io.app.bot = AsyncMock()
+    io.app.bot.send_message.return_value = MagicMock(message_id=70)
+    await io._show_target("Qwing · testai")
+    button = io.app.bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+    assert "/live" not in io.app.bot.send_message.await_args.kwargs["text"]
+
+    query = AsyncMock()
+    query.data = button.callback_data
+    query.from_user = MagicMock(id=42)
+    await io._handle_callback(MagicMock(callback_query=query), MagicMock())
+
+    query.message.reply_text.assert_awaited_once()     # a new message...
+    query.edit_message_text.assert_not_awaited()        # ...the pin stays
+
+
+@pytest.mark.asyncio
 async def test_write_here_button_makes_that_session_current(monkeypatch):
     from types import SimpleNamespace
 
@@ -4466,3 +4486,16 @@ async def test_home_screens_escape_titles_for_html(monkeypatch):
 
     text = query.edit_message_text.await_args.kwargs["text"]
     assert "&lt;b&gt; &amp; c" in text and "<b>" not in text
+
+
+def test_project_list_offers_all_only_when_some_are_hidden():
+    from voice_bridge.telegram_views import build_projects_list_markup
+
+    def row(name, on):
+        return {"project": name, "display_name": name, "enabled": on, "last_active": False}
+
+    def callbacks(snap):
+        return [b.callback_data for r in build_projects_list_markup(snap).inline_keyboard for b in r]
+
+    assert "menu:projects_all" in callbacks([row("a", True), row("b", False)])
+    assert "menu:projects_all" not in callbacks([row("a", True), row("b", True)])
