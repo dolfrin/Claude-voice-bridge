@@ -860,6 +860,23 @@ async def test_make_inbound_disabled_target_asks_to_enable_and_send():
     assert telegram.disabled_prompts == [("qwing", "go")]
 
 
+@pytest.mark.asyncio
+async def test_make_inbound_disabled_project_open_in_editor_goes_there():
+    """Off pauses the bridge's own session; the user's open editor session
+    still gets the message instead of an "enable and send?" prompt."""
+    store = FakeStore(by_message={42: "qwing"}, enabled={"qwing": False})
+    sessions = FakeSessions([FakeProject("qwing")])
+    telegram = FakeTelegram()
+    telegram.live_route_result = True
+
+    inbound = _inbound(FakeTranscriber(), store, FakeApprovals(), sessions, telegram)
+    await inbound(_msg(reply_to=42, text="go"))
+
+    assert telegram.live_routed == [("/tmp/qwing", "go")]
+    assert telegram.disabled_prompts == []
+    assert sessions.delivered == []
+
+
 # --------------------------------------------------------------------------- #
 # parse_name_prefix (pure)
 # --------------------------------------------------------------------------- #
@@ -2629,6 +2646,28 @@ async def test_schedule_deliver_closure_checks_enabled():
     await deliver("off", "should skip")
 
     assert sessions.delivered == [("qwing", "check CI")]
+
+
+@pytest.mark.asyncio
+async def test_schedule_deliver_prefers_the_open_editor_session():
+    from voice_bridge.bridge import _make_schedule_deliver
+
+    posted = []
+
+    class Tg:
+        async def live_post(self, cwd, text):
+            posted.append((cwd, text))
+            return cwd == "/tmp/open"
+
+    store = FakeStore(enabled={"open": True, "closed": True})
+    sessions = FakeSessions([FakeProject("open"), FakeProject("closed")])
+    deliver = _make_schedule_deliver(sessions, store, Tg())
+
+    assert await deliver("open", "check CI") is True
+    assert await deliver("closed", "check CI") is True
+
+    assert posted == [("/tmp/open", "check CI"), ("/tmp/closed", "check CI")]
+    assert sessions.delivered == [("closed", "check CI")]  # only where nothing is open
 
 
 @pytest.mark.asyncio

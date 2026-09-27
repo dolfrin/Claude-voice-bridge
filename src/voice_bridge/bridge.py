@@ -536,25 +536,25 @@ def make_inbound(
             await telegram.send_question("bridge", t("inbound.which_project", names=names).strip())
             return
         text = await _attach_files_to_prompt(project, text, msg, sessions)
-        if reason == "off":
-            await telegram.send_disabled_project_prompt(project, text)
-            return
-        if urgent and hasattr(sessions, "interrupt"):
-            await sessions.interrupt(project)
-        # Prefer the editor session already open on this project: work stays in
-        # the ONE place the user is actually looking at, instead of the bridge
-        # spawning a second, invisible session for the same directory. Falls
-        # back to our own session when the editor has none open.
         # Mirror the channel back: a typed message means they are at a keyboard
         # and reading, so the answer stays text; a voice note means they are
         # not, so it gets read out. Recorded per project because two projects
         # can be talked to in different ways at the same time.
         spoken_by_project[project] = spoken
 
+        # Prefer the editor session already open on this project: work stays in
+        # the ONE place the user is actually looking at, instead of the bridge
+        # spawning a second, invisible session for the same directory. Checked
+        # before "off": off pauses the bridge's own session, not the user's.
         proj = sessions.project(project) if hasattr(sessions, "project") else None
         if proj is not None and await telegram.live_route(proj.cwd, text, spoken=spoken):
             logger.info("route: -> project %s, its open editor session", project)
             return
+        if reason == "off":
+            await telegram.send_disabled_project_prompt(project, text)
+            return
+        if urgent and hasattr(sessions, "interrupt"):
+            await sessions.interrupt(project)
         # Nothing open on this project here. Starting a conversation for it
         # asks where (VS Code or background) unless that was already chosen.
         await store.set_last_active(project)
@@ -1174,7 +1174,7 @@ def _local_now() -> tuple[str, str]:
 
 
 def _make_schedule_deliver(
-    sessions: SessionController, store: Store
+    sessions: SessionController, store: Store, telegram: "TelegramIO | None" = None
 ) -> Callable[[str, str], Awaitable[bool]]:
     """Build the scheduler's deliver closure: the SAME path an inbound turn uses.
 
@@ -1185,7 +1185,9 @@ def _make_schedule_deliver(
     prompt goes through ``sessions.deliver`` so the project's normal outbound
     (voice+text to Telegram) reports back exactly as if the user had typed it.
     Kept a thin closure so :func:`run_scheduler` stays store/session agnostic and
-    unit-testable.
+    unit-testable. When the editor has a session open on the project, the turn
+    goes there instead, like any other message -- without making it the
+    current session, which only the user changes.
     """
 
     async def deliver(project: str, prompt: str) -> bool:
@@ -1195,6 +1197,10 @@ def _make_schedule_deliver(
                 project,
             )
             return False
+        proj = sessions.project(project) if hasattr(sessions, "project") else None
+        if telegram is not None and proj is not None and await telegram.live_post(proj.cwd, prompt):
+            logger.info("scheduler: %s -> its open editor session", project)
+            return True
         await sessions.deliver(project, prompt)
         return True
 
@@ -1590,7 +1596,7 @@ async def run_until_stopped(wiring: Wiring, stop: asyncio.Event) -> None:
     scheduler_task = asyncio.create_task(
         run_scheduler(
             wiring.store,
-            _make_schedule_deliver(wiring.sessions, wiring.store),
+            _make_schedule_deliver(wiring.sessions, wiring.store, wiring.telegram),
             _make_schedule_notify(wiring.telegram),
             stop,
             now_fn=_local_now,

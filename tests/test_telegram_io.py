@@ -4086,6 +4086,25 @@ async def test_with_several_sessions_open_a_message_can_be_moved(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_live_post_reaches_the_open_session_without_switching(monkeypatch):
+    from types import SimpleNamespace
+
+    import voice_bridge.live as live_mod
+
+    open_one = SimpleNamespace(pid=1, session_id="o", cwd="/p/x", socket_path="/s/o", last_active=1)
+    monkeypatch.setattr(live_mod, "list_sessions", lambda d: [open_one])
+    send = AsyncMock()
+    monkeypatch.setattr(live_mod, "send", send)
+    io = TelegramIO(make_cfg(), AsyncMock(), FakeControls())
+    io._attach_live = AsyncMock()
+
+    assert await io.live_post("/p/x", "check CI") is True
+    assert await io.live_post("/p/other", "check CI") is False
+    send.assert_awaited_once_with("/s/o", "check CI")
+    io._attach_live.assert_not_awaited()  # the current session stays the user's
+
+
+@pytest.mark.asyncio
 async def test_a_moved_message_is_not_offered_to_move_back(monkeypatch):
     """Every move used to post a fresh "↪️" pointing back, and one message
     bounced between two sessions five times in 18 s (2026-09-27)."""

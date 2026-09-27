@@ -2557,6 +2557,22 @@ class TelegramIO:
             return False
         return await self._send_to(best, text, spoken)
 
+    async def live_post(self, cwd: str, text: str) -> bool:
+        """Put *text* into the editor session open on *cwd*, if any, WITHOUT
+        making it the current session: for turns nobody typed (a scheduled
+        task). Its answer arrives as that session's "finished" notice."""
+        if not self._claude_live_enabled or not cwd or not text.strip():
+            return False
+        try:
+            best = _open_session_for(live.list_sessions(Path.home() / ".claude" / "sessions"), cwd)
+            if best is None:
+                return False
+            await live.send(best.socket_path, text)
+            return True
+        except Exception:  # noqa: BLE001 - the bridge session is the fallback
+            logger.exception("live: could not post to the session on %s", cwd)
+            return False
+
     async def live_send_to(self, session_id: str, text: str, spoken: bool = False) -> bool:
         """Send *text* into the session *session_id* if it is open on this PC.
 
