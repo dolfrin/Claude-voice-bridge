@@ -138,6 +138,31 @@ def test_an_answer_in_the_editor_withdraws_the_request(tmp_path):
     assert (spool(home) / "abc.gone").read_text() == "editor"
 
 
+def test_a_registry_caught_mid_write_is_not_a_closed_session(tmp_path):
+    # Claude Code rewrites its registry entry constantly; a torn read once
+    # withdrew the buttons while the dialog was still open.
+    home = make_home(tmp_path, status="waiting")
+    entry = home / ".claude" / "sessions" / "4242.json"
+
+    def on_poll(n):
+        if n == 2:
+            entry.write_text('{"pid": 4242, "sess')           # half-written
+        if n == 3:
+            set_status(home, "waiting")
+        if n == 5:
+            (spool(home) / "abc.ans").write_text("allow")
+
+    assert run_ask(home, on_poll)["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+
+def test_a_closed_session_hands_the_prompt_back(tmp_path):
+    home = make_home(tmp_path, status="waiting")
+    entry = home / ".claude" / "sessions" / "4242.json"
+
+    assert run_ask(home, lambda n: entry.unlink() if n == 2 else None) is None
+    assert (spool(home) / "abc.gone").read_text() == "closed"
+
+
 def test_busy_before_the_dialog_opens_is_not_an_answer(tmp_path):
     # The hook can start before the registry turns "waiting".
     home = make_home(tmp_path, status="busy")

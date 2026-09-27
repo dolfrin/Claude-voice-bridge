@@ -38,6 +38,9 @@ NOT_ENGAGED = 3
 # The bridge rewrites its heartbeat every second; older than this = it is down.
 _ALIVE_FOR = 15
 _POLL = 0.5
+# Claude Code rewrites its registry entry all the time, so one read can catch
+# it half-written. Only this many misses in a row mean the session is gone.
+_GONE_AFTER = 6
 # Stay under the hook timeout registered in settings.json (3600 s), so the hook
 # always withdraws its own request instead of being killed mid-wait.
 _DEADLINE = 3540
@@ -150,6 +153,7 @@ def ask(hook: dict, home: Path, *, clock=time.time, sleep=time.sleep,
 
     reason = "timeout"
     seen_waiting = False
+    missing = 0
     deadline = clock() + _DEADLINE
     try:
         while clock() < deadline:
@@ -159,9 +163,13 @@ def ask(hook: dict, home: Path, *, clock=time.time, sleep=time.sleep,
                 reason = "bridge"
                 break
             entry = _session_entry(home, session_id)
-            if entry is None:
+            missing = missing + 1 if entry is None else 0
+            if missing >= _GONE_AFTER:
                 reason = "closed"
                 break
+            if entry is None:
+                sleep(_POLL)
+                continue
             # ponytail: one status for the whole session -- with two prompts
             # open at once, answering one in the editor is noticed only when
             # both are settled. Match on the tool_use_id in the transcript if
