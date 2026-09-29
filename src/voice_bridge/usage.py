@@ -362,7 +362,7 @@ def _window_samples(samples: list[dict], account: str, key: str, reset: float, s
 
 
 def _pct_per_token(samples: list[dict], account: str, key: str) -> float | None:
-    """Smallest %-per-weighted-token seen for this account and limit.
+    """Smallest %-per-weighted-token seen for this account's plan and limit.
 
     Within one window (same reset, same login) the limit's percentage and this
     PC's cumulative tokens both only grow, so the rise of one against the rise
@@ -370,12 +370,21 @@ def _pct_per_token(samples: list[dict], account: str, key: str) -> float | None:
     When the window lies wholly inside the login, its start (0 %, 0 tokens) is
     a valid origin too. Other devices only ever make a ratio larger, hence the
     minimum across windows.
+
+    A token costs the same share of the limit on every account of one plan,
+    so windows of the other accounts on that plan count too. It matters when
+    several PCs share an account all day: this PC never works on it alone,
+    every window of it is inflated by the others, and on 2026-09-29 this PC
+    was shown the whole rise (34 %) while an account of the same plan priced
+    a token at 2.5x less.
     """
+    tier = next((s.get("tier") for s in samples if s["account"] == account and s.get("tier")), None)
     windows: dict[tuple, list[dict]] = defaultdict(list)
     for s in samples:
         w = s.get("w", {}).get(key)
-        if s["account"] == account and w and w.get("u") is not None:
-            windows[(round(w["r"] / 300), w["s"])].append(w | {"ts": s["ts"]})
+        same_plan = s["account"] == account or (tier is not None and s.get("tier") == tier)
+        if same_plan and w and w.get("u") is not None:
+            windows[(s["account"], round(w["r"] / 300), w["s"])].append(w | {"ts": s["ts"]})
     ratios = []
     for group in windows.values():
         group.sort(key=lambda x: x["ts"])

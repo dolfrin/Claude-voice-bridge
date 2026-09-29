@@ -85,6 +85,29 @@ def test_estimate_after_calibration_is_capped_by_account_total(home, monkeypatch
     assert "≈ 10 % — proj" in text  # the session, in % of the LIMIT
 
 
+def test_a_token_is_priced_from_every_account_on_the_same_plan(home, monkeypatch):
+    """Several PCs sharing an account all day inflate every window of it;
+    another account of the same plan, used on this PC alone, prices a token
+    right (2026-09-29: 34 % shown, ~14 % real)."""
+    now = 1_800_000_000.0
+    transcript = home / ".claude" / "projects" / "p" / "s1.jsonl"
+    transcript.write_text(_turn(now - 10 * 60, "a", 200) + "\n")  # 1000 weighted
+    os.utime(transcript, (now, now))
+    ledger = home / "ledger.jsonl"
+    _login(home, "acc-A", now - 30 * 24 * HOUR)
+    _limits(monkeypatch, 10, 10, now)          # A, this PC alone: 0.01 %/token
+    usage.take_sample(home, ledger, now)
+
+    later = now + 8 * 24 * HOUR                 # other windows, other account
+    transcript.write_text(_turn(later - 60, "b", 400) + "\n")  # 2000 weighted
+    os.utime(transcript, (later, later))
+    _login(home, "acc-B", later - 30 * 24 * HOUR)
+    _limits(monkeypatch, 80, 80, later)        # B shared with two more PCs
+    text = usage.format_usage(ledger, home, later)
+
+    assert "≈ 20 %, iš jų:" in text             # 2000 x 0.01, not the whole 80 %
+
+
 def test_switching_account_restarts_attribution(home, monkeypatch):
     now = 1_800_000_000.0
     ledger = home / "ledger.jsonl"
