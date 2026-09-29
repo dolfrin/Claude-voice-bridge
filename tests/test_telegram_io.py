@@ -3872,7 +3872,30 @@ async def test_cmd_usage_replies_with_usage_report(monkeypatch):
 
     await io._cmd_cost(upd, make_ctx([]))
 
-    upd.message.reply_text.assert_awaited_once_with("5 val.: 7 %")
+    upd.message.reply_text.assert_awaited_once_with("5 val.: 7 %", reply_markup=None)
+
+
+@pytest.mark.asyncio
+async def test_usage_offers_a_switch_to_each_other_saved_account(monkeypatch):
+    import voice_bridge.accounts as accounts_mod
+    import voice_bridge.usage as usage_mod
+    monkeypatch.setattr(usage_mod, "format_usage", lambda ledger: "Savaitė: 29 %")
+    monkeypatch.setattr(accounts_mod, "remember", lambda home, vault: "u-now")
+    monkeypatch.setattr(accounts_mod, "known", lambda vault: [
+        {"uuid": "u-now", "email": "now@x", "usable": True},
+        {"uuid": "u-b", "email": "b@x", "usable": True},
+        {"uuid": "u-old", "email": "old@x", "usable": False},
+    ])
+    cfg = make_cfg()
+    cfg.claude_account_switching = True
+    io = TelegramIO(cfg, AsyncMock(), FakeControls())
+    upd = make_cmd_update("/usage")
+
+    await io._cmd_cost(upd, make_ctx([]))
+
+    markup = upd.message.reply_text.await_args.kwargs["reply_markup"]
+    assert [(b.text, b.callback_data) for r in markup.inline_keyboard for b in r] == [
+        ("👤 Perjungti šį PC į b@x", "acct:u-b")]      # asks to confirm before switching
 
 
 @pytest.mark.asyncio
@@ -3887,7 +3910,7 @@ async def test_callback_cost_replies_with_usage_and_does_not_rerender(monkeypatc
 
     await io._handle_callback(MagicMock(callback_query=query), MagicMock())
 
-    query.message.reply_text.assert_awaited_once_with("Savaitė: 29 %")
+    query.message.reply_text.assert_awaited_once_with("Savaitė: 29 %", reply_markup=None)
     query.edit_message_reply_markup.assert_not_awaited()
 
 

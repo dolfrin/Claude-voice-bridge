@@ -1423,7 +1423,7 @@ class TelegramIO:
             return
         if action == "cost":
             # Info action: reply with a fresh message, do not touch the panel.
-            await query.message.reply_text(await asyncio.to_thread(usage.format_usage, self.usage_ledger))
+            await self._reply_usage(query.message)
             return
         if action == "recap":
             await query.message.reply_text(self.controls.recap())
@@ -2362,7 +2362,24 @@ class TelegramIO:
         msg = update.message
         if msg is None or not self._allowed(msg.from_user.id):
             return
-        await msg.reply_text(await asyncio.to_thread(usage.format_usage, self.usage_ledger))
+        await self._reply_usage(msg)
+
+    async def _reply_usage(self, message) -> None:
+        """The /usage text, with a switch button per other saved account:
+        /usage is where the accounts and their limits are seen, and the
+        switch hidden two screens away under "🛠" went unnoticed."""
+        text = await asyncio.to_thread(usage.format_usage, self.usage_ledger)
+        rows = []
+        if getattr(self.cfg, "claude_account_switching", False):
+            with contextlib.suppress(Exception):  # the numbers matter more than the buttons
+                current = await asyncio.to_thread(accounts.remember, Path.home(), self._vault())
+                rows = [
+                    [InlineKeyboardButton(t("account.switch_to", email=acc["email"]),
+                                          callback_data=f"acct:{acc['uuid']}")]
+                    for acc in await asyncio.to_thread(accounts.known, self._vault())
+                    if acc["usable"] and acc["uuid"] != current
+                ]
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows) if rows else None)
 
     async def _cmd_policies(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
